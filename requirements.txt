@@ -2,3 +2,4 @@ groq
 llama-index-core
 llama-index-llms-groq
 python-dotenv
+pytest
