@@ -1,0 +1,28 @@
+# Environment variables (NEVER commit these!)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs
+logs/
+*.log
+
+# Uploads
+uploads/
+
+# Data files
+conversation_memory.json
+fact_memory.json
+notes.txt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
