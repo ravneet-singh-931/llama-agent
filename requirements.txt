@@ -1,5 +1,27 @@
+# ============================================
+# Llama Agent - Advanced Requirements
+# ============================================
+
+# --- AI / LLM ---
 groq
 llama-index-core
 llama-index-llms-groq
+
+# --- Environment ---
 python-dotenv
+
+# --- Testing ---
 pytest
+pytest-cov
+
+# --- Code Quality ---
+flake8
+black
+isort
+
+# --- Security ---
+safety
+bandit
+
+# --- Coverage Reporting ---
+coverage
