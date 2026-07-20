@@ -23,4 +23,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ravneetpng/llama-agent:latest
+          tags: ravneet231/llama-agent:latest
