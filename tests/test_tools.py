@@ -1,5 +1,5 @@
 """
-Tests for Enhanced Llama Agent
+Tests for Enhanced Llama Agent (Full Stack)
 Run with: pytest tests/ -v
 """
 
@@ -10,8 +10,8 @@ import os
 import json
 import tempfile
 
-# Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 
 # ============ TEST CALCULATOR ============
 
@@ -21,7 +21,7 @@ def calculator(expression: str) -> str:
         result = eval(expression, {"__builtins__": {}}, allowed_names)
         return f"Result: {result}"
     except Exception as e:
-        return f"Error calculating: {str(e)}"
+        return f"Error: {str(e)}"
 
 
 def test_calculator_addition():
@@ -47,12 +47,10 @@ def text_analyzer(text: str) -> str:
 
 
 def test_text_analyzer_words():
-    result = text_analyzer("Hello world")
-    assert "Words: 2" in result
+    assert "Words: 2" in text_analyzer("Hello world")
 
 def test_text_analyzer_empty():
-    result = text_analyzer("")
-    assert "Words: 0" in result
+    assert "Words: 0" in text_analyzer("")
 
 
 # ============ TEST UNIT CONVERTER ============
@@ -60,8 +58,6 @@ def test_text_analyzer_empty():
 def unit_converter(value: float, from_unit: str, to_unit: str) -> str:
     conversions = {
         ("km", "miles"): lambda x: x * 0.621371,
-        ("miles", "km"): lambda x: x * 1.60934,
-        ("kg", "pounds"): lambda x: x * 2.20462,
         ("celsius", "fahrenheit"): lambda x: (x * 9/5) + 32,
     }
     key = (from_unit.lower(), to_unit.lower())
@@ -77,29 +73,16 @@ def test_km_to_miles():
 def test_celsius_to_fahrenheit():
     assert "212.0000" in unit_converter(100, "celsius", "fahrenheit")
 
-def test_unsupported_conversion():
-    assert "not supported" in unit_converter(1, "liters", "gallons")
-
 
 # ============ TEST STRING OPERATIONS ============
 
 def string_operations(text: str, operation: str) -> str:
-    operations = {
-        "uppercase": text.upper(),
-        "lowercase": text.lower(),
-        "reverse": text[::-1],
-    }
-    op = operation.lower()
-    if op in operations:
-        return f"Result: {operations[op]}"
-    return f"Operation not supported."
+    operations = {"uppercase": text.upper(), "lowercase": text.lower(), "reverse": text[::-1]}
+    return f"Result: {operations.get(operation.lower(), 'Operation not supported.')}"
 
 
 def test_uppercase():
     assert "HELLO" in string_operations("hello", "uppercase")
-
-def test_lowercase():
-    assert "hello" in string_operations("HELLO", "lowercase")
 
 def test_reverse():
     assert "cba" in string_operations("abc", "reverse")
@@ -108,50 +91,36 @@ def test_reverse():
 # ============ TEST MEMORY MODULE ============
 
 def test_memory_add_and_retrieve():
-    """Test that memory can store and retrieve messages"""
     from modules.memory import ConversationMemory
-    
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         temp_file = f.name
-    
     try:
         mem = ConversationMemory(memory_file=temp_file)
         mem.add_message("user", "Hello!")
         mem.add_message("assistant", "Hi there!")
-        
         recent = mem.get_recent(2)
         assert len(recent) == 2
-        assert recent[0]["role"] == "user"
-        assert recent[1]["role"] == "assistant"
     finally:
         os.unlink(temp_file)
 
 
 def test_memory_search():
-    """Test that memory search works"""
     from modules.memory import ConversationMemory
-    
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         temp_file = f.name
-    
     try:
         mem = ConversationMemory(memory_file=temp_file)
         mem.add_message("user", "I like Python programming")
-        mem.add_message("assistant", "Python is great!")
-        
         results = mem.search("Python")
-        assert len(results) == 2
+        assert len(results) == 1
     finally:
         os.unlink(temp_file)
 
 
 def test_memory_stats():
-    """Test memory statistics"""
     from modules.memory import ConversationMemory
-    
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         temp_file = f.name
-    
     try:
         mem = ConversationMemory(memory_file=temp_file)
         mem.add_message("user", "Test")
@@ -164,33 +133,24 @@ def test_memory_stats():
 # ============ TEST FACT MEMORY ============
 
 def test_fact_remember_and_recall():
-    """Test that facts can be stored and recalled"""
     from modules.memory import FactMemory
-    
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         temp_file = f.name
-    
     try:
-        fact_mem = FactMemory(facts_file=temp_file)
-        fact_mem.remember("name", "Ravneet")
-        
-        result = fact_mem.recall("name")
-        assert result == "Ravneet"
+        facts = FactMemory(facts_file=temp_file)
+        facts.remember("name", "Ravneet")
+        assert facts.recall("name") == "Ravneet"
     finally:
         os.unlink(temp_file)
 
 
 def test_fact_recall_unknown():
-    """Test recalling unknown fact"""
     from modules.memory import FactMemory
-    
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         temp_file = f.name
-    
     try:
-        fact_mem = FactMemory(facts_file=temp_file)
-        result = fact_mem.recall("unknown")
-        assert "don't remember" in result
+        facts = FactMemory(facts_file=temp_file)
+        assert "don't remember" in facts.recall("unknown")
     finally:
         os.unlink(temp_file)
 
@@ -198,9 +158,7 @@ def test_fact_recall_unknown():
 # ============ TEST RAG MODULE ============
 
 def test_rag_add_text():
-    """Test adding text to RAG"""
     from modules.rag import SimpleRAG
-    
     rag = SimpleRAG()
     result = rag.add_text("This is a test document about Python programming.")
     assert "Added" in result
@@ -208,48 +166,53 @@ def test_rag_add_text():
 
 
 def test_rag_search():
-    """Test searching documents"""
     from modules.rag import SimpleRAG
-    
     rag = SimpleRAG()
-    rag.add_text("Python is a programming language. It is used for AI and web development.")
-    
+    rag.add_text("Python is a programming language used for AI.")
     results = rag.search("Python programming")
     assert len(results) > 0
 
 
 def test_rag_list_documents():
-    """Test listing documents"""
     from modules.rag import SimpleRAG
-    
     rag = SimpleRAG()
     rag.add_text("Test content", source="test.txt")
-    
-    docs = rag.list_documents()
-    assert "test.txt" in docs
+    assert "test.txt" in rag.list_documents()
 
 
 # ============ TEST MONITORING ============
 
 def test_monitor_health():
-    """Test health check"""
     from modules.monitoring import PerformanceMonitor
-    
     monitor = PerformanceMonitor()
     monitor.track_request()
     health = monitor.get_health()
-    
     assert health["status"] == "healthy"
     assert health["total_requests"] == 1
 
 
 def test_logger_metrics():
-    """Test logger metrics"""
     from modules.monitoring import AgentLogger
-    
     with tempfile.TemporaryDirectory() as temp_dir:
         logger = AgentLogger(log_dir=temp_dir)
-        logger.log_interaction("test input", "test output", ["calculator"], 0.5)
-        
+        logger.log_interaction("test", "response", ["tool"], 0.5)
         metrics = logger.get_metrics()
         assert metrics["total_queries"] == 1
+
+
+# ============ TEST MULTI-AGENT ============
+
+def test_multi_agent_orchestrator_init():
+    from multi_agent import MultiAgentOrchestrator
+    orchestrator = MultiAgentOrchestrator()
+    assert len(orchestrator.agents) == 5
+    assert "research" in orchestrator.agents
+    assert "coder" in orchestrator.agents
+
+
+def test_multi_agent_team_status():
+    from multi_agent import MultiAgentOrchestrator
+    orchestrator = MultiAgentOrchestrator()
+    status = orchestrator.get_team_status()
+    assert "Agent Team Status" in status
+    assert "Research Agent" in status

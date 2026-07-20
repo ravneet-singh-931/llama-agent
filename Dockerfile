@@ -22,10 +22,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p logs data documents
+RUN mkdir -p logs data documents uploads
 
-# Expose port (for future web interface)
-EXPOSE 8080
+# Expose ports
+EXPOSE 8080 8501 8000
 
-# Default command
+# Default command (can be overridden)
 CMD ["python", "llama_agent1.py"]

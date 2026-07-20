@@ -17,6 +17,14 @@ python-docx
 # --- Data Processing ---
 pandas
 
+# --- Web Interface ---
+streamlit
+
+# --- REST API ---
+fastapi
+uvicorn
+python-multipart
+
 # --- Testing ---
 pytest
 pytest-cov
