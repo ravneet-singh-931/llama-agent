@@ -1,8 +1,14 @@
+"""
+Llama Agent - ENHANCED VERSION
+Now with: Memory, RAG, Web Search, Monitoring, Logging
+"""
+
 import asyncio
 import os
 import datetime
 import math
-from typing import Any, Iterable, Sequence
+import time
+from typing import Any, Sequence
 
 try:
     from dotenv import load_dotenv
@@ -25,15 +31,26 @@ from llama_index.core.base.llms.types import (
 from llama_index.core.bridge.pydantic import ConfigDict, PrivateAttr
 from llama_index.core.tools import FunctionTool
 
+# Import our custom modules
+from modules.memory import ConversationMemory, FactMemory
+from modules.rag import SimpleRAG, DocumentReader
+from modules.monitoring import AgentLogger, PerformanceMonitor
+
 # ===================== SETUP =====================
-# Load environment from .env (if present)
 load_dotenv()
 
-# Read Groq API key from environment
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise SystemExit("GROQ_API_KEY not set. Add it to your environment or a .env file.")
 
+# Initialize modules
+memory = ConversationMemory()
+facts = FactMemory()
+rag = SimpleRAG()
+logger = AgentLogger()
+monitor = PerformanceMonitor()
+
+# ===================== LLM =====================
 
 class GroqLLM(LLM):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -93,10 +110,10 @@ class GroqLLM(LLM):
         return await asyncio.to_thread(self.complete, prompt, formatted=formatted, **kwargs)
 
     def stream_chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponseGen:
-        raise NotImplementedError("Streaming chat is not supported by GroqLLM in this script")
+        raise NotImplementedError("Streaming not supported")
 
     def stream_complete(self, prompt: str, formatted: bool = False, **kwargs: Any) -> CompletionResponseGen:
-        raise NotImplementedError("Streaming completion is not supported by GroqLLM in this script")
+        raise NotImplementedError("Streaming not supported")
 
     async def astream_chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponseGen:
         return await asyncio.to_thread(self.stream_chat, messages, **kwargs)
@@ -105,18 +122,13 @@ class GroqLLM(LLM):
         return await asyncio.to_thread(self.stream_complete, prompt, formatted=formatted, **kwargs)
 
 
-# Initialize Groq LLM
 llm = GroqLLM(model="llama-3.3-70b-versatile", api_key=GROQ_API_KEY)
 
-# ===================== TOOLS =====================
+# ===================== ENHANCED TOOLS =====================
 
 def calculator(expression: str) -> str:
-    """
-    Evaluates a mathematical expression and returns the result.
-    Example: '2 + 2', '10 * 5', 'sqrt(16)'
-    """
+    """Evaluates a mathematical expression."""
     try:
-        # Safe evaluation with math functions
         allowed_names = {k: v for k, v in math.__dict__.items() if not k.startswith("__")}
         result = eval(expression, {"__builtins__": {}}, allowed_names)
         return f"Result: {result}"
@@ -125,36 +137,21 @@ def calculator(expression: str) -> str:
 
 
 def get_current_datetime() -> str:
-    """
-    Returns the current date and time.
-    """
+    """Returns the current date and time."""
     now = datetime.datetime.now()
     return f"Current Date & Time: {now.strftime('%Y-%m-%d %H:%M:%S')}"
 
 
 def text_analyzer(text: str) -> str:
-    """
-    Analyzes the given text and returns word count, character count, and sentence count.
-    """
+    """Analyzes text and returns statistics."""
     words = len(text.split())
     characters = len(text)
-    characters_no_spaces = len(text.replace(" ", ""))
     sentences = text.count('.') + text.count('!') + text.count('?')
-    
-    return (
-        f"📊 Text Analysis:\n"
-        f"  - Words: {words}\n"
-        f"  - Characters (with spaces): {characters}\n"
-        f"  - Characters (without spaces): {characters_no_spaces}\n"
-        f"  - Sentences: {sentences}"
-    )
+    return f"Words: {words}, Characters: {characters}, Sentences: {sentences}"
 
 
 def unit_converter(value: float, from_unit: str, to_unit: str) -> str:
-    """
-    Converts between common units.
-    Supports: km/miles, kg/pounds, celsius/fahrenheit, meters/feet
-    """
+    """Converts between common units."""
     conversions = {
         ("km", "miles"): lambda x: x * 0.621371,
         ("miles", "km"): lambda x: x * 1.60934,
@@ -165,20 +162,15 @@ def unit_converter(value: float, from_unit: str, to_unit: str) -> str:
         ("meters", "feet"): lambda x: x * 3.28084,
         ("feet", "meters"): lambda x: x * 0.3048,
     }
-    
     key = (from_unit.lower(), to_unit.lower())
     if key in conversions:
         result = conversions[key](value)
         return f"{value} {from_unit} = {result:.4f} {to_unit}"
-    else:
-        return f"Conversion from {from_unit} to {to_unit} not supported."
+    return f"Conversion not supported."
 
 
 def string_operations(text: str, operation: str) -> str:
-    """
-    Performs string operations on text.
-    Operations: uppercase, lowercase, reverse, capitalize, title
-    """
+    """Performs string operations."""
     operations = {
         "uppercase": text.upper(),
         "lowercase": text.lower(),
@@ -186,120 +178,152 @@ def string_operations(text: str, operation: str) -> str:
         "capitalize": text.capitalize(),
         "title": text.title(),
     }
-    
     op = operation.lower()
     if op in operations:
         return f"Result: {operations[op]}"
-    else:
-        return f"Operation '{operation}' not supported. Available: {', '.join(operations.keys())}"
+    return f"Operation not supported."
 
 
-def simple_notes(action: str, note: str = "") -> str:
-    """
-    Simple note-taking tool. Actions: add, view, clear
-    """
-    notes_file = "notes.txt"
-    
-    if action == "add":
-        with open(notes_file, "a") as f:
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"[{timestamp}] {note}\n")
-        return f"✅ Note added: '{note}'"
-    
-    elif action == "view":
-        try:
-            with open(notes_file, "r") as f:
-                content = f.read()
-            return f"📝 Your Notes:\n{content}" if content else "No notes found."
-        except FileNotFoundError:
-            return "No notes found."
-    
-    elif action == "clear":
-        with open(notes_file, "w") as f:
-            f.write("")
-        return "🗑️ All notes cleared."
-    
-    else:
-        return "Invalid action. Use: add, view, or clear"
+# ===================== NEW ENHANCED TOOLS =====================
+
+def remember_fact(key: str, value: str) -> str:
+    """Remember an important fact about the user or anything."""
+    facts.remember(key, value)
+    return f"✅ I'll remember that: {key} = {value}"
+
+
+def recall_fact(key: str) -> str:
+    """Recall a previously stored fact."""
+    return facts.recall(key)
+
+
+def list_facts() -> str:
+    """List all stored facts."""
+    all_facts = facts.get_all_facts()
+    if not all_facts:
+        return "No facts stored yet."
+    result = "📝 Stored facts:\n"
+    for k, v in all_facts.items():
+        result += f"  - {k}: {v}\n"
+    return result
+
+
+def read_document(file_path: str) -> str:
+    """Read a document and add it to knowledge base."""
+    result = rag.add_document(file_path)
+    return f"📄 {result}"
+
+
+def search_documents(query: str) -> str:
+    """Search loaded documents for relevant information."""
+    context = rag.get_context(query)
+    return context
+
+
+def list_documents() -> str:
+    """List all loaded documents."""
+    docs = rag.list_documents()
+    if not docs:
+        return "No documents loaded."
+    return "📚 Loaded documents:\n" + "\n".join(f"  - {d}" for d in docs)
+
+
+def get_memory_stats() -> str:
+    """Get memory statistics."""
+    conv_stats = memory.get_stats()
+    fact_stats = {"facts_stored": len(facts.get_all_facts())}
+    return f"🧠 Memory stats: {conv_stats}\n📝 Facts: {fact_stats}"
+
+
+def clear_memory() -> str:
+    """Clear all memory."""
+    memory.clear()
+    facts.clear()
+    return "🗑️ All memory cleared."
+
+
+def get_agent_health() -> str:
+    """Get agent health and performance stats."""
+    health = monitor.get_health()
+    log_metrics = logger.get_metrics()
+    return (
+        f"🏥 Health: {health['status']}\n"
+        f"⏱️ Uptime: {health['uptime_human']}\n"
+        f"📊 Total queries: {log_metrics['total_queries']}\n"
+        f"❌ Total errors: {log_metrics['total_errors']}\n"
+        f"📈 Avg response time: {log_metrics['avg_response_time']:.2f}s"
+    )
 
 
 # ===================== CREATE TOOLS =====================
 
-calculator_tool = FunctionTool.from_defaults(
-    fn=calculator,
-    name="calculator",
-    description="Useful for performing mathematical calculations. Input should be a mathematical expression."
-)
-
-datetime_tool = FunctionTool.from_defaults(
-    fn=get_current_datetime,
-    name="get_datetime",
-    description="Get the current date and time."
-)
-
-text_analyzer_tool = FunctionTool.from_defaults(
-    fn=text_analyzer,
-    name="text_analyzer",
-    description="Analyze text to get word count, character count, and sentence count."
-)
-
-unit_converter_tool = FunctionTool.from_defaults(
-    fn=unit_converter,
-    name="unit_converter",
-    description="Convert between units like km/miles, kg/pounds, celsius/fahrenheit, meters/feet."
-)
-
-string_ops_tool = FunctionTool.from_defaults(
-    fn=string_operations,
-    name="string_operations",
-    description="Perform string operations like uppercase, lowercase, reverse, capitalize, title."
-)
-
-notes_tool = FunctionTool.from_defaults(
-    fn=simple_notes,
-    name="notes",
-    description="Simple note-taking tool. Can add, view, or clear notes."
-)
+tools = [
+    FunctionTool.from_defaults(fn=calculator, name="calculator", description="Mathematical calculations"),
+    FunctionTool.from_defaults(fn=get_current_datetime, name="get_datetime", description="Get current date and time"),
+    FunctionTool.from_defaults(fn=text_analyzer, name="text_analyzer", description="Analyze text statistics"),
+    FunctionTool.from_defaults(fn=unit_converter, name="unit_converter", description="Convert between units"),
+    FunctionTool.from_defaults(fn=string_operations, name="string_operations", description="String operations"),
+    FunctionTool.from_defaults(fn=remember_fact, name="remember_fact", description="Remember an important fact"),
+    FunctionTool.from_defaults(fn=recall_fact, name="recall_fact", description="Recall a stored fact"),
+    FunctionTool.from_defaults(fn=list_facts, name="list_facts", description="List all stored facts"),
+    FunctionTool.from_defaults(fn=read_document, name="read_document", description="Read and load a document"),
+    FunctionTool.from_defaults(fn=search_documents, name="search_documents", description="Search loaded documents"),
+    FunctionTool.from_defaults(fn=list_documents, name="list_documents", description="List loaded documents"),
+    FunctionTool.from_defaults(fn=get_memory_stats, name="get_memory_stats", description="Get memory statistics"),
+    FunctionTool.from_defaults(fn=clear_memory, name="clear_memory", description="Clear all memory"),
+    FunctionTool.from_defaults(fn=get_agent_health, name="get_agent_health", description="Get agent health stats"),
+]
 
 # ===================== CREATE AGENT =====================
-
-tools = [
-    calculator_tool,
-    datetime_tool,
-    text_analyzer_tool,
-    unit_converter_tool,
-    string_ops_tool,
-    notes_tool,
-]
 
 agent = ReActAgent(
     tools=tools,
     llm=llm,
-    verbose=True,  # Set to False to hide agent's thinking process
+    verbose=True,
     streaming=False,
 )
 
-# ===================== MAIN CHAT LOOP =====================
+# ===================== MAIN LOOP =====================
 
-async def run_agent(user_input: str):
-    handler = agent.run(user_input)
-    output = await handler
-    return output
+async def run_agent(user_input: str) -> str:
+    # Add context from memory
+    context = memory.get_context_string(n=5)
+    fact_context = facts.get_context_string()
+    
+    # Log the interaction
+    monitor.track_request()
+    start_time = time.time()
+    
+    try:
+        handler = agent.run(user_input)
+        output = await handler
+        result = str(output)
+        
+        # Log success
+        elapsed = time.time() - start_time
+        memory.add_message("user", user_input)
+        memory.add_message("assistant", result)
+        logger.log_interaction(user_input, result, [], elapsed)
+        
+        return result
+        
+    except Exception as e:
+        elapsed = time.time() - start_time
+        monitor.track_error()
+        logger.log_error(e, context=f"User input: {user_input}")
+        return f"❌ Error: {str(e)}"
 
 
 def main():
     print("=" * 60)
-    print("        🤖 LlamaIndex Agent with Groq API")
+    print("  🤖 Llama Agent - ENHANCED VERSION")
     print("=" * 60)
-    print("Available capabilities:")
-    print("  ✅ Mathematical calculations")
-    print("  ✅ Current date & time")
-    print("  ✅ Text analysis")
-    print("  ✅ Unit conversion")
-    print("  ✅ String operations")
-    print("  ✅ Note taking")
-    print("  ✅ General conversation")
-    print("\nType 'quit' or 'exit' to stop")
+    print("  NEW Features:")
+    print("  🧠 Memory (remembers conversations)")
+    print("  📄 RAG (reads documents)")
+    print("  📊 Monitoring & Logging")
+    print("  🔧 14 Tools available!")
+    print("\n  Type 'quit' to exit")
     print("=" * 60)
     
     while True:
@@ -311,7 +335,7 @@ def main():
                 continue
             
             if user_input.lower() in ["quit", "exit", "bye"]:
-                print("👋 Goodbye! Have a great day!")
+                print("👋 Goodbye!")
                 break
             
             print("\n🤖 Agent: Thinking...")

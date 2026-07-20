@@ -1,5 +1,5 @@
 # ============================================
-# Llama Agent - Advanced Requirements
+# Llama Agent - FULL STACK Requirements
 # ============================================
 
 # --- AI / LLM ---
@@ -10,18 +10,23 @@ llama-index-llms-groq
 # --- Environment ---
 python-dotenv
 
+# --- Document Reading ---
+PyPDF2
+python-docx
+
+# --- Data Processing ---
+pandas
+
 # --- Testing ---
 pytest
 pytest-cov
 
 # --- Code Quality ---
 flake8
-black
-isort
 
 # --- Security ---
-safety
+pip-audit
 bandit
 
-# --- Coverage Reporting ---
+# --- Coverage ---
 coverage

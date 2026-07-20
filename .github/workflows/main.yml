@@ -1,4 +1,4 @@
-name: 🚀 Advanced CI/CD Pipeline
+name: 🚀 Full Stack CI/CD Pipeline
 
 on:
   push:
@@ -56,7 +56,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   # ============================================================
-  # JOB 2: SECURITY SCANNING (fixed - uses pip-audit instead of safety)
+  # JOB 2: SECURITY SCANNING
   # ============================================================
   security:
     name: 🔒 Security Scan
@@ -73,7 +73,7 @@ jobs:
       - name: 🔍 Scan for vulnerabilities
         run: |
           pip install pip-audit bandit
-          pip-audit -r requirements.txt || echo "⚠️ Some vulnerabilities found (non-blocking)"
+          pip-audit -r requirements.txt || echo "⚠️ Some vulnerabilities found"
           bandit -r . -f json -o bandit-report.json || true
 
       - name: 📋 Upload security report
@@ -84,7 +84,7 @@ jobs:
           path: bandit-report.json
 
   # ============================================================
-  # JOB 3: LINT (fixed - only check critical errors)
+  # JOB 3: CODE QUALITY
   # ============================================================
   lint:
     name: 🧹 Code Quality
@@ -101,16 +101,75 @@ jobs:
       - name: 📦 Install linting tools
         run: pip install flake8
 
-      - name: 🔍 Check for critical errors only
+      - name: 🔍 Check for critical errors
         run: |
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
 
   # ============================================================
-  # JOB 4: DOCKER BUILD
+  # JOB 4: INTEGRATION TEST (tests all modules together)
+  # ============================================================
+  integration:
+    name: 🔗 Integration Test
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 📦 Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 🔗 Test all modules import correctly
+        run: |
+          python -c "from modules.memory import ConversationMemory, FactMemory; print('✅ Memory module OK')"
+          python -c "from modules.rag import SimpleRAG, DocumentReader; print('✅ RAG module OK')"
+          python -c "from modules.monitoring import AgentLogger, PerformanceMonitor; print('✅ Monitoring module OK')"
+
+      - name: 🔗 Test module integration
+        run: |
+          python -c "
+          from modules.memory import ConversationMemory, FactMemory
+          from modules.rag import SimpleRAG
+          from modules.monitoring import AgentLogger, PerformanceMonitor
+          
+          # Test memory
+          mem = ConversationMemory()
+          mem.add_message('user', 'test')
+          assert len(mem.get_recent(1)) == 1
+          print('✅ Memory integration OK')
+          
+          # Test facts
+          facts = FactMemory()
+          facts.remember('test', 'value')
+          assert facts.recall('test') == 'value'
+          print('✅ Facts integration OK')
+          
+          # Test RAG
+          rag = SimpleRAG()
+          rag.add_text('test content')
+          assert rag.get_stats()['total_chunks'] > 0
+          print('✅ RAG integration OK')
+          
+          # Test monitoring
+          monitor = PerformanceMonitor()
+          monitor.track_request()
+          assert monitor.get_health()['status'] == 'healthy'
+          print('✅ Monitoring integration OK')
+          
+          print('🎉 All integrations passed!')
+          "
+
+  # ============================================================
+  # JOB 5: DOCKER BUILD
   # ============================================================
   docker:
     name: 🐳 Build & Push Docker
-    needs: [test, security, lint]
+    needs: [test, security, lint, integration]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
@@ -152,7 +211,7 @@ jobs:
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
   # ============================================================
-  # JOB 5: DEPLOY TO STAGING
+  # JOB 6: DEPLOY STAGING
   # ============================================================
   deploy-staging:
     name: 🎪 Deploy to Staging
@@ -169,12 +228,12 @@ jobs:
 
       - name: 🚀 Deploy to Staging
         run: |
-          echo "🚀 Deploying to staging environment..."
+          echo "🚀 Deploying to staging..."
           echo "Image: ${{ env.DOCKER_IMAGE }}:latest"
           echo "✅ Staging deployment complete!"
 
   # ============================================================
-  # JOB 6: DEPLOY TO PRODUCTION
+  # JOB 7: DEPLOY PRODUCTION
   # ============================================================
   deploy-production:
     name: 🏭 Deploy to Production
@@ -191,16 +250,16 @@ jobs:
 
       - name: 🚀 Deploy to Production
         run: |
-          echo "🏭 Deploying to PRODUCTION..."
+          echo "🏭 Deploying to production..."
           echo "Image: ${{ env.DOCKER_IMAGE }}:latest"
           echo "✅ Production deployment complete!"
 
   # ============================================================
-  # JOB 7: NOTIFY
+  # JOB 8: NOTIFY
   # ============================================================
   notify:
-    name: 📢 Send Notifications
-    needs: [test, security, lint, docker, deploy-staging, deploy-production]
+    name: 📢 Notifications
+    needs: [test, security, lint, integration, docker, deploy-staging, deploy-production]
     runs-on: ubuntu-latest
     if: always()
 
@@ -214,6 +273,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `🚨 Pipeline Failed: ${context.sha.slice(0,7)}`,
-              body: `## Pipeline Failed!\n\n**Commit:** ${context.sha}\n**Author:** ${context.actor}\n**Workflow:** ${context.workflow}\n\n[View Logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              body: `## Pipeline Failed!\n\n**Commit:** ${context.sha}\n**Author:** ${context.actor}\n\n[View Logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
               labels: ['bug', 'ci-cd']
             })
