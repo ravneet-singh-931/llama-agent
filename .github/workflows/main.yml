@@ -132,6 +132,8 @@ jobs:
           python -c "from multi_agent import MultiAgentOrchestrator; print('✅ Multi-Agent OK')"
 
       - name: 🔗 Test integration
+        env:
+          GROQ_API_KEY: test_key_for_ci
         run: |
           python -c "
           from modules.memory import ConversationMemory, FactMemory

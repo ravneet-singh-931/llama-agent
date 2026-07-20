@@ -203,16 +203,62 @@ def test_logger_metrics():
 # ============ TEST MULTI-AGENT ============
 
 def test_multi_agent_orchestrator_init():
-    from multi_agent import MultiAgentOrchestrator
-    orchestrator = MultiAgentOrchestrator()
-    assert len(orchestrator.agents) == 5
-    assert "research" in orchestrator.agents
-    assert "coder" in orchestrator.agents
+    """Test multi-agent system initialization (no API key needed)"""
+    import os
+    # Set a dummy key for testing
+    os.environ["GROQ_API_KEY"] = "test_key_for_testing_only"
+    
+    try:
+        from multi_agent import MultiAgentOrchestrator
+        orchestrator = MultiAgentOrchestrator()
+        assert len(orchestrator.agents) == 5
+        assert "research" in orchestrator.agents
+        assert "coder" in orchestrator.agents
+        assert "writer" in orchestrator.agents
+        assert "analyzer" in orchestrator.agents
+        assert "planner" in orchestrator.agents
+    finally:
+        # Clean up
+        if "GROQ_API_KEY" in os.environ:
+            del os.environ["GROQ_API_KEY"]
 
 
 def test_multi_agent_team_status():
-    from multi_agent import MultiAgentOrchestrator
-    orchestrator = MultiAgentOrchestrator()
-    status = orchestrator.get_team_status()
-    assert "Agent Team Status" in status
-    assert "Research Agent" in status
+    """Test multi-agent team status (no API key needed)"""
+    import os
+    os.environ["GROQ_API_KEY"] = "test_key_for_testing_only"
+    
+    try:
+        from multi_agent import MultiAgentOrchestrator
+        orchestrator = MultiAgentOrchestrator()
+        status = orchestrator.get_team_status()
+        assert "Agent Team Status" in status
+        assert "Research Agent" in status
+        assert "Coder Agent" in status
+    finally:
+        if "GROQ_API_KEY" in os.environ:
+            del os.environ["GROQ_API_KEY"]
+
+
+def test_multi_agent_agent_names():
+    """Test that all agents have correct names"""
+    import os
+    os.environ["GROQ_API_KEY"] = "test_key_for_testing_only"
+    
+    try:
+        from multi_agent import MultiAgentOrchestrator
+        orchestrator = MultiAgentOrchestrator()
+        
+        expected_names = {
+            "research": "Research Agent",
+            "coder": "Coder Agent",
+            "writer": "Writer Agent",
+            "analyzer": "Analyzer Agent",
+            "planner": "Planner Agent"
+        }
+        
+        for key, expected_name in expected_names.items():
+            assert orchestrator.agents[key].name == expected_name
+    finally:
+        if "GROQ_API_KEY" in os.environ:
+            del os.environ["GROQ_API_KEY"]
