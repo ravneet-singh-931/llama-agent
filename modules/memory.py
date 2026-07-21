@@ -32,8 +32,12 @@ class ConversationMemory:
     
     def _save(self):
         """Save conversation history to file"""
-        with open(self.memory_file, 'w', encoding='utf-8') as f:
-            json.dump(self.conversations, f, indent=2, ensure_ascii=False)
+        try:
+            with open(self.memory_file, 'w', encoding='utf-8') as f:
+                json.dump(self.conversations, f, indent=2, ensure_ascii=False)
+        except UnicodeEncodeError:
+            with open(self.memory_file, 'w', encoding='utf-8') as f:
+                json.dump(self.conversations, f, indent=2, ensure_ascii=True)
     
     def add_message(self, role: str, content: str, tool_used: str = None):
         """Add a message to memory"""
@@ -114,8 +118,13 @@ class FactMemory:
     
     def _save(self):
         """Save facts to file"""
-        with open(self.facts_file, 'w', encoding='utf-8') as f:
-            json.dump(self.facts, f, indent=2, ensure_ascii=False)
+        try:
+            with open(self.facts_file, 'w', encoding='utf-8') as f:
+                json.dump(self.facts, f, indent=2, ensure_ascii=False)
+        except UnicodeEncodeError:
+            # Fallback: ensure ASCII only
+            with open(self.facts_file, 'w', encoding='utf-8') as f:
+                json.dump(self.facts, f, indent=2, ensure_ascii=True)
     
     def remember(self, key: str, value: str):
         """Remember a fact"""
