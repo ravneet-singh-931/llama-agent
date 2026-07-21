@@ -59,6 +59,9 @@ bandit
 # --- Coverage ---
 coverage
 
+# --- MCP (Model Context Protocol) ---
+mcp
+
 # --- Utilities ---
 python-dateutil
 pytz

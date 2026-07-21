@@ -369,11 +369,11 @@ Respond with ONLY the agent name (research/coder/writer/analyzer/planner)."""
     
     def get_team_status(self) -> str:
         """Get status of all agents"""
-        status = "👥 **Agent Team Status:**\n\n"
+        status = "Agent Team Status:\n\n"
         
         for name, agent in self.agents.items():
             tasks_handled = len([t for t in self.task_history if agent.name in t["agent"]])
-            status += f"🤖 **{agent.name}** ({agent.role})\n"
+            status += f"[{agent.name}] ({agent.role})\n"
             status += f"   Tasks handled: {tasks_handled}\n\n"
         
         return status
