@@ -1,0 +1,9 @@
+# ============================================
+# Kubernetes Namespace
+# ============================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llama-agent
+  labels:
+    app: llama-agent

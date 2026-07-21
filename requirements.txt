@@ -22,12 +22,32 @@ streamlit
 
 # --- REST API ---
 fastapi
-uvicorn
+uvicorn[standard]
 python-multipart
+
+# --- WebSocket Support ---
+websockets
+
+# --- Database (PostgreSQL) ---
+sqlalchemy[asyncio]
+asyncpg
+psycopg2-binary
+alembic
+
+# --- Authentication ---
+python-jose[cryptography]
+bcrypt
+
+# --- Redis (Caching) ---
+redis[hiredis]
+
+# --- Validation ---
+pydantic
 
 # --- Testing ---
 pytest
 pytest-cov
+pytest-asyncio
 
 # --- Code Quality ---
 flake8
@@ -38,3 +58,7 @@ bandit
 
 # --- Coverage ---
 coverage
+
+# --- Utilities ---
+python-dateutil
+pytz

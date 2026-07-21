@@ -1,6 +1,13 @@
 """
-Llama Agent - REST API (FastAPI)
+Llama Agent - REST API (FastAPI) - Enterprise Version
 Run with: uvicorn api:app --reload
+
+Features:
+- JWT/API Key Authentication
+- WebSocket Real-time Chat
+- Database Integration
+- Rate Limiting
+- Health Checks
 """
 
 import asyncio
@@ -10,16 +17,37 @@ from datetime import datetime
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    UploadFile,
+    File,
+    WebSocket,
+    WebSocketDisconnect,
+    Depends,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Import new modules
+from modules.config import get_config, AppConfig
+from modules.database import get_db_manager
+from modules.auth import (
+    get_current_user,
+    authenticate_user,
+    user_manager,
+    jwt_manager,
+)
+from modules.websocket import get_ws_handler, MessageType, WSMessage
+
 
 # ============ MODELS ============
+
 
 class ChatRequest(BaseModel):
     """Chat request model"""
@@ -61,13 +89,44 @@ class HealthResponse(BaseModel):
     modules: Dict[str, str]
 
 
+# ============ AUTH MODELS ============
+
+
+class RegisterRequest(BaseModel):
+    """User registration request"""
+    username: str
+    email: EmailStr
+    password: str
+    full_name: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    """User login request"""
+    username: str  # Can be username or email
+    password: str
+
+
+class TokenResponse(BaseModel):
+    """Token response"""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    """Refresh token request"""
+    refresh_token: str
+
+
 # ============ APP LIFETIME ============
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     # Startup
-    print("🚀 Llama Agent API starting...")
+    config = get_config()
+    print(f"🚀 Llama Agent API starting... (Environment: {config.environment.value})")
     print("📊 Loading modules...")
     
     # Initialize modules
@@ -80,9 +139,21 @@ async def lifespan(app: FastAPI):
     app.state.rag = SimpleRAG()
     app.state.logger = AgentLogger()
     app.state.monitor = PerformanceMonitor()
+    app.state.config = config
+    
+    # Initialize database (if enabled)
+    if config.features.enable_auth:
+        try:
+            db = get_db_manager()
+            await db.init_db()
+            print("✅ Database initialized")
+        except Exception as e:
+            print(f"⚠️  Database not available: {e}")
+            print("   Running without persistence (memory-only mode)")
     
     print("✅ All modules loaded!")
     print("🌐 API ready at http://localhost:8000")
+    print("📡 WebSocket ready at ws://localhost:8000/ws")
     
     yield
     
@@ -92,34 +163,46 @@ async def lifespan(app: FastAPI):
 
 # ============ CREATE APP ============
 
+
 app = FastAPI(
     title="🤖 Llama Agent API",
-    description="AI Agent with Memory, RAG, and 14 Tools",
-    version="2.0.0",
-    lifespan=lifespan
+    description="Enterprise AI Agent with Memory, RAG, Auth, WebSockets, and 14+ Tools",
+    version="3.0.0",
+    lifespan=lifespan,
 )
 
-# CORS middleware (allows web apps to call the API)
+# CORS middleware
+config = get_config()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=config.cors.allow_origins,
+    allow_credentials=config.cors.allow_credentials,
+    allow_methods=config.cors.allow_methods,
+    allow_headers=config.cors.allow_headers,
 )
 
 
-# ============ ROUTES ============
+# ============ ROOT & HEALTH ============
+
 
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {
         "name": "🤖 Llama Agent API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "docs": "/docs",
+        "features": [
+            "REST API",
+            "WebSocket Real-time Chat",
+            "JWT/API Key Authentication",
+            "PostgreSQL Database",
+            "14+ AI Tools",
+        ],
         "endpoints": {
             "chat": "/chat",
+            "auth": "/auth/register, /auth/login",
+            "websocket": "/ws/{user_id}",
             "memory": "/memory",
             "facts": "/facts",
             "documents": "/documents",
@@ -137,17 +220,120 @@ async def health_check():
     return HealthResponse(
         status=health["status"],
         uptime=health["uptime_human"],
-        version="2.0.0",
+        version="3.0.0",
         modules={
             "memory": "active",
             "rag": "active",
-            "monitoring": "active"
+            "monitoring": "active",
+            "database": "active" if get_config().features.enable_auth else "disabled",
+            "websocket": "active" if get_config().features.enable_websockets else "disabled",
         }
     )
 
 
+# ============ AUTH ENDPOINTS ============
+
+
+@app.post("/auth/register", response_model=TokenResponse)
+async def register(request: RegisterRequest):
+    """Register a new user"""
+    try:
+        result = await user_manager.register(
+            username=request.username,
+            email=request.email,
+            password=request.password,
+            full_name=request.full_name,
+        )
+        return TokenResponse(
+            access_token=result["access_token"],
+            refresh_token=result["refresh_token"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(request: LoginRequest):
+    """Login with username/email and password"""
+    try:
+        result = await user_manager.login(
+            username=request.username,
+            password=request.password,
+        )
+        return TokenResponse(
+            access_token=result["access_token"],
+            refresh_token=result["refresh_token"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/auth/refresh", response_model=TokenResponse)
+async def refresh_token(request: RefreshRequest):
+    """Get new access token using refresh token"""
+    try:
+        result = await user_manager.refresh_token(request.refresh_token)
+        return TokenResponse(
+            access_token=result["access_token"],
+            refresh_token=request.refresh_token,  # Keep same refresh token
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/auth/me")
+async def get_me(user = Depends(get_current_user)):
+    """Get current user info"""
+    return {"user": user}
+
+
+# ============ WEBSOCKET ENDPOINT ============
+
+
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    user_id: str,
+    username: str = "Anonymous",
+):
+    """
+    WebSocket endpoint for real-time chat
+    
+    Connect: ws://localhost:8000/ws/{user_id}?username=YourName
+    
+    Messages (JSON):
+    - Send: {"type": "chat", "data": {"content": "Hello!"}}
+    - Receive: {"type": "response", "data": {"content": "Hi there!"}}
+    """
+    handler = get_ws_handler()
+    await handler.handle_connection(websocket, user_id, username)
+
+
+@app.get("/ws/status")
+async def websocket_status():
+    """Get WebSocket connection status"""
+    handler = get_ws_handler()
+    return {
+        "online_users": handler.manager.get_online_users(),
+        "total_connections": handler.manager.connection_count,
+        "total_users": handler.manager.user_count,
+    }
+
+
+# ============ CHAT ENDPOINTS ============
+
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    user = Depends(authenticate_user),  # Optional auth (JWT or API key)
+):
     """Chat with the agent"""
     start_time = datetime.now()
     monitor = app.state.monitor
@@ -209,6 +395,9 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============ FACTS ENDPOINTS ============
+
+
 @app.post("/remember")
 async def remember_fact(request: RememberRequest):
     """Remember a fact"""
@@ -251,6 +440,9 @@ async def delete_fact(key: str):
         return {"status": "success", "message": f"Deleted: {key}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ DOCUMENTS ENDPOINTS ============
 
 
 @app.post("/documents/read")
@@ -308,6 +500,9 @@ async def list_documents():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============ MEMORY ENDPOINTS ============
+
+
 @app.get("/memory")
 async def get_memory():
     """Get conversation memory"""
@@ -331,6 +526,9 @@ async def clear_memory():
         return {"status": "success", "message": "Memory cleared"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ METRICS ENDPOINTS ============
 
 
 @app.get("/metrics")

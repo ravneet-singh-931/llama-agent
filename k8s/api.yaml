@@ -1,0 +1,114 @@
+# ============================================
+# Llama Agent API Deployment + Service
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-agent-api
+  namespace: llama-agent
+  labels:
+    app: llama-agent
+    component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: llama-agent
+      component: api
+  template:
+    metadata:
+      labels:
+        app: llama-agent
+        component: api
+    spec:
+      containers:
+        - name: api
+          image: ravneet231/llama-agent:latest
+          ports:
+            - containerPort: 8000
+              name: http
+            - containerPort: 8765
+              name: websocket
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: redis-url
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: groq-api-key
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: jwt-secret-key
+            - name: ENVIRONMENT
+              value: production
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+            - name: logs
+              mountPath: /app/logs
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: uploads-pvc
+        - name: logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-agent-api-service
+  namespace: llama-agent
+spec:
+  selector:
+    app: llama-agent
+    component: api
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+    - port: 8765
+      targetPort: 8765
+      name: websocket
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: uploads-pvc
+  namespace: llama-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
