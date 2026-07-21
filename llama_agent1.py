@@ -35,9 +35,15 @@ from llama_index.core.tools import FunctionTool
 from modules.memory import ConversationMemory, FactMemory
 from modules.rag import SimpleRAG, DocumentReader
 from modules.monitoring import AgentLogger, PerformanceMonitor
+from modules.secrets import get_secret
 
 # ===================== SETUP =====================
 load_dotenv()
+
+# Load GROQ_API_KEY from Docker secret file or env var
+_groq_key = get_secret("GROQ_API_KEY", default=os.getenv("GROQ_API_KEY", ""))
+if _groq_key:
+    os.environ["GROQ_API_KEY"] = _groq_key
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:

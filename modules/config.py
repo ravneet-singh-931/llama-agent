@@ -13,6 +13,7 @@ import os
 from typing import Optional, List
 from dataclasses import dataclass, field
 from enum import Enum
+from modules.secrets import get_secret
 
 
 class Environment(str, Enum):
@@ -34,8 +35,9 @@ class DatabaseConfig:
 
     @classmethod
     def from_env(cls) -> "DatabaseConfig":
+        db_url = get_secret("DATABASE_URL", default=os.getenv("DATABASE_URL", cls.url))
         return cls(
-            url=os.getenv("DATABASE_URL", cls.url),
+            url=db_url,
             echo=os.getenv("DB_ECHO", "false").lower() == "true",
             pool_size=int(os.getenv("DB_POOL_SIZE", "20")),
             max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10")),
@@ -67,8 +69,9 @@ class JWTConfig:
 
     @classmethod
     def from_env(cls) -> "JWTConfig":
+        secret = get_secret("JWT_SECRET_KEY", default=os.getenv("JWT_SECRET_KEY", cls.secret_key))
         return cls(
-            secret_key=os.getenv("JWT_SECRET_KEY", cls.secret_key),
+            secret_key=secret,
             algorithm=os.getenv("JWT_ALGORITHM", cls.algorithm),
             access_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "30")),
             refresh_expire_days=int(os.getenv("JWT_REFRESH_EXPIRE_DAYS", "7")),
@@ -87,8 +90,9 @@ class LLMConfig:
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
+        api_key = get_secret("GROQ_API_KEY", default=os.getenv("GROQ_API_KEY", ""))
         return cls(
-            api_key=os.getenv("GROQ_API_KEY", ""),
+            api_key=api_key,
             model=os.getenv("LLM_MODEL", cls.model),
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1024")),

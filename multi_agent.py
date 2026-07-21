@@ -18,8 +18,14 @@ except ImportError:
         return False
 
 from groq import Groq
+from modules.secrets import get_secret
 
 load_dotenv()
+
+# Load GROQ_API_KEY from Docker secret file or env var
+_groq_key = get_secret("GROQ_API_KEY", default=os.getenv("GROQ_API_KEY", ""))
+if _groq_key:
+    os.environ["GROQ_API_KEY"] = _groq_key
 
 
 # ============ BASE AGENT ============

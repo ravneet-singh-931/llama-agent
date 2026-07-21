@@ -34,6 +34,12 @@ from mcp.server.fastmcp import FastMCP
 
 # Import our multi-agent system
 from multi_agent import MultiAgentOrchestrator
+from modules.secrets import get_secret
+
+# Load GROQ_API_KEY from Docker secret file or env var
+_groq_key = get_secret("GROQ_API_KEY", default=os.getenv("GROQ_API_KEY", ""))
+if _groq_key:
+    os.environ["GROQ_API_KEY"] = _groq_key
 
 # Create the MCP server
 mcp = FastMCP("Llama Agent Multi-Agent Team")

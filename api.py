@@ -26,6 +26,8 @@ from fastapi import (
     WebSocketDisconnect,
     Depends,
     status,
+    Request,
+    Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -44,6 +46,13 @@ from modules.auth import (
     jwt_manager,
 )
 from modules.websocket import get_ws_handler, MessageType, WSMessage
+
+# Prometheus metrics
+from modules.prometheus_metrics import (
+    init_metrics,
+    metrics_endpoint,
+    prometheus_middleware,
+)
 
 
 # ============ MODELS ============
@@ -154,6 +163,10 @@ async def lifespan(app: FastAPI):
     print("✅ All modules loaded!")
     print("🌐 API ready at http://localhost:8000")
     print("📡 WebSocket ready at ws://localhost:8000/ws")
+    print("📊 Prometheus metrics at http://localhost:8000/metrics")
+    
+    # Initialize Prometheus metrics
+    init_metrics()
     
     yield
     
@@ -180,6 +193,11 @@ app.add_middleware(
     allow_methods=config.cors.allow_methods,
     allow_headers=config.cors.allow_headers,
 )
+
+# Prometheus metrics middleware
+@app.middleware("http")
+async def prometheus_middleware_handler(request: Request, call_next):
+    return await prometheus_middleware(request, call_next)
 
 
 # ============ ROOT & HEALTH ============
@@ -548,8 +566,14 @@ async def clear_memory():
 
 
 @app.get("/metrics")
-async def get_metrics():
-    """Get agent metrics"""
+async def get_metrics_prometheus():
+    """Prometheus-format metrics endpoint for scraping"""
+    return metrics_endpoint(None)
+
+
+@app.get("/metrics/json")
+async def get_metrics_json():
+    """JSON metrics endpoint for dashboards"""
     try:
         monitor = app.state.monitor
         logger = app.state.logger

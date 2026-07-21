@@ -1,15 +1,29 @@
 # ============================================
-# Docker Compose - Full Stack
+# Docker Compose - Full Stack with DevOps
 # ============================================
 # Usage:
-#   docker-compose up -d              (start everything)
-#   docker-compose up -d api web      (start API + UI only)
-#   docker-compose logs -f api        (watch API logs)
-#   docker-compose down               (stop everything)
+#   docker-compose up -d                    (start everything)
+#   docker-compose up -d api web            (start API + UI only)
+#   docker-compose up -d --scale api=3      (load balance with 3 replicas)
+#   docker-compose logs -f grafana          (watch Grafana logs)
+#   docker-compose down                     (stop everything)
+#
+# Services: 10 total
+#   - postgres       (database)
+#   - redis          (caching)
+#   - api            (FastAPI REST + WebSocket)
+#   - web            (Streamlit UI)
+#   - nginx          (SSL + Load Balancer + CDN headers)
+#   - prometheus      (metrics collection)
+#   - grafana         (monitoring dashboards)
+#   - loki            (log aggregation)
+#   - promtail        (log shipping)
+#   - node-exporter   (system metrics)
+# ============================================
 
 services:
   # =============================================
-  # PostgreSQL Database
+  # 1. PostgreSQL Database
   # =============================================
   postgres:
     image: postgres:15-alpine
@@ -17,20 +31,24 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: llama_agent
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    secrets:
+      - postgres_password
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - backend
 
   # =============================================
-  # Redis (Caching + WebSocket pub/sub)
+  # 2. Redis (Caching + WebSocket pub/sub)
   # =============================================
   redis:
     image: redis:7-alpine
@@ -45,9 +63,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - backend
 
   # =============================================
-  # REST API (FastAPI + Swagger UI)
+  # 3. REST API (FastAPI + Swagger UI + Metrics)
   # =============================================
   api:
     build:
@@ -57,12 +77,16 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
-      - "8765:8765"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
+      - DATABASE_URL=postgresql+asyncpg://postgres:$(cat /run/secrets/postgres_password)@postgres:5432/llama_agent
       - REDIS_URL=redis://redis:6379
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-change-in-production}
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
+      - ENVIRONMENT=production
+    secrets:
+      - groq_api_key
+      - jwt_secret_key
+      - postgres_password
     depends_on:
       postgres:
         condition: service_healthy
@@ -72,13 +96,16 @@ services:
       - ./uploads:/app/uploads
       - ./logs:/app/logs
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - backend
+      - monitoring
 
   # =============================================
-  # Streamlit Web UI (includes MCP client)
+  # 4. Streamlit Web UI (includes MCP client)
   # =============================================
   web:
     build:
@@ -90,11 +117,167 @@ services:
       - "8501:8501"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
-      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+    secrets:
+      - groq_api_key
+      - postgres_password
     depends_on:
       - api
     command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+    networks:
+      - backend
 
+  # =============================================
+  # 5. Nginx - SSL + Load Balancer + CDN Headers
+  # =============================================
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    container_name: llama-agent-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+      - web
+      - grafana
+    networks:
+      - backend
+
+  # =============================================
+  # 6. Prometheus (Metrics Collection)
+  # =============================================
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: llama-agent-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    networks:
+      - monitoring
+
+  # =============================================
+  # 7. Grafana (Monitoring Dashboards)
+  # =============================================
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: llama-agent-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD_FILE=/run/secrets/grafana_admin_password
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+    secrets:
+      - grafana_admin_password
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - monitoring
+
+  # =============================================
+  # 8. Loki (Log Aggregation - like Elasticsearch)
+  # =============================================
+  loki:
+    image: grafana/loki:2.9.6
+    container_name: llama-agent-loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./config/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - monitoring
+
+  # =============================================
+  # 9. Promtail (Log Shipping to Loki)
+  # =============================================
+  promtail:
+    image: grafana/promtail:2.9.6
+    container_name: llama-agent-promtail
+    restart: unless-stopped
+    volumes:
+      - ./config/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/log:/var/log:ro
+      - promtail_positions:/tmp
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - monitoring
+
+  # =============================================
+  # 10. Node Exporter (System Metrics for Prometheus)
+  # =============================================
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: llama-agent-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+    networks:
+      - monitoring
+
+
+# ============================================
+# Docker Secrets (encrypted files)
+# ============================================
+secrets:
+  groq_api_key:
+    file: ./secrets/groq_api_key.txt
+  jwt_secret_key:
+    file: ./secrets/jwt_secret_key.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt
+
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  backend:
+    driver: bridge
+  monitoring:
+    driver: bridge
+
+
+# ============================================
+# Volumes (persistent data)
+# ============================================
 volumes:
   postgres_data:
   redis_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  promtail_positions:

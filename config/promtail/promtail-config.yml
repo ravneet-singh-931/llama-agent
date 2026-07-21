@@ -1,0 +1,38 @@
+# ============================================
+# Promtail Configuration - Log Shipping
+# Reads Docker container logs and sends to Loki
+# ============================================
+
+server:
+  http_listen_port: 9080
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # ---- Scrape ALL Docker container logs ----
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # Use container name as label
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: "container"
+      # Use container label for service
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: "service"
+      # Use container log stream
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: "stream"
+    pipeline_stages:
+      - docker: {}
+      # Extract log level from messages
+      - regex:
+          expression: '(?i)(?P<level>(ERROR|WARN|INFO|DEBUG|CRITICAL))'
+      - labels:
+          level:

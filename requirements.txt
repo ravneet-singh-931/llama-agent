@@ -59,6 +59,9 @@ bandit
 # --- Coverage ---
 coverage
 
+# --- Monitoring (Prometheus) ---
+prometheus-client
+
 # --- MCP (Model Context Protocol) - Optional, requires Python 3.10+ ---
 # mcp  # Uncomment if Python >= 3.10
 
