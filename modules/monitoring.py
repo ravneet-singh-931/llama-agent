@@ -53,7 +53,7 @@ class AgentLogger:
     
     def _save_metrics(self):
         """Save metrics to file"""
-        with open(self.metrics_file, 'w') as f:
+        with open(self.metrics_file, 'w', encoding='utf-8') as f:
             json.dump(self.metrics, f, indent=2)
     
     def log_interaction(self, user_input: str, agent_response: str, 
@@ -82,7 +82,7 @@ class AgentLogger:
         if len(interactions) > 1000:
             interactions = interactions[-1000:]
         
-        with open(self.interactions_file, 'w') as f:
+        with open(self.interactions_file, 'w', encoding='utf-8') as f:
             json.dump(interactions, f, indent=2, ensure_ascii=False)
         
         # Update metrics
@@ -130,7 +130,7 @@ class AgentLogger:
         if len(errors) > 100:
             errors = errors[-100:]
         
-        with open(self.errors_file, 'w') as f:
+        with open(self.errors_file, 'w', encoding='utf-8') as f:
             json.dump(errors, f, indent=2)
         
         # Update metrics
