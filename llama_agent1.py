@@ -110,10 +110,25 @@ class GroqLLM(LLM):
         return await asyncio.to_thread(self.complete, prompt, formatted=formatted, **kwargs)
 
     def stream_chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponseGen:
-        raise NotImplementedError("Streaming not supported")
+        """Stream chat response token by token"""
+        kwargs.pop("stream", None)  # Remove if present
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=self._format_messages(messages),
+            stream=True,
+            **kwargs,
+        )
+        def generate():
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    yield CompletionResponse(
+                        text=chunk.choices[0].delta.content,
+                        raw=chunk,
+                    )
+        return generate()
 
     def stream_complete(self, prompt: str, formatted: bool = False, **kwargs: Any) -> CompletionResponseGen:
-        raise NotImplementedError("Streaming not supported")
+        raise NotImplementedError("Use stream_chat instead")
 
     async def astream_chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponseGen:
         return await asyncio.to_thread(self.stream_chat, messages, **kwargs)
@@ -311,7 +326,60 @@ async def run_agent(user_input: str) -> str:
         elapsed = time.time() - start_time
         monitor.track_error()
         logger.log_error(e, context=f"User input: {user_input}")
-        return f"❌ Error: {str(e)}"
+        return f"Error: {str(e)}"
+
+
+# ===================== STREAMING AGENT =====================
+
+def run_agent_stream(user_input: str):
+    """
+    Stream agent response token by token.
+    Yields text chunks for st.write_stream() in Streamlit.
+    """
+    client = Groq(api_key=GROQ_API_KEY)
+
+    # Build messages with context
+    context = memory.get_context_string(n=5)
+    fact_context = facts.get_context_string()
+    system_prompt = (
+        "You are Llama Agent, a helpful AI assistant with tools for math, "
+        "text analysis, unit conversion, memory, and document search. "
+        "Always respond in English. Be concise and helpful."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+    ]
+
+    if context:
+        messages.append({"role": "user", "content": f"Previous context:\n{context}"})
+        messages.append({"role": "assistant", "content": "I understand the context."})
+
+    if fact_context:
+        messages.append({"role": "user", "content": fact_context})
+        messages.append({"role": "assistant", "content": "I'll keep that in mind."})
+
+    messages.append({"role": "user", "content": user_input})
+
+    # Stream from Groq API
+    stream = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        stream=True,
+        max_tokens=2048,
+    )
+
+    full_response = ""
+    for chunk in stream:
+        if chunk.choices[0].delta.content:
+            token = chunk.choices[0].delta.content
+            full_response += token
+            yield token
+
+    # Save to memory after streaming is done
+    memory.add_message("user", user_input)
+    memory.add_message("assistant", full_response)
+    monitor.track_request()
 
 
 def main():
