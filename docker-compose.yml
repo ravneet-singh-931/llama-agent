@@ -7,8 +7,6 @@
 #   docker-compose logs -f api        (watch API logs)
 #   docker-compose down               (stop everything)
 
-version: '3.8'
-
 services:
   # =============================================
   # PostgreSQL Database
@@ -80,7 +78,7 @@ services:
       retries: 3
 
   # =============================================
-  # Streamlit Web UI
+  # Streamlit Web UI (includes MCP client)
   # =============================================
   web:
     build:
@@ -96,21 +94,6 @@ services:
     depends_on:
       - api
     command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
-
-  # =============================================
-  # MCP Agent Server (5 specialized agents)
-  # =============================================
-  mcp-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: llama-agent-mcp
-    restart: unless-stopped
-    environment:
-      - GROQ_API_KEY=${GROQ_API_KEY}
-    command: python mcp_agents_server.py
-    # MCP uses stdio transport (no exposed port needed)
-    # The Streamlit app connects to this via subprocess
 
 volumes:
   postgres_data:

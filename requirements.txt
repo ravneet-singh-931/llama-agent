@@ -42,7 +42,7 @@ bcrypt
 redis[hiredis]
 
 # --- Validation ---
-pydantic
+pydantic[email]
 
 # --- Testing ---
 pytest
