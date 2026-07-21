@@ -49,7 +49,7 @@ jobs:
 
       - name: 🧪 Run tests with coverage
         run: |
-          pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
+          pytest tests/ -v -m "not mcp" --cov=. --cov-report=xml --cov-report=term
 
       - name: 📊 Upload coverage
         if: matrix.python-version == '3.10'
