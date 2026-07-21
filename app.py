@@ -365,6 +365,20 @@ def _route_command(user_input: str) -> str:
 
 # ============ MAIN UI ============
 
+def main():
+    init_session_state()
+    display_sidebar()
+
+    st.title("Llama Agent")
+
+    if st.session_state.get("chat_mode") == "websocket":
+        st.markdown("*Real-time chat via WebSocket (multi-user, live updates)*")
+        _render_websocket_chat()
+    else:
+        st.markdown("*AI Agent with Memory, RAG, and a Multi-Agent Team via MCP*")
+        _render_standard_chat()
+
+
 def _render_standard_chat():
     """Render the standard streaming chat UI"""
     # Display chat history
