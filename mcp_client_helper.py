@@ -53,6 +53,7 @@ class MCPAgentClient:
         server_params = StdioServerParameters(
             command=sys.executable,  # Use the same Python that's running this code
             args=[server_script],
+            env={k: v for k, v in os.environ.items() if v},  # Pass env vars to subprocess
         )
 
         # Start the server subprocess and connect
