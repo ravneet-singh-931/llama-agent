@@ -288,23 +288,15 @@ async def process_message(user_input: str) -> str:
                         # User manually picked an agent
                         st.session_state.last_agent = force_agent
                         if force_agent == "team_status":
-                            result = asyncio.run(
-                                mcp_client.call_agent("team_status", "")
-                            )
+                            result = await mcp_client.call_agent("team_status", "")
                         elif force_agent == "collaborate":
-                            result = asyncio.run(
-                                mcp_client.call_agent("collaborate", user_input)
-                            )
+                            result = await mcp_client.call_agent("collaborate", user_input)
                         else:
-                            result = asyncio.run(
-                                mcp_client.call_agent(force_agent, user_input)
-                            )
+                            result = await mcp_client.call_agent(force_agent, user_input)
                         return result
                     else:
                         # Auto-route based on keywords
-                        result = asyncio.run(
-                            mcp_client.route_and_call(user_input)
-                        )
+                        result = await mcp_client.route_and_call(user_input)
                         return result
             except Exception as mcp_error:
                 # If MCP fails, fall back to single agent
