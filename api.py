@@ -387,7 +387,7 @@ async def chat(
             # Regular AI chat — include facts as context
             if not fact_answered:
                 facts_context = facts.get_context_string()
-                enhanced_input = f"{request.message}\n\n{facts_context}"
+                enhanced_input = f"{request.message}\n\n{facts_context}\n\nIMPORTANT: Always respond in English."
                 from llama_agent1 import run_agent
                 response = await run_agent(enhanced_input)
         

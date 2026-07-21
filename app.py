@@ -180,7 +180,7 @@ async def process_message(user_input: str) -> str:
         
         # Regular AI response — include facts as context
         facts_context = facts.get_context_string()
-        enhanced_input = f"{user_input}\n\n{facts_context}"
+        enhanced_input = f"{user_input}\n\n{facts_context}\n\nIMPORTANT: Always respond in English."
         from llama_agent1 import run_agent
         result = await run_agent(enhanced_input)
         
