@@ -43,6 +43,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 📦 Install MCP (Python 3.10+ only)
+        if: matrix.python-version != '3.9'
+        run: pip install mcp
+
       - name: 🧪 Run tests with coverage
         run: |
           pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
