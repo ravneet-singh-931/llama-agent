@@ -200,26 +200,44 @@ class TestServerToolDefinitions:
 
     def test_multi_agent_orchestrator_init(self):
         """MultiAgentOrchestrator should initialize with 5 agents."""
-        from multi_agent import MultiAgentOrchestrator
-        orch = MultiAgentOrchestrator()
-        assert len(orch.agents) == 5
-        expected = {"research", "coder", "writer", "analyzer", "planner"}
-        assert set(orch.agents.keys()) == expected
+        import os
+        os.environ["GROQ_API_KEY"] = "test_key_for_testing_only"
+        try:
+            from multi_agent import MultiAgentOrchestrator
+            orch = MultiAgentOrchestrator()
+            assert len(orch.agents) == 5
+            expected = {"research", "coder", "writer", "analyzer", "planner"}
+            assert set(orch.agents.keys()) == expected
+        finally:
+            if "GROQ_API_KEY" in os.environ:
+                del os.environ["GROQ_API_KEY"]
 
     def test_orchestrator_team_status(self):
         """get_team_status should return a non-empty string."""
-        from multi_agent import MultiAgentOrchestrator
-        orch = MultiAgentOrchestrator()
-        status = orch.get_team_status()
-        assert isinstance(status, str)
-        assert len(status) > 0
+        import os
+        os.environ["GROQ_API_KEY"] = "test_key_for_testing_only"
+        try:
+            from multi_agent import MultiAgentOrchestrator
+            orch = MultiAgentOrchestrator()
+            status = orch.get_team_status()
+            assert isinstance(status, str)
+            assert len(status) > 0
+        finally:
+            if "GROQ_API_KEY" in os.environ:
+                del os.environ["GROQ_API_KEY"]
 
     def test_orchestrator_collaborate(self):
         """collaborate requires Groq API calls, so we just verify the method exists."""
-        from multi_agent import MultiAgentOrchestrator
-        orch = MultiAgentOrchestrator()
-        assert hasattr(orch, "collaborate")
-        assert callable(orch.collaborate)
+        import os
+        os.environ["GROQ_API_KEY"] = "test_key_for_testing_only"
+        try:
+            from multi_agent import MultiAgentOrchestrator
+            orch = MultiAgentOrchestrator()
+            assert hasattr(orch, "collaborate")
+            assert callable(orch.collaborate)
+        finally:
+            if "GROQ_API_KEY" in os.environ:
+                del os.environ["GROQ_API_KEY"]
 
 
 class TestWebSocketModule:
