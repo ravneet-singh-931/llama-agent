@@ -491,3 +491,31 @@ async def authenticate_user(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid credentials - provide JWT token or API key"
     )
+
+
+async def optional_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    api_key: Optional[str] = Depends(api_key_header),
+) -> Optional[Dict[str, Any]]:
+    """
+    Optional authentication - returns None if not authenticated
+    Use this for endpoints that work with or without auth
+    """
+    # Try JWT token
+    if credentials:
+        payload = jwt_manager.verify_token(credentials.credentials)
+        if payload:
+            user_id = payload.get("sub")
+            if user_id:
+                user = await user_manager.get_user(user_id)
+                if user:
+                    return user
+
+    # Try API key
+    if api_key:
+        user = await user_manager.validate_api_key(api_key)
+        if user:
+            return user
+
+    # Not authenticated - that's OK
+    return None

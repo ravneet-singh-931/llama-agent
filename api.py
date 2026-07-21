@@ -39,7 +39,7 @@ from modules.config import get_config, AppConfig
 from modules.database import get_db_manager
 from modules.auth import (
     get_current_user,
-    authenticate_user,
+    optional_auth,
     user_manager,
     jwt_manager,
 )
@@ -332,9 +332,9 @@ async def websocket_status():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
-    user = Depends(authenticate_user),  # Optional auth (JWT or API key)
+    user = Depends(optional_auth),  # Optional auth (works with or without login)
 ):
-    """Chat with the agent"""
+    """Chat with the agent. Auth optional in development mode."""
     start_time = datetime.now()
     monitor = app.state.monitor
     memory = app.state.memory
