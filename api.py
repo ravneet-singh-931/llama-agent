@@ -371,9 +371,25 @@ async def chat(
             response = rag.get_context(query)
         
         else:
-            # Regular AI chat
-            from llama_agent1 import run_agent
-            response = await run_agent(request.message)
+            # Check if user is asking about a stored fact
+            all_facts = facts.get_all_facts()
+            lower_input = request.message.lower()
+            
+            fact_answered = False
+            for key, value in all_facts.items():
+                key_lower = key.lower()
+                if (key_lower in lower_input and 
+                    any(phrase in lower_input for phrase in ["what", "know", "recall", "tell", "remind"])):
+                    response = f"Your {key} is **{value}**."
+                    fact_answered = True
+                    break
+            
+            # Regular AI chat — include facts as context
+            if not fact_answered:
+                facts_context = facts.get_context_string()
+                enhanced_input = f"{request.message}\n\n{facts_context}"
+                from llama_agent1 import run_agent
+                response = await run_agent(enhanced_input)
         
         # Calculate response time
         elapsed = (datetime.now() - start_time).total_seconds()

@@ -167,9 +167,22 @@ async def process_message(user_input: str) -> str:
             query = user_input[7:].strip()
             return rag.get_context(query)
         
-        # Regular AI response
+        # Check if user is asking about a stored fact
+        all_facts = facts.get_all_facts()
+        lower_input = user_input.lower()
+        
+        # Detect "what's my X", "what is my X", "do you know my X"
+        for key, value in all_facts.items():
+            key_lower = key.lower()
+            if (key_lower in lower_input and 
+                any(phrase in lower_input for phrase in ["what", "know", "recall", "tell", "remind"])):
+                return f"Your {key} is **{value}**."
+        
+        # Regular AI response — include facts as context
+        facts_context = facts.get_context_string()
+        enhanced_input = f"{user_input}\n\n{facts_context}"
         from llama_agent1 import run_agent
-        result = await run_agent(user_input)
+        result = await run_agent(enhanced_input)
         
         # Add to memory
         memory.add_message("assistant", str(result))
