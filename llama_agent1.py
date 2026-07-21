@@ -8,7 +8,7 @@ import os
 import datetime
 import math
 import time
-from typing import Any, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 try:
     from dotenv import load_dotenv
@@ -57,7 +57,7 @@ class GroqLLM(LLM):
 
     model: str
     api_key: str
-    base_url: str | None = None
+    base_url: Optional[str] = None
     _client: Groq = PrivateAttr()
 
     def __init__(self, **kwargs: Any) -> None:
@@ -75,7 +75,7 @@ class GroqLLM(LLM):
             system_role=MessageRole.SYSTEM,
         )
 
-    def _format_messages(self, messages: Sequence[ChatMessage]) -> list[dict[str, Any]]:
+    def _format_messages(self, messages: Sequence[ChatMessage]) -> List[Dict[str, Any]]:
         formatted = []
         for message in messages:
             role = message.role.value if isinstance(message.role, MessageRole) else message.role

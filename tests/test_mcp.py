@@ -27,6 +27,12 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# mcp requires Python 3.10+ — skip tests that import it on 3.9
+requires_mcp = pytest.mark.skipif(
+    sys.version_info < (3, 10),
+    reason="mcp package requires Python 3.10+",
+)
+
 
 # ============================================================
 # UNIT TESTS — no server needed
@@ -71,6 +77,7 @@ class TestClientToolMapping:
         assert result == unknown
 
 
+@requires_mcp
 class TestClientInitialState:
     """Verify MCPAgentClient starts in a clean state."""
 
@@ -181,6 +188,7 @@ class TestServerToolDefinitions:
             os.path.join(os.path.dirname(__file__), "..", "mcp_agents_server.py")
         )
 
+    @requires_mcp
     def test_mcp_package_imports(self):
         """The mcp package should be importable."""
         from mcp.server.fastmcp import FastMCP
@@ -252,6 +260,7 @@ class TestWebSocketModule:
 
 
 @pytest.mark.mcp
+@requires_mcp
 class TestMCPClientLifecycle:
     """Test full client connect -> use -> disconnect lifecycle."""
 
@@ -296,6 +305,7 @@ class TestMCPClientLifecycle:
 
 
 @pytest.mark.mcp
+@requires_mcp
 class TestMCPCallAgents:
     """Test calling individual agent tools via MCP."""
 
@@ -355,6 +365,7 @@ class TestMCPCallAgents:
 
 
 @pytest.mark.mcp
+@requires_mcp
 class TestMCPRouting:
     """Test auto-routing of tasks to appropriate agents."""
 
@@ -393,6 +404,7 @@ class TestMCPRouting:
 
 
 @pytest.mark.mcp
+@requires_mcp
 class TestMCPEdgeCases:
     """Test error handling and edge cases."""
 
