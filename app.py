@@ -21,9 +21,11 @@ Architecture:
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import asyncio
 import os
 import sys
+import uuid
 from datetime import datetime
 
 # Add current directory to path
@@ -132,6 +134,17 @@ def display_sidebar():
     with st.sidebar:
         st.image("https://img.icons8.com/fluency/96/robot-2.png", width=80)
         st.title("Llama Agent")
+        st.markdown("---")
+
+        # ---- Chat Mode ----
+        st.subheader("Chat Mode")
+        chat_mode = st.radio(
+            "Mode",
+            ["Standard (Streaming)", "Real-time (WebSocket)"],
+            label_visibility="collapsed",
+            index=0 if st.session_state.get("chat_mode", "standard") == "standard" else 1,
+        )
+        st.session_state.chat_mode = "standard" if "Standard" in chat_mode else "websocket"
         st.markdown("---")
 
         # ---- MCP Agent Team Status ----
@@ -352,14 +365,8 @@ def _route_command(user_input: str) -> str:
 
 # ============ MAIN UI ============
 
-def main():
-    init_session_state()
-    display_sidebar()
-
-    # Main chat area
-    st.title("Llama Agent")
-    st.markdown("*AI Agent with Memory, RAG, and a Multi-Agent Team via MCP*")
-
+def _render_standard_chat():
+    """Render the standard streaming chat UI"""
     # Display chat history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -416,7 +423,7 @@ def main():
                 st.caption(f"Agent: {label} | {assistant_time}")
 
             else:
-                # STREAMING single-agent — tokens appear one by one
+                # STREAMING single-agent -- tokens appear one by one
                 from modules.memory import ConversationMemory, FactMemory
                 from llama_agent1 import run_agent_stream
 
@@ -482,6 +489,209 @@ def main():
                 "timestamp": datetime.now().strftime("%H:%M:%S")
             })
             st.rerun()
+
+
+def _render_websocket_chat():
+    """Render real-time WebSocket chat using an embedded HTML/JS client."""
+
+    # Connection status
+    ws_port = st.session_state.get("ws_port", 8000)
+    ws_host = st.session_state.get("ws_host", "localhost")
+
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        st.caption("WebSocket Settings")
+        ws_host = st.text_input("API Host", value=ws_host, key="ws_host_input")
+        ws_port = st.number_input("API Port", value=ws_port, key="ws_port_input")
+        st.session_state.ws_host = ws_host
+        st.session_state.ws_port = ws_port
+
+    user_id = st.session_state.get("ws_user_id", str(uuid.uuid4())[:8])
+    st.session_state.ws_user_id = user_id
+    ws_url = f"ws://{ws_host}:{ws_port}/ws/{user_id}"
+
+    st.info(f"Connecting to: `{ws_url}`  |  Your User ID: `{user_id}`")
+
+    # Embed the WebSocket chat client as HTML/JS
+    ws_chat_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 10px; background: #0e1117; color: #e0e0e0; }}
+        #chat-box {{ height: 420px; overflow-y: auto; border: 1px solid #333; border-radius: 8px; padding: 12px; margin-bottom: 10px; background: #1a1a2e; }}
+        .msg {{ margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; max-width: 85%; }}
+        .msg.user {{ background: #1e3a5f; border-left: 3px solid #00d4ff; margin-left: auto; }}
+        .msg.assistant {{ background: #2d2d44; border-left: 3px solid #00ff88; }}
+        .msg.system {{ background: #333; border-left: 3px solid #888; font-style: italic; text-align: center; max-width: 100%; }}
+        .msg .sender {{ font-size: 11px; color: #888; margin-bottom: 2px; }}
+        .msg .text {{ font-size: 14px; line-height: 1.4; white-space: pre-wrap; }}
+        .msg .time {{ font-size: 10px; color: #666; margin-top: 3px; }}
+        #input-area {{ display: flex; gap: 8px; }}
+        #msg-input {{ flex: 1; padding: 10px; border: 1px solid #444; border-radius: 6px; background: #1a1a2e; color: #fff; font-size: 14px; }}
+        #msg-input:focus {{ outline: none; border-color: #00ff88; }}
+        #send-btn {{ padding: 10px 20px; background: #00ff88; color: #000; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 14px; }}
+        #send-btn:hover {{ background: #00cc6a; }}
+        #send-btn:disabled {{ background: #555; cursor: not-allowed; }}
+        #status {{ padding: 6px 12px; border-radius: 4px; margin-bottom: 8px; font-size: 12px; }}
+        .connected {{ background: #1a3d1a; color: #00ff88; }}
+        .disconnected {{ background: #3d1a1a; color: #ff4444; }}
+        .thinking {{ background: #3d3d1a; color: #ffaa00; }}
+        #online-users {{ font-size: 11px; color: #888; margin-bottom: 6px; }}
+    </style>
+    </head>
+    <body>
+    <div id="status" class="disconnected">Disconnected</div>
+    <div id="online-users"></div>
+    <div id="chat-box"></div>
+    <div id="input-area">
+        <input type="text" id="msg-input" placeholder="Type a message..." disabled />
+        <button id="send-btn" disabled onclick="sendMessage()">Send</button>
+    </div>
+
+    <script>
+        const WS_URL = "{ws_url}";
+        const USER_ID = "{user_id}";
+        let ws = null;
+        let reconnectTimer = null;
+
+        const chatBox = document.getElementById('chat-box');
+        const msgInput = document.getElementById('msg-input');
+        const sendBtn = document.getElementById('send-btn');
+        const statusEl = document.getElementById('status');
+        const onlineEl = document.getElementById('online-users');
+
+        function addMessage(sender, text, type) {{
+            const div = document.createElement('div');
+            div.className = 'msg ' + type;
+            const time = new Date().toLocaleTimeString();
+            div.innerHTML = '<div class="sender">' + sender + '</div>' +
+                           '<div class="text">' + escapeHtml(text) + '</div>' +
+                           '<div class="time">' + time + '</div>';
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }}
+
+        function escapeHtml(text) {{
+            const d = document.createElement('div');
+            d.textContent = text;
+            return d.innerHTML;
+        }}
+
+        function setStatus(text, cls) {{
+            statusEl.textContent = text;
+            statusEl.className = cls;
+        }}
+
+        function connect() {{
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+
+            setStatus('Connecting...', 'thinking');
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = function() {{
+                setStatus('Connected (user: ' + USER_ID + ')', 'connected');
+                msgInput.disabled = false;
+                sendBtn.disabled = false;
+                msgInput.focus();
+            }};
+
+            ws.onmessage = function(event) {{
+                const msg = JSON.parse(event.data);
+                handleServerMessage(msg);
+            }};
+
+            ws.onclose = function() {{
+                setStatus('Disconnected - reconnecting...', 'disconnected');
+                msgInput.disabled = true;
+                sendBtn.disabled = true;
+                reconnectTimer = setTimeout(connect, 3000);
+            }};
+
+            ws.onerror = function() {{
+                setStatus('Connection error', 'disconnected');
+            }};
+        }}
+
+        function handleServerMessage(msg) {{
+            switch(msg.type) {{
+                case 'connect':
+                    addMessage('System', msg.data.message, 'system');
+                    if (msg.data.online_users) updateOnlineUsers(msg.data.online_users);
+                    break;
+                case 'response':
+                    addMessage('Agent', msg.data.content, 'assistant');
+                    break;
+                case 'chat':
+                    addMessage(msg.data.sender || 'User', msg.data.content, 'user');
+                    break;
+                case 'typing':
+                    if (msg.data.is_typing) {{
+                        setStatus('Agent is typing...', 'thinking');
+                    }} else {{
+                        setStatus('Connected (user: ' + USER_ID + ')', 'connected');
+                    }}
+                    break;
+                case 'online_users':
+                    updateOnlineUsers(msg.data.users);
+                    break;
+                case 'agent_status':
+                    if (msg.data.status === 'thinking') {{
+                        setStatus('Agent is thinking...', 'thinking');
+                    }} else {{
+                        setStatus('Connected (user: ' + USER_ID + ')', 'connected');
+                    }}
+                    break;
+                case 'error':
+                    addMessage('Error', msg.data.error, 'system');
+                    setStatus('Connected (user: ' + USER_ID + ')', 'connected');
+                    break;
+                case 'heartbeat':
+                    break;
+            }}
+        }}
+
+        function updateOnlineUsers(users) {{
+            if (!users || users.length === 0) {{
+                onlineEl.textContent = '';
+                return;
+            }}
+            const names = users.map(u => u.username || u.user_id).join(', ');
+            onlineEl.textContent = 'Online: ' + names;
+        }}
+
+        function sendMessage() {{
+            const text = msgInput.value.trim();
+            if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            addMessage('You', text, 'user');
+
+            const outMsg = {{
+                type: 'chat',
+                data: {{ content: text }},
+                timestamp: new Date().toISOString()
+            }};
+
+            ws.send(JSON.stringify(outMsg));
+            msgInput.value = '';
+            msgInput.focus();
+        }}
+
+        msgInput.addEventListener('keydown', function(e) {{
+            if (e.key === 'Enter' && !e.shiftKey) {{
+                e.preventDefault();
+                sendMessage();
+            }}
+        }});
+
+        // Auto-connect
+        connect();
+    </script>
+    </body>
+    </html>
+    """
+
+    components.html(ws_chat_html, height=560, scrolling=False)
 
 
 if __name__ == "__main__":
