@@ -1,13 +1,18 @@
 # ============================================
-# Docker Compose - Local Development
+# Docker Compose - Full Stack
 # ============================================
-# Usage: docker-compose up -d
-# This runs PostgreSQL + Redis + the app locally
+# Usage:
+#   docker-compose up -d              (start everything)
+#   docker-compose up -d api web      (start API + UI only)
+#   docker-compose logs -f api        (watch API logs)
+#   docker-compose down               (stop everything)
 
 version: '3.8'
 
 services:
+  # =============================================
   # PostgreSQL Database
+  # =============================================
   postgres:
     image: postgres:15-alpine
     container_name: llama-agent-db
@@ -20,14 +25,15 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # Redis for caching & WebSocket pub/sub
+  # =============================================
+  # Redis (Caching + WebSocket pub/sub)
+  # =============================================
   redis:
     image: redis:7-alpine
     container_name: llama-agent-redis
@@ -42,7 +48,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # Llama Agent API
+  # =============================================
+  # REST API (FastAPI + Swagger UI)
+  # =============================================
   api:
     build:
       context: .
@@ -51,7 +59,7 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
-      - "8765:8765"  # WebSocket
+      - "8765:8765"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
       - REDIS_URL=redis://redis:6379
@@ -65,8 +73,15 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # =============================================
   # Streamlit Web UI
+  # =============================================
   web:
     build:
       context: .
@@ -77,10 +92,25 @@ services:
       - "8501:8501"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
-      - API_URL=http://api:8000
+      - GROQ_API_KEY=${GROQ_API_KEY}
     depends_on:
       - api
     command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+
+  # =============================================
+  # MCP Agent Server (5 specialized agents)
+  # =============================================
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llama-agent-mcp
+    restart: unless-stopped
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+    command: python mcp_agents_server.py
+    # MCP uses stdio transport (no exposed port needed)
+    # The Streamlit app connects to this via subprocess
 
 volumes:
   postgres_data:

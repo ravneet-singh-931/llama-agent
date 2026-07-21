@@ -1,0 +1,83 @@
+# ============================================
+# Streamlit Web UI Deployment + Service
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-agent-web
+  namespace: llama-agent
+  labels:
+    app: llama-agent
+    component: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: llama-agent
+      component: web
+  template:
+    metadata:
+      labels:
+        app: llama-agent
+        component: web
+    spec:
+      containers:
+        - name: web
+          image: ravneet231/llama-agent:latest
+          command: ["streamlit", "run", "app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+          ports:
+            - containerPort: 8501
+              name: http
+          env:
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: groq-api-key
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: database-url
+            - name: ENVIRONMENT
+              value: production
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8501
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8501
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          volumeMounts:
+            - name: logs
+              mountPath: /app/logs
+      volumes:
+        - name: logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-agent-web-service
+  namespace: llama-agent
+spec:
+  selector:
+    app: llama-agent
+    component: web
+  ports:
+    - port: 8501
+      targetPort: 8501
+      name: http
+  type: ClusterIP

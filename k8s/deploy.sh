@@ -42,6 +42,9 @@ kubectl wait --for=condition=ready pod -l app=redis -n $NAMESPACE --timeout=120s
 echo "🤖 Deploying Llama Agent API..."
 kubectl apply -f k8s/api.yaml
 
+echo "🌐 Deploying Streamlit Web UI..."
+kubectl apply -f k8s/web.yaml
+
 # Setup ingress
 echo "🌐 Setting up Ingress..."
 kubectl apply -f k8s/ingress.yaml
@@ -49,5 +52,6 @@ kubectl apply -f k8s/ingress.yaml
 echo "✅ Deployment complete!"
 echo ""
 echo "📊 Check status: kubectl get pods -n $NAMESPACE"
-echo "📋 View logs:    kubectl logs -f deployment/llama-agent-api -n $NAMESPACE"
+echo "📋 API logs:     kubectl logs -f deployment/llama-agent-api -n $NAMESPACE"
+echo "📋 Web logs:     kubectl logs -f deployment/llama-agent-web -n $NAMESPACE"
 echo "🔗 API URL:      http://llama-agent.local (or configure your ingress)"
