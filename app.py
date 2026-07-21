@@ -69,33 +69,44 @@ st.markdown("""
 
 # ============ MCP CLIENT MANAGEMENT ============
 
-def get_mcp_client():
-    """
-    Get or create the MCP client stored in session state.
-
-    Streamlit reruns the whole script on every interaction,
-    so we store the client in session_state to keep it alive.
-    """
-    if "mcp_client" not in st.session_state:
-        st.session_state.mcp_client = None
-        st.session_state.mcp_tools = []
-        st.session_state.mcp_connected = False
-    return st.session_state.mcp_client
-
-
 def connect_mcp():
-    """Connect to the MCP Agent Server."""
+    """Connect to the MCP Agent Server. Returns (success, tools_or_error)."""
     try:
         from mcp_client_helper import MCPAgentClient
         client = MCPAgentClient()
         tools = asyncio.run(client.connect())
-        st.session_state.mcp_client = client
         st.session_state.mcp_tools = tools
         st.session_state.mcp_connected = True
-        return True, tools
+        return True, client
     except Exception as e:
         st.session_state.mcp_connected = False
         return False, str(e)
+
+
+async def call_mcp_agent(agent_type: str, task: str) -> str:
+    """
+    Create a fresh MCP connection, call an agent, then disconnect.
+    Fresh connection each time = reliable (no stale subprocess).
+    """
+    from mcp_client_helper import MCPAgentClient
+
+    client = MCPAgentClient()
+    try:
+        await client.connect()
+
+        if agent_type == "team_status":
+            result = await client.call_agent("team_status", "")
+        elif agent_type == "collaborate":
+            result = await client.call_agent("collaborate", task)
+        else:
+            result = await client.call_agent(agent_type, task)
+
+        return result
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 # ============ SESSION STATE ============
@@ -149,7 +160,7 @@ def display_sidebar():
                 with st.spinner("Connecting to Agent Server..."):
                     success, result = connect_mcp()
                     if success:
-                        st.success(f"Connected! {len(result)} agents available.")
+                        st.success(f"Connected! {len(st.session_state.mcp_tools)} agents available.")
                         st.rerun()
                     else:
                         st.error(f"Failed: {result}")
@@ -273,31 +284,31 @@ async def process_message(user_input: str) -> str:
                 return f"Your {key} is **{value}**."
 
         # ---- MCP AGENT TEAM (complex tasks) ----
-        mcp_client = get_mcp_client()
         force_agent = st.session_state.pop("force_agent", None)
 
         if force_agent or st.session_state.get("mcp_connected"):
             try:
-                if not st.session_state.get("mcp_connected"):
-                    # Auto-connect if not connected yet
-                    connect_mcp()
-                    mcp_client = get_mcp_client()
+                if force_agent:
+                    st.session_state.last_agent = force_agent
+                    result = await call_mcp_agent(force_agent, user_input)
+                    return result
+                else:
+                    # Auto-route: use keyword detection to pick agent
+                    task_lower = user_input.lower()
+                    agent = "research"  # default
 
-                if mcp_client:
-                    if force_agent:
-                        # User manually picked an agent
-                        st.session_state.last_agent = force_agent
-                        if force_agent == "team_status":
-                            result = await mcp_client.call_agent("team_status", "")
-                        elif force_agent == "collaborate":
-                            result = await mcp_client.call_agent("collaborate", user_input)
-                        else:
-                            result = await mcp_client.call_agent(force_agent, user_input)
-                        return result
-                    else:
-                        # Auto-route based on keywords
-                        result = await mcp_client.route_and_call(user_input)
-                        return result
+                    if any(kw in task_lower for kw in ["write code", "function", "class", "debug", "python", "script", "code"]):
+                        agent = "coder"
+                    elif any(kw in task_lower for kw in ["write an article", "write a blog", "draft", "compose", "write content"]):
+                        agent = "writer"
+                    elif any(kw in task_lower for kw in ["plan", "strategy", "roadmap", "steps to", "how to start"]):
+                        agent = "planner"
+                    elif any(kw in task_lower for kw in ["analyze", "analysis", "evaluate", "assess", "patterns", "insights"]):
+                        agent = "analyzer"
+
+                    st.session_state.last_agent = agent
+                    result = await call_mcp_agent(agent, user_input)
+                    return result
             except Exception as mcp_error:
                 # If MCP fails, fall back to single agent
                 st.warning(f"MCP failed ({mcp_error}), using single agent...")
