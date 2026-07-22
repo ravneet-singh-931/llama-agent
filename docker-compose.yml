@@ -8,7 +8,7 @@
 #   docker-compose logs -f grafana          (watch Grafana logs)
 #   docker-compose down                     (stop everything)
 #
-# Services: 10 total
+# Services: 11 total
 #   - postgres       (database)
 #   - redis          (caching)
 #   - api            (FastAPI REST + WebSocket)
@@ -19,6 +19,7 @@
 #   - loki            (log aggregation)
 #   - promtail        (log shipping)
 #   - node-exporter   (system metrics)
+#   - phoenix         (LLM observability by Arize AI)
 # ============================================
 
 services:
@@ -250,6 +251,23 @@ services:
     networks:
       - monitoring
 
+  # =============================================
+  # 11. Phoenix (LLM Observability by Arize AI)
+  # =============================================
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: llama-agent-phoenix
+    restart: unless-stopped
+    ports:
+      - "6006:6006"
+    environment:
+      - PHOENIX_PORT=6006
+      - PHOENIX_HOST=0.0.0.0
+    volumes:
+      - phoenix_data:/root/.phoenix
+    networks:
+      - monitoring
+
 
 # ============================================
 # Docker Secrets (encrypted files)
@@ -285,3 +303,4 @@ volumes:
   grafana_data:
   loki_data:
   promtail_positions:
+  phoenix_data:

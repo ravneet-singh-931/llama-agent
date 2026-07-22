@@ -17,8 +17,9 @@ python-docx
 # --- Vector Database (Smart RAG) ---
 chromadb
 
-# --- Observability (Langfuse) ---
-langfuse
+# --- Observability (Phoenix by Arize AI) ---
+arize-phoenix
+openinference-instrumentation-llama-index
 
 # --- Data Processing ---
 pandas

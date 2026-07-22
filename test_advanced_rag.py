@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 
-from modules.advanced_rag import ReRanker, SubQuestionEngine, RouterQueryEngine, LangfuseTracer, AdvancedRAG
+from modules.advanced_rag import ReRanker, SubQuestionEngine, RouterQueryEngine, PhoenixTracer, AdvancedRAG
 from modules.vector_store import get_vector_store
 
 print("=" * 60)
@@ -59,9 +59,9 @@ print(f"  Data query routes to: {router.classify_query(data_q)}")
 print(f"  General query routes to: {router.classify_query(general_q)}")
 print(f"  PASS: True")
 
-# ===== TEST 4: Langfuse Tracer =====
-print("\n--- TEST 4: Langfuse Tracer (Local Mode) ---")
-tracer = LangfuseTracer(langfuse_enabled=False)
+# ===== TEST 4: Phoenix Tracer =====
+print("\n--- TEST 4: Phoenix Tracer (Local Mode) ---")
+tracer = PhoenixTracer(phoenix_enabled=False)
 
 trace_id = tracer.start_trace("Test query")
 tracer.log_step("router", input_data="test query", output_data=["code", "docs"], duration_ms=5.2)

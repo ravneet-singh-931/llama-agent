@@ -496,12 +496,12 @@ class RouterQueryEngine:
         return context
 
 
-# ============ 4. LANGFUSE OBSERVABILITY ============
+# ============ 4. PHOENIX OBSERVABILITY (Arize AI) ============
 
 
-class LangfuseTracer:
+class PhoenixTracer:
     """
-    Observability layer that logs every RAG step.
+    Observability layer using Arize Phoenix for LLM tracing.
     
     Tracks:
       - Query classification (router)
@@ -509,47 +509,48 @@ class LangfuseTracer:
       - Search results and timing
       - Re-ranking scores
       - Final answer generation
-      - Token usage and costs
     
-    Works with Langfuse cloud (requires API key) or local JSON logging.
+    Phoenix features:
+      - Visual trace timeline in Phoenix dashboard
+      - Drift detection for RAG pipelines
+      - OpenTelemetry-native (no vendor lock-in)
+      - Free to self-host
+    
+    Dashboard: http://localhost:6006 (when Phoenix container is running)
     """
     
     def __init__(
         self,
-        langfuse_enabled: bool = False,
-        public_key: str = "",
-        secret_key: str = "",
-        host: str = "https://cloud.langfuse.com",
+        phoenix_enabled: bool = False,
+        endpoint: str = "http://localhost:6006",
     ):
         """
         Args:
-            langfuse_enabled: Whether to send traces to Langfuse cloud
-            public_key: Langfuse public key (from langfuse.com)
-            secret_key: Langfuse secret key
-            host: Langfuse host URL
+            phoenix_enabled: Whether to send traces to Phoenix
+            endpoint: Phoenix collector endpoint
         """
-        self.enabled = langfuse_enabled
-        self.client = None
+        self.enabled = phoenix_enabled
+        self.endpoint = endpoint
         self.traces = []
         self.current_trace = None
+        self.tracer = None
         
-        if langfuse_enabled and public_key:
+        if phoenix_enabled:
             try:
-                from langfuse import Langfuse
-                self.client = Langfuse(
-                    public_key=public_key,
-                    secret_key=secret_key,
-                    host=host,
-                )
-                print("[LANGFUSE] Connected to Langfuse")
+                import phoenix as px
+                # Initialize Phoenix session (connects to local or remote Phoenix)
+                self.session = px.launch_app(endpoint=endpoint)
+                self.tracer = self.session.tracer
+                print(f"[PHOENIX] Connected to Phoenix at {endpoint}")
+                print(f"[PHOENIX] Dashboard: http://localhost:6006")
             except ImportError:
-                print("[LANGFUSE] langfuse not installed. Install: pip install langfuse")
+                print("[PHOENIX] arize-phoenix not installed. Install: pip install arize-phoenix")
                 self.enabled = False
             except Exception as e:
-                print(f"[LANGFUSE] Connection failed: {e}")
+                print(f"[PHOENIX] Connection failed: {e}")
                 self.enabled = False
         else:
-            print("[LANGFUSE] Running in local logging mode")
+            print("[PHOENIX] Running in local logging mode")
     
     def start_trace(self, query: str) -> str:
         """Start a new trace for a query."""
@@ -565,17 +566,6 @@ class LangfuseTracer:
         
         self.current_trace = trace
         self.traces.append(trace)
-        
-        # Send to Langfuse if enabled
-        if self.enabled and self.client:
-            try:
-                self.client.trace(
-                    id=trace_id,
-                    name="rag_query",
-                    input={"query": query},
-                )
-            except Exception:
-                pass
         
         return trace_id
     
@@ -601,18 +591,6 @@ class LangfuseTracer:
         }
         
         self.current_trace["steps"].append(step)
-        
-        # Send to Langfuse if enabled
-        if self.enabled and self.client:
-            try:
-                self.client.generation(
-                    name=step_name,
-                    input=input_data,
-                    output=output_data,
-                    metadata=metadata or {},
-                )
-            except Exception:
-                pass
     
     def end_trace(self, answer: str = None, success: bool = True):
         """End the current trace."""
@@ -676,7 +654,7 @@ class AdvancedRAG:
     1. Router → routes to correct collection
     2. Re-ranking → improves result quality
     3. SubQuestion → handles complex queries
-    4. Langfuse → tracks everything
+    4. Phoenix → tracks everything (drift detection, visual traces)
     
     Usage:
         rag = AdvancedRAG(vector_store)
@@ -686,9 +664,8 @@ class AdvancedRAG:
     def __init__(
         self,
         default_store=None,
-        langfuse_enabled: bool = False,
-        langfuse_public_key: str = "",
-        langfuse_secret_key: str = "",
+        phoenix_enabled: bool = False,
+        phoenix_endpoint: str = "http://localhost:6006",
     ):
         # Router (default: single collection)
         self.router = RouterQueryEngine()
@@ -698,11 +675,10 @@ class AdvancedRAG:
         # Re-ranker
         self.reranker = ReRanker()
         
-        # Tracer
-        self.tracer = LangfuseTracer(
-            langfuse_enabled=langfuse_enabled,
-            public_key=langfuse_public_key,
-            secret_key=langfuse_secret_key,
+        # Tracer (Phoenix)
+        self.tracer = PhoenixTracer(
+            phoenix_enabled=phoenix_enabled,
+            endpoint=phoenix_endpoint,
         )
         
         # SubQuestion engine (needs an answer function)
