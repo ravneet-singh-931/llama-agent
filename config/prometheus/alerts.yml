@@ -1,0 +1,163 @@
+# ============================================
+# Prometheus Alert Rules
+# Defines alerts that trigger when conditions are met
+# ============================================
+
+groups:
+  # ---- Application Alerts ----
+  - name: llama_agent_app
+    rules:
+      # Alert: API is down (no requests for 2 minutes)
+      - alert: ApiDown
+        expr: absent(up{job="llama-agent-api"})
+        for: 2m
+        labels:
+          severity: critical
+          service: llama-agent
+        annotations:
+          summary: "API is DOWN"
+          description: "Llama Agent API has not been reachable for 2 minutes."
+
+      # Alert: High error rate (>5 errors/sec for 5 minutes)
+      - alert: HighErrorRate
+        expr: rate(llama_agent_errors_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: llama-agent
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value }} errors/sec (threshold: 5)."
+
+      # Alert: High response time (P95 > 5 seconds for 5 minutes)
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, rate(llama_agent_response_time_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: llama-agent
+        annotations:
+          summary: "Slow API responses detected"
+          description: "P95 response time is {{ $value | humanizeDuration }} (threshold: 5s)."
+
+      # Alert: Very high response time (P99 > 10 seconds for 5 minutes)
+      - alert: VeryHighResponseTime
+        expr: histogram_quantile(0.99, rate(llama_agent_response_time_seconds_bucket[5m])) > 10
+        for: 5m
+        labels:
+          severity: critical
+          service: llama-agent
+        annotations:
+          summary: "CRITICAL: Very slow API responses"
+          description: "P99 response time is {{ $value | humanizeDuration }} (threshold: 10s)."
+
+      # Alert: 5xx errors detected
+      - alert: ServerErrors
+        expr: rate(llama_agent_http_responses_total{status_code=~"5.."}[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: llama-agent
+        annotations:
+          summary: "Server errors (5xx) detected"
+          description: "{{ $value }} 5xx responses/sec detected."
+
+  # ---- Infrastructure Alerts ----
+  - name: llama_agent_infra
+    rules:
+      # Alert: High CPU usage (>85% for 10 minutes)
+      - alert: HighCpuUsage
+        expr: 100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 10m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value | humanize }}% (threshold: 85%)."
+
+      # Alert: High memory usage (>90% for 5 minutes)
+      - alert: HighMemoryUsage
+        expr: 100 - ((node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100) > 90
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanize }}% (threshold: 90%)."
+
+      # Alert: Disk space low (<10% free)
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 10
+        for: 5m
+        labels:
+          severity: critical
+          service: system
+        annotations:
+          summary: "Disk space critically low"
+          description: "Only {{ $value | humanize }}% disk space remaining."
+
+  # ---- Database Alerts ----
+  - name: llama_agent_db
+    rules:
+      # Alert: PostgreSQL is down
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "PostgreSQL is DOWN"
+          description: "PostgreSQL database has been unreachable for 2 minutes."
+
+      # Alert: High database connections
+      - alert: HighDbConnections
+        expr: pg_stat_activity_count > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High database connection count"
+          description: "{{ $value }} active connections (threshold: 80)."
+
+  # ---- Redis Alerts ----
+  - name: llama_agent_redis
+    rules:
+      # Alert: Redis is down
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis is DOWN"
+          description: "Redis has been unreachable for 2 minutes."
+
+      # Alert: High Redis memory usage
+      - alert: HighRedisMemory
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "Redis memory usage high"
+          description: "Redis memory usage is {{ $value | humanizePercentage }}."
+
+  # ---- Container Alerts ----
+  - name: llama_agent_containers
+    rules:
+      # Alert: Container not running
+      - alert: ContainerNotRunning
+        expr: absent(container_last_seen{name=~"llama-agent-.*"})
+        for: 2m
+        labels:
+          severity: critical
+          service: containers
+        annotations:
+          summary: "Container not running"
+          description: "Container {{ $labels.name }} has not been seen for 2 minutes."

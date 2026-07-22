@@ -1,0 +1,291 @@
+"""
+Security Module - Input Validation & File Upload Protection
+
+Features:
+- File upload validation (size, type, filename sanitization)
+- Input length limits to prevent abuse
+- Rate limiting helper
+- Path traversal prevention
+"""
+
+import os
+import re
+from pathlib import Path
+from typing import Optional, Tuple, List
+
+
+# ============ FILE UPLOAD SECURITY ============
+
+# Maximum file size: 10 MB
+MAX_FILE_SIZE = 10 * 1024 * 1024
+
+# Allowed file extensions (lowercase, with dot)
+ALLOWED_EXTENSIONS = {
+    ".txt", ".md", ".py", ".json", ".csv", ".pdf", ".docx"
+}
+
+# Dangerous extensions that should NEVER be uploaded
+BLOCKED_EXTENSIONS = {
+    ".exe", ".bat", ".cmd", ".com", ".msi", ".scr", ".pif",
+    ".sh", ".bash", ".ps1", ".vbs", ".js", ".jar",
+    ".php", ".asp", ".aspx", ".jsp", ".cgi",
+    ".dll", ".so", ".dylib",
+}
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize a filename to prevent path traversal attacks.
+    
+    Attacks like: ../../../etc/passwd or ..\\windows\\system32\\config
+    This function strips directory components and dangerous characters.
+    """
+    # Remove any directory components (path traversal)
+    filename = os.path.basename(filename)
+    
+    # Remove null bytes
+    filename = filename.replace("\x00", "")
+    
+    # Replace dangerous characters with underscores
+    filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', filename)
+    
+    # Collapse multiple underscores
+    filename = re.sub(r'_+', '_', filename)
+    
+    # Strip leading/trailing dots and spaces
+    filename = filename.strip('. ')
+    
+    # If empty after sanitization, use a default
+    if not filename:
+        filename = "uploaded_file"
+    
+    # Limit length
+    if len(filename) > 255:
+        name, ext = os.path.splitext(filename)
+        filename = name[:255 - len(ext)] + ext
+    
+    return filename
+
+
+def validate_file_upload(
+    filename: str,
+    file_size: int,
+    content_type: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """
+    Validate a file upload for security.
+    
+    Args:
+        filename: Original filename from the upload
+        file_size: Size of the file in bytes
+        content_type: MIME type (optional, for additional validation)
+    
+    Returns:
+        (is_valid, error_message)
+        If valid: (True, "")
+        If invalid: (False, "reason for rejection")
+    """
+    # 1. Check file size
+    if file_size > MAX_FILE_SIZE:
+        size_mb = file_size / (1024 * 1024)
+        max_mb = MAX_FILE_SIZE / (1024 * 1024)
+        return False, f"File too large ({size_mb:.1f} MB). Maximum: {max_mb} MB"
+    
+    if file_size == 0:
+        return False, "File is empty"
+    
+    # 2. Check file extension
+    ext = Path(filename).suffix.lower()
+    
+    if not ext:
+        return False, "File has no extension"
+    
+    if ext in BLOCKED_EXTENSIONS:
+        return False, f"File type '{ext}' is not allowed for security reasons"
+    
+    if ext not in ALLOWED_EXTENSIONS:
+        allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
+        return False, f"File type '{ext}' not supported. Allowed: {allowed}"
+    
+    # 3. Check filename for suspicious patterns
+    suspicious_patterns = [
+        r'\.\.',           # Path traversal
+        r'[/\\]',          # Directory separators (should be stripped by basename, but check)
+        r'^\.',            # Hidden files
+        r'[\x00-\x1f]',   # Control characters
+    ]
+    
+    for pattern in suspicious_patterns:
+        if re.search(pattern, filename):
+            return False, f"Filename contains suspicious characters"
+    
+    return True, ""
+
+
+def get_upload_path(upload_dir: str, filename: str) -> str:
+    """
+    Get a safe upload path with sanitized filename.
+    Prevents path traversal in the upload directory.
+    """
+    safe_name = sanitize_filename(filename)
+    full_path = os.path.join(upload_dir, safe_name)
+    
+    # Ensure the resolved path is still within the upload directory
+    upload_dir_resolved = os.path.realpath(upload_dir)
+    full_path_resolved = os.path.realpath(full_path)
+    
+    if not full_path_resolved.startswith(upload_dir_resolved):
+        raise ValueError(f"Path traversal detected: {filename}")
+    
+    return full_path
+
+
+# ============ INPUT VALIDATION ============
+
+# Maximum lengths for various inputs
+MAX_USERNAME_LENGTH = 50
+MAX_EMAIL_LENGTH = 255
+MAX_PASSWORD_LENGTH = 128
+MAX_MESSAGE_LENGTH = 10000  # 10K chars for chat messages
+MAX_FACT_KEY_LENGTH = 100
+MAX_FACT_VALUE_LENGTH = 1000
+MAX_SEARCH_QUERY_LENGTH = 500
+
+
+def validate_username(username: str) -> Tuple[bool, str]:
+    """Validate a username"""
+    if not username:
+        return False, "Username is required"
+    if len(username) > MAX_USERNAME_LENGTH:
+        return False, f"Username too long (max {MAX_USERNAME_LENGTH} characters)"
+    if not re.match(r'^[a-zA-Z0-9_-]+$', username):
+        return False, "Username can only contain letters, numbers, underscores, and hyphens"
+    if username.startswith('-') or username.startswith('_'):
+        return False, "Username cannot start with a hyphen or underscore"
+    return True, ""
+
+
+def validate_email(email: str) -> Tuple[bool, str]:
+    """Validate an email address"""
+    if not email:
+        return False, "Email is required"
+    if len(email) > MAX_EMAIL_LENGTH:
+        return False, f"Email too long (max {MAX_EMAIL_LENGTH} characters)"
+    # Basic email pattern check
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(pattern, email):
+        return False, "Invalid email format"
+    return True, ""
+
+
+def validate_password(password: str) -> Tuple[bool, str]:
+    """Validate a password"""
+    if not password:
+        return False, "Password is required"
+    if len(password) < 4:
+        return False, "Password must be at least 4 characters"
+    if len(password) > MAX_PASSWORD_LENGTH:
+        return False, f"Password too long (max {MAX_PASSWORD_LENGTH} characters)"
+    return True, ""
+
+
+def validate_message(message: str) -> Tuple[bool, str]:
+    """Validate a chat message"""
+    if not message or not message.strip():
+        return False, "Message cannot be empty"
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return False, f"Message too long (max {MAX_MESSAGE_LENGTH} characters)"
+    return True, ""
+
+
+def validate_search_query(query: str) -> Tuple[bool, str]:
+    """Validate a search query"""
+    if not query or not query.strip():
+        return False, "Search query cannot be empty"
+    if len(query) > MAX_SEARCH_QUERY_LENGTH:
+        return False, f"Query too long (max {MAX_SEARCH_QUERY_LENGTH} characters)"
+    return True, ""
+
+
+def validate_fact_key(key: str) -> Tuple[bool, str]:
+    """Validate a fact key"""
+    if not key or not key.strip():
+        return False, "Fact key cannot be empty"
+    if len(key) > MAX_FACT_KEY_LENGTH:
+        return False, f"Fact key too long (max {MAX_FACT_KEY_LENGTH} characters)"
+    return True, ""
+
+
+def validate_fact_value(value: str) -> Tuple[bool, str]:
+    """Validate a fact value"""
+    if not value or not value.strip():
+        return False, "Fact value cannot be empty"
+    if len(value) > MAX_FACT_VALUE_LENGTH:
+        return False, f"Fact value too long (max {MAX_FACT_VALUE_LENGTH} characters)"
+    return True, ""
+
+
+# ============ RATE LIMITING (Simple In-Memory) ============
+
+from collections import defaultdict
+from datetime import datetime, timedelta
+import threading
+
+
+class SimpleRateLimiter:
+    """
+    Simple in-memory rate limiter.
+    For production, use Redis-based rate limiting.
+    """
+    
+    def __init__(
+        self,
+        requests_per_minute: int = 60,
+        requests_per_hour: int = 1000,
+    ):
+        self.requests_per_minute = requests_per_minute
+        self.requests_per_hour = requests_per_hour
+        self._requests = defaultdict(list)
+        self._lock = threading.Lock()
+    
+    def _cleanup(self, key: str):
+        """Remove old entries"""
+        now = datetime.now()
+        cutoff_minute = now - timedelta(minutes=1)
+        cutoff_hour = now - timedelta(hours=1)
+        
+        self._requests[key] = [
+            ts for ts in self._requests[key]
+            if ts > cutoff_hour
+        ]
+    
+    def is_rate_limited(self, key: str) -> Tuple[bool, str]:
+        """
+        Check if a key (e.g., IP address, user ID) is rate limited.
+        
+        Returns:
+            (is_limited, message)
+        """
+        with self._lock:
+            self._cleanup(key)
+            now = datetime.now()
+            cutoff_minute = now - timedelta(minutes=1)
+            cutoff_hour = now - timedelta(hours=1)
+            
+            # Count requests in last minute
+            recent_minute = sum(1 for ts in self._requests[key] if ts > cutoff_minute)
+            if recent_minute >= self.requests_per_minute:
+                return True, f"Rate limit: {self.requests_per_minute} requests per minute"
+            
+            # Count requests in last hour
+            recent_hour = len(self._requests[key])
+            if recent_hour >= self.requests_per_hour:
+                return True, f"Rate limit: {self.requests_per_hour} requests per hour"
+            
+            # Record this request
+            self._requests[key].append(now)
+            return False, ""
+
+
+# Global rate limiter instance
+rate_limiter = SimpleRateLimiter()

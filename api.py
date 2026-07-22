@@ -30,8 +30,9 @@ from fastapi import (
     Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -60,7 +61,7 @@ from modules.prometheus_metrics import (
 
 class ChatRequest(BaseModel):
     """Chat request model"""
-    message: str
+    message: str = Field(..., min_length=1, max_length=10000, description="Chat message")
     user_id: Optional[str] = "default"
     context: Optional[str] = None
 
@@ -75,19 +76,19 @@ class ChatResponse(BaseModel):
 
 class RememberRequest(BaseModel):
     """Remember fact request"""
-    key: str
-    value: str
+    key: str = Field(..., min_length=1, max_length=100, description="Fact key")
+    value: str = Field(..., min_length=1, max_length=1000, description="Fact value")
 
 
 class RecallRequest(BaseModel):
     """Recall fact request"""
-    key: str
+    key: str = Field(..., min_length=1, max_length=100, description="Fact key")
 
 
 class SearchRequest(BaseModel):
     """Search documents request"""
-    query: str
-    top_k: Optional[int] = 3
+    query: str = Field(..., min_length=1, max_length=500, description="Search query")
+    top_k: Optional[int] = Field(default=3, ge=1, le=20, description="Number of results")
 
 
 class HealthResponse(BaseModel):
@@ -103,16 +104,16 @@ class HealthResponse(BaseModel):
 
 class RegisterRequest(BaseModel):
     """User registration request"""
-    username: str
+    username: str = Field(..., min_length=3, max_length=50, pattern=r'^[a-zA-Z0-9_-]+$')
     email: EmailStr
-    password: str
-    full_name: Optional[str] = None
+    password: str = Field(..., min_length=4, max_length=128)
+    full_name: Optional[str] = Field(default=None, max_length=100)
 
 
 class LoginRequest(BaseModel):
     """User login request"""
-    username: str  # Can be username or email
-    password: str
+    username: str = Field(..., min_length=1, max_length=50)  # Can be username or email
+    password: str = Field(..., min_length=1, max_length=128)
 
 
 class TokenResponse(BaseModel):
@@ -184,15 +185,57 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
+# CORS middleware - RESTRICTED for security
 config = get_config()
+
+# Production CORS: only allow specific origins
+# Development: allow all (for local testing)
+import os as _os
+_environment = _os.getenv("ENVIRONMENT", "development")
+
+if _environment == "production":
+    # PRODUCTION: Only allow your actual domain(s)
+    cors_origins = [
+        "http://localhost:80",      # Nginx HTTP
+        "http://localhost:443",     # Nginx HTTPS
+        "http://localhost:8501",    # Streamlit direct
+        "http://localhost:3000",    # Grafana
+        # Add your production domain here:
+        # "https://yourdomain.com",
+    ]
+else:
+    # DEVELOPMENT: Allow all (safe for local testing only)
+    cors_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config.cors.allow_origins,
-    allow_credentials=config.cors.allow_credentials,
-    allow_methods=config.cors.allow_methods,
-    allow_headers=config.cors.allow_headers,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
+
+# Rate limiting middleware
+from modules.security import rate_limiter
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Rate limiting to prevent abuse"""
+    # Skip rate limiting for health checks and metrics
+    if request.url.path in ("/health", "/metrics", "/"):
+        return await call_next(request)
+    
+    # Get client IP
+    client_ip = request.client.host if request.client else "unknown"
+    
+    is_limited, message = rate_limiter.is_rate_limited(client_ip)
+    if is_limited:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": message, "retry_after": 60},
+        )
+    
+    return await call_next(request)
 
 # Prometheus metrics middleware
 @app.middleware("http")
@@ -481,33 +524,68 @@ async def delete_fact(key: str):
 
 @app.post("/documents/read")
 async def read_document(file_path: str):
-    """Read a document"""
+    """Read a document (with path traversal protection)"""
     try:
+        # SECURITY: Basic path validation - reject obvious traversal attempts
+        if ".." in file_path or file_path.startswith("/"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file path: path traversal not allowed",
+            )
+        
+        # Check if file exists and is readable
+        if not os.path.isfile(file_path):
+            raise HTTPException(
+                status_code=404,
+                detail=f"File not found: {file_path}",
+            )
+        
         rag = app.state.rag
         result = rag.add_document(file_path)
         return {"status": "success", "message": result}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/documents/upload")
 async def upload_document(file: UploadFile = File(...)):
-    """Upload and read a document"""
+    """Upload and read a document (with security validation)"""
     try:
-        # Save uploaded file
+        # SECURITY: Validate file upload
+        from modules.security import validate_file_upload, sanitize_filename, get_upload_path
+        
+        # Read file content to check size and validate
+        content = await file.read()
+        file_size = len(content)
+        
+        is_valid, error = validate_file_upload(
+            file.filename or "unknown",
+            file_size,
+            file.content_type,
+        )
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=f"Upload rejected: {error}")
+        
+        # Sanitize filename and get safe path
         upload_dir = "uploads"
         os.makedirs(upload_dir, exist_ok=True)
         
-        file_path = os.path.join(upload_dir, file.filename)
+        safe_filename = sanitize_filename(file.filename or "uploaded_file")
+        file_path = get_upload_path(upload_dir, safe_filename)
+        
+        # Save file
         with open(file_path, "wb") as f:
-            content = await file.read()
             f.write(content)
         
         # Read with RAG
         rag = app.state.rag
         result = rag.add_document(file_path)
         
-        return {"status": "success", "message": result, "file": file.filename}
+        return {"status": "success", "message": result, "file": safe_filename}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

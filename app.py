@@ -498,27 +498,39 @@ def display_sidebar():
         uploaded_file = st.file_uploader(
             "Drop a file here",
             type=["txt", "md", "py", "json", "csv", "pdf", "docx"],
-            help="Supported: TXT, MD, PY, JSON, CSV, PDF, DOCX"
+            help="Supported: TXT, MD, PY, JSON, CSV, PDF, DOCX | Max: 10 MB"
         )
         if uploaded_file:
             with st.spinner("Processing file..."):
-                # Save uploaded file to temp location
-                temp_dir = tempfile.mkdtemp()
-                file_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(file_path, "wb") as f:
-                    f.write(uploaded_file.getvalue())
+                # SECURITY: Validate file upload
+                from modules.security import validate_file_upload, sanitize_filename, get_upload_path
 
-                # Add to RAG system (reuse same instance across reruns)
-                if "rag" not in st.session_state:
-                    from modules.rag import SimpleRAG
-                    st.session_state.rag = SimpleRAG()
-                rag = st.session_state.rag
-                result = rag.add_document(file_path)
-                if "Added" in result:
-                    st.session_state.documents.append(uploaded_file.name)
-                    st.success(f"Loaded: {uploaded_file.name}")
+                is_valid, error = validate_file_upload(
+                    uploaded_file.name,
+                    uploaded_file.size,
+                    uploaded_file.type,
+                )
+                if not is_valid:
+                    st.error(f"Upload rejected: {error}")
                 else:
-                    st.error(result)
+                    # Save uploaded file to temp location with sanitized filename
+                    temp_dir = tempfile.mkdtemp()
+                    safe_name = sanitize_filename(uploaded_file.name)
+                    file_path = os.path.join(temp_dir, safe_name)
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getvalue())
+
+                    # Add to RAG system (reuse same instance across reruns)
+                    if "rag" not in st.session_state:
+                        from modules.rag import SimpleRAG
+                        st.session_state.rag = SimpleRAG()
+                    rag = st.session_state.rag
+                    result = rag.add_document(file_path)
+                    if "Added" in result:
+                        st.session_state.documents.append(safe_name)
+                        st.success(f"Loaded: {safe_name}")
+                    else:
+                        st.error(result)
 
         if st.session_state.documents:
             st.caption(f"Loaded: {', '.join(st.session_state.documents)}")

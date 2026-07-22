@@ -1,11 +1,13 @@
 {
   "annotations": { "list": [] },
   "editable": true,
-  "title": "Llama Agent - Overview",
-  "uid": "llama-agent-overview",
+  "title": "Llama Agent - Operations Dashboard",
+  "uid": "llama-agent-ops",
+  "tags": ["llama-agent", "operations", "monitoring"],
+  "timezone": "browser",
   "panels": [
     {
-      "title": "Total Requests",
+      "title": "Total API Requests",
       "type": "stat",
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
       "targets": [
@@ -16,6 +18,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "steps": [
               { "color": "green", "value": null },
@@ -24,6 +27,9 @@
             ]
           }
         }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] }
       }
     },
     {
@@ -38,6 +44,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "steps": [
               { "color": "green", "value": null },
@@ -61,6 +68,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
+          "color": { "mode": "thresholds" },
           "thresholds": {
             "steps": [
               { "color": "green", "value": null },
@@ -83,10 +91,17 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
         }
       }
     },
+
     {
       "title": "Requests per Second",
       "type": "timeseries",
@@ -98,7 +113,10 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "reqps" }
+        "defaults": {
+          "unit": "reqps",
+          "color": { "mode": "palette-classic" }
+        }
       }
     },
     {
@@ -120,9 +138,13 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s" }
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" }
+        }
       }
     },
+
     {
       "title": "HTTP Status Codes",
       "type": "timeseries",
@@ -132,7 +154,12 @@
           "expr": "rate(llama_agent_http_responses_total[5m])",
           "legendFormat": "{{status_code}}"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      }
     },
     {
       "title": "Active Connections",
@@ -143,10 +170,134 @@
           "expr": "llama_agent_active_connections",
           "legendFormat": "Active"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "title": "Requests by Endpoint",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "targets": [
+        {
+          "expr": "topk(10, llama_agent_requests_total)",
+          "legendFormat": "{{endpoint}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "title": "Error Rate Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "targets": [
+        {
+          "expr": "rate(llama_agent_errors_total[5m])",
+          "legendFormat": "errors/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "err/s",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "title": "System: CPU Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "targets": [
+        {
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+          "legendFormat": "CPU %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "System: Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "targets": [
+        {
+          "expr": "100 - ((node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)",
+          "legendFormat": "Memory %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "title": "Response Time Histogram",
+      "type": "histogram",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
+      "targets": [
+        {
+          "expr": "llama_agent_response_time_seconds_bucket",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
     }
   ],
   "time": { "from": "now-1h", "to": "now" },
   "refresh": "5s",
-  "schemaVersion": 39
+  "schemaVersion": 39,
+  "version": 2
 }
