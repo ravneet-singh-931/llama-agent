@@ -14,6 +14,9 @@ python-dotenv
 PyPDF2
 python-docx
 
+# --- Vector Database (Smart RAG) ---
+chromadb
+
 # --- Data Processing ---
 pandas
 

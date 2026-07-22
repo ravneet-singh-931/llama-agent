@@ -364,8 +364,8 @@ def init_session_state():
     if "documents" not in st.session_state:
         st.session_state.documents = []
     if "rag" not in st.session_state:
-        from modules.rag import SimpleRAG
-        st.session_state.rag = SimpleRAG()
+        from modules.vector_store import get_vector_store
+        st.session_state.rag = get_vector_store()
     if "facts" not in st.session_state:
         st.session_state.facts = {}
     if "last_agent" not in st.session_state:
@@ -522,8 +522,8 @@ def display_sidebar():
 
                     # Add to RAG system (reuse same instance across reruns)
                     if "rag" not in st.session_state:
-                        from modules.rag import SimpleRAG
-                        st.session_state.rag = SimpleRAG()
+                        from modules.vector_store import get_vector_store
+                        st.session_state.rag = get_vector_store()
                     rag = st.session_state.rag
                     result = rag.add_document(file_path)
                     if "Added" in result:
@@ -638,8 +638,8 @@ async def process_message(user_input: str) -> str:
 
         # Include document context if documents are loaded
         if "rag" not in st.session_state:
-            from modules.rag import SimpleRAG
-            st.session_state.rag = SimpleRAG()
+            from modules.vector_store import get_vector_store
+            st.session_state.rag = get_vector_store()
         rag = st.session_state.rag
         doc_context = rag.get_context(user_input)
         enhanced_input = f"{user_input}\n\n{doc_context}" if doc_context else user_input
@@ -678,11 +678,11 @@ def _route_command(user_input: str) -> str:
     Returns: "special", "mcp", or "stream"
     """
     from modules.memory import ConversationMemory, FactMemory
-    from modules.rag import SimpleRAG
+    from modules.vector_store import get_vector_store
 
     memory = ConversationMemory()
     facts = FactMemory()
-    rag = SimpleRAG()
+    rag = get_vector_store()
 
     # ---- SPECIAL COMMANDS ----
 
@@ -847,8 +847,8 @@ def _render_standard_chat():
                 facts_obj = FactMemory()
                 # Reuse the same RAG instance (persists uploaded docs across reruns)
                 if "rag" not in st.session_state:
-                    from modules.rag import SimpleRAG
-                    st.session_state.rag = SimpleRAG()
+                    from modules.vector_store import get_vector_store
+                    st.session_state.rag = get_vector_store()
                 rag = st.session_state.rag
                 memory_obj.add_message("user", prompt)
 
