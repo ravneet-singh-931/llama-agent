@@ -365,7 +365,10 @@ def init_session_state():
         st.session_state.documents = []
     if "rag" not in st.session_state:
         from modules.vector_store import get_vector_store
-        st.session_state.rag = get_vector_store()
+        from modules.advanced_rag import AdvancedRAG
+        base_store = get_vector_store()
+        st.session_state.rag = base_store
+        st.session_state.advanced_rag = AdvancedRAG(default_store=base_store)
     if "facts" not in st.session_state:
         st.session_state.facts = {}
     if "last_agent" not in st.session_state:
@@ -639,9 +642,20 @@ async def process_message(user_input: str) -> str:
         # Include document context if documents are loaded
         if "rag" not in st.session_state:
             from modules.vector_store import get_vector_store
-            st.session_state.rag = get_vector_store()
-        rag = st.session_state.rag
-        doc_context = rag.get_context(user_input)
+            from modules.advanced_rag import AdvancedRAG
+            base_store = get_vector_store()
+            st.session_state.rag = base_store
+            st.session_state.advanced_rag = AdvancedRAG(default_store=base_store)
+        
+        # Use Advanced RAG with re-ranking
+        if "advanced_rag" in st.session_state and st.session_state.documents:
+            advanced = st.session_state.advanced_rag
+            rag_result = advanced.query(user_input, use_subquestion=False)
+            doc_context = rag_result["context"]
+        else:
+            rag = st.session_state.rag
+            doc_context = rag.get_context(user_input)
+        
         enhanced_input = f"{user_input}\n\n{doc_context}" if doc_context else user_input
 
         force_agent = st.session_state.pop("_mcp_force_agent", None)
@@ -848,12 +862,29 @@ def _render_standard_chat():
                 # Reuse the same RAG instance (persists uploaded docs across reruns)
                 if "rag" not in st.session_state:
                     from modules.vector_store import get_vector_store
-                    st.session_state.rag = get_vector_store()
-                rag = st.session_state.rag
+                    from modules.advanced_rag import AdvancedRAG
+                    base_store = get_vector_store()
+                    st.session_state.rag = base_store
+                    st.session_state.advanced_rag = AdvancedRAG(default_store=base_store)
                 memory_obj.add_message("user", prompt)
 
                 facts_context = facts_obj.get_context_string()
-                doc_context = rag.get_context(prompt)
+                
+                # Use Advanced RAG with re-ranking + sub-question decomposition
+                if "advanced_rag" in st.session_state and st.session_state.documents:
+                    advanced = st.session_state.advanced_rag
+                    rag_result = advanced.query(prompt, use_subquestion=True)
+                    doc_context = rag_result["context"]
+                    
+                    # Show trace info in sidebar (for debugging)
+                    trace = rag_result.get("trace", {})
+                    if trace.get("num_steps", 0) > 0:
+                        st.session_state._last_rag_trace = trace
+                else:
+                    # Fallback to basic RAG
+                    rag = st.session_state.rag
+                    doc_context = rag.get_context(prompt)
+                
                 enhanced_input = f"{prompt}\n\n{facts_context}\n\n{doc_context}\n\nIMPORTANT: Always respond in English."
 
                 st.session_state.last_agent = "single_agent"

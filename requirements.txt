@@ -17,6 +17,9 @@ python-docx
 # --- Vector Database (Smart RAG) ---
 chromadb
 
+# --- Observability (Langfuse) ---
+langfuse
+
 # --- Data Processing ---
 pandas
 
