@@ -2,11 +2,7 @@
 .env
 
 # Secrets (NEVER commit real secrets!)
-secrets/*.txt
-!secrets/groq_api_key.txt
-!secrets/jwt_secret_key.txt
-!secrets/postgres_password.txt
-!secrets/grafana_admin_password.txt
+secrets/
 
 # SSL certificates
 config/nginx/ssl/

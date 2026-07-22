@@ -25,6 +25,44 @@ class DocumentReader:
             return f"Error reading file: {str(e)}"
     
     @staticmethod
+    def read_csv(file_path: str) -> str:
+        """Read a CSV file smartly — extract headers, row count, and sample rows"""
+        try:
+            import csv
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                reader = csv.reader(f)
+                headers = next(reader, None)
+                if not headers:
+                    return "CSV file is empty."
+                
+                # Read up to 10 sample rows
+                rows = []
+                total = 0
+                for row in reader:
+                    total += 1
+                    if len(rows) < 10:
+                        rows.append(row)
+                
+                # Build a readable summary
+                result = f"CSV File: {Path(file_path).name}\n"
+                result += f"Columns ({len(headers)}): {', '.join(headers)}\n"
+                result += f"Total rows: {total}\n\n"
+                result += "Sample data (first 10 rows):\n\n"
+                
+                # Format as a readable table
+                result += " | ".join(headers) + "\n"
+                result += "-" * 80 + "\n"
+                for row in rows:
+                    # Pad row to match header count
+                    padded = row + [""] * (len(headers) - len(row))
+                    result += " | ".join(padded[:len(headers)]) + "\n"
+                
+                return result
+        except Exception as e:
+            # Fallback to plain text reading
+            return DocumentReader.read_text(file_path)
+    
+    @staticmethod
     def read_markdown(file_path: str) -> str:
         """Read a markdown file"""
         return DocumentReader.read_text(file_path)
@@ -67,7 +105,7 @@ class DocumentReader:
             '.md': DocumentReader.read_markdown,
             '.py': DocumentReader.read_text,
             '.json': DocumentReader.read_text,
-            '.csv': DocumentReader.read_text,
+            '.csv': DocumentReader.read_csv,
             '.pdf': DocumentReader.read_pdf,
             '.docx': DocumentReader.read_docx,
         }
@@ -151,11 +189,23 @@ class SimpleRAG:
         return results[:top_k]
     
     def get_context(self, query: str, top_k: int = 3) -> str:
-        """Get relevant context as a string for the AI to read"""
+        """Get relevant context as a string for the AI to read.
+        If no keyword matches but documents exist, return all documents anyway."""
         results = self.search(query, top_k)
         
+        # If no keyword matches, but we have documents, return ALL of them
+        if not results and self.documents:
+            context = "Uploaded documents (full content):\n\n"
+            for doc in self.documents:
+                context += f"--- File: {doc['file']} ---\n"
+                context += f"{doc['content']}\n\n"
+            # Truncate if too long (stay under ~8000 chars for LLM context)
+            if len(context) > 8000:
+                context = context[:8000] + "\n\n[...truncated, file is too large to include fully...]"
+            return context
+        
         if not results:
-            return "No relevant documents found."
+            return "No documents have been uploaded."
         
         context = "Relevant document excerpts:\n\n"
         for i, result in enumerate(results, 1):

@@ -1,18 +1,20 @@
 """
 Llama Agent - Web Interface (Streamlit)
-Run with: streamlit run app.py
 
-Now with Multi-Agent System via MCP!
+Features:
+- Chat History: conversations saved to PostgreSQL, loaded on return
+- User Login: sign up / log in, each user has their own history
+- File Upload: drag-and-drop PDF/TXT/MD files for AI to read
+- Markdown Rendering: AI responses show bold, code blocks, headers
+- Streaming responses with st.write_stream()
+- MCP Multi-Agent Team (Research, Coder, Writer, Analyzer, Planner)
 
 Architecture:
   User -> Streamlit (app.py)
               |
               |--> Single Agent (llama_agent1.py) for simple tasks
-              |      (math, time, memory, facts, documents)
-              |
               |--> MCP Client (mcp_client_helper.py) for complex tasks
-                     |
-                     |--> MCP Server (mcp_agents_server.py)
+                     |-- MCP Server (mcp_agents_server.py)
                             |-- Research Agent
                             |-- Coder Agent
                             |-- Writer Agent
@@ -26,7 +28,12 @@ import asyncio
 import os
 import sys
 import uuid
+import tempfile
 from datetime import datetime
+
+# Synchronous PostgreSQL connections (no async needed in Streamlit)
+import psycopg2
+import psycopg2.extras
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -39,7 +46,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# ============ CUSTOM CSS ============
+
 st.markdown("""
 <style>
     .stApp {
@@ -65,18 +73,244 @@ st.markdown("""
         font-size: 0.75rem;
         color: #00ff88;
     }
+    /* Conversation list in sidebar */
+    .conv-item {
+        padding: 0.4rem 0.6rem;
+        border-radius: 0.3rem;
+        cursor: pointer;
+        margin-bottom: 0.2rem;
+    }
+    .conv-item:hover {
+        background-color: #1e3a5f;
+    }
+    .conv-active {
+        background-color: #1e3a5f;
+        border-left: 3px solid #00d4ff;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
+# ============ DATABASE HELPERS FOR CHAT HISTORY ============
+# Uses synchronous psycopg2 (Streamlit is synchronous, no event loops needed)
+
+
+def _db_conn():
+    """Get a direct synchronous PostgreSQL connection via psycopg2."""
+    # Read password from Docker secret or fall back to env / default
+    password = "postgres"
+    for secret_path in ["/run/secrets/postgres_password", "secrets/postgres_password.txt"]:
+        try:
+            with open(secret_path) as f:
+                password = f.read().strip()
+                break
+        except FileNotFoundError:
+            continue
+    password = os.getenv("POSTGRES_PASSWORD", password)
+
+    return psycopg2.connect(
+        host=os.getenv("POSTGRES_HOST", "llama-agent-db"),
+        port=int(os.getenv("POSTGRES_PORT", "5432")),
+        dbname=os.getenv("POSTGRES_DB", "llama_agent"),
+        user=os.getenv("POSTGRES_USER", "postgres"),
+        password=password,
+    )
+
+
+def _db_get_or_create_user(username: str, email: str, password: str):
+    """Register a new user in PostgreSQL. Returns (user_dict, error_string)."""
+    from modules.auth import password_manager
+    import uuid as _uuid
+
+    conn = _db_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Check if user exists
+            cur.execute(
+                "SELECT id FROM users WHERE username = %s OR email = %s",
+                (username, email),
+            )
+            if cur.fetchone():
+                return None, "Username or email already exists"
+
+            user_id = str(_uuid.uuid4())
+            hashed = password_manager.hash(password)
+            cur.execute(
+                "INSERT INTO users (id, username, email, hashed_password, full_name, is_active, is_admin, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, true, false, NOW(), NOW()) RETURNING id",
+                (user_id, username, email, hashed, username),
+            )
+            conn.commit()
+            return {"id": user_id, "username": username}, None
+    except Exception as e:
+        conn.rollback()
+        return None, str(e)
+    finally:
+        conn.close()
+
+
+def _db_authenticate_user(username: str, password: str):
+    """Authenticate user from PostgreSQL. Returns user_dict or None."""
+    import bcrypt as _bcrypt
+
+    conn = _db_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, username, hashed_password, is_admin FROM users WHERE username = %s",
+                (username,),
+            )
+            row = cur.fetchone()
+            if row and _bcrypt.checkpw(
+                password.encode("utf-8"), row["hashed_password"].encode("utf-8")
+            ):
+                return {
+                    "id": str(row["id"]),
+                    "username": row["username"],
+                    "is_admin": row.get("is_admin", False),
+                }
+            return None
+    finally:
+        conn.close()
+
+
+def _db_get_conversations(user_id: str):
+    """Get all conversations for a user (newest first)."""
+    conn = _db_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, title, created_at, updated_at "
+                "FROM conversations "
+                "WHERE user_id = %s AND is_active = true "
+                "ORDER BY updated_at DESC",
+                (user_id,),
+            )
+            return [
+                {
+                    "id": str(r["id"]),
+                    "title": r["title"] or "New Chat",
+                    "created_at": r["created_at"].strftime("%Y-%m-%d %H:%M"),
+                    "updated_at": r["updated_at"].strftime("%Y-%m-%d %H:%M"),
+                }
+                for r in cur.fetchall()
+            ]
+    finally:
+        conn.close()
+
+
+def _db_create_conversation(user_id: str, title: str = "New Chat"):
+    """Create a new conversation. Returns dict with id and title."""
+    import uuid as _uuid
+
+    conn = _db_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            conv_id = str(_uuid.uuid4())
+            cur.execute(
+                "INSERT INTO conversations (id, user_id, title, created_at, updated_at, is_active) "
+                "VALUES (%s, %s, %s, NOW(), NOW(), true) RETURNING id",
+                (conv_id, user_id, title),
+            )
+            conn.commit()
+            return {"id": conv_id, "title": title}
+    except Exception as e:
+        conn.rollback()
+        return {"id": None, "title": title}
+    finally:
+        conn.close()
+
+
+def _db_get_messages(conversation_id: str):
+    """Get all messages in a conversation (chronological order)."""
+    conn = _db_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT role, content, created_at "
+                "FROM messages "
+                "WHERE conversation_id = %s "
+                "ORDER BY created_at ASC",
+                (conversation_id,),
+            )
+            return [
+                {
+                    "role": r["role"],
+                    "content": r["content"],
+                    "timestamp": r["created_at"].strftime("%H:%M:%S"),
+                }
+                for r in cur.fetchall()
+            ]
+    finally:
+        conn.close()
+
+
+def _db_save_message(conversation_id: str, role: str, content: str):
+    """Save a message to the database and auto-title the conversation."""
+    import uuid as _uuid
+
+    conn = _db_conn()
+    try:
+        with conn.cursor() as cur:
+            msg_id = str(_uuid.uuid4())
+            cur.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, created_at) "
+                "VALUES (%s, %s, %s, %s, NOW())",
+                (msg_id, conversation_id, role, content),
+            )
+            # Auto-title conversation from first user message
+            if role == "user":
+                cur.execute(
+                    "UPDATE conversations SET title = %s "
+                    "WHERE id = %s AND title = 'New Chat'",
+                    (content[:50] + ("..." if len(content) > 50 else ""), conversation_id),
+                )
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+def _db_delete_conversation(conversation_id: str):
+    """Soft-delete a conversation (set is_active = false)."""
+    conn = _db_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conversations SET is_active = false WHERE id = %s",
+                (conversation_id,),
+            )
+            conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 # ============ MCP CLIENT MANAGEMENT ============
 
+def _run_async(coro):
+    """Run an async coroutine from synchronous Streamlit code.
+    Uses a new event loop in a fresh thread to avoid conflicts with uvloop."""
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        def _target():
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+        future = pool.submit(_target)
+        return future.result(timeout=60)
+
+
 def connect_mcp():
-    """Connect to the MCP Agent Server. Returns (success, tools_or_error)."""
+    """Connect to the MCP Agent Server."""
     try:
         from mcp_client_helper import MCPAgentClient
         client = MCPAgentClient()
-        tools = asyncio.run(client.connect())
+        tools = _run_async(client.connect())
         st.session_state.mcp_tools = tools
         st.session_state.mcp_connected = True
         return True, client
@@ -86,23 +320,18 @@ def connect_mcp():
 
 
 async def call_mcp_agent(agent_type: str, task: str) -> str:
-    """
-    Create a fresh MCP connection, call an agent, then disconnect.
-    Fresh connection each time = reliable (no stale subprocess).
-    """
+    """Create a fresh MCP connection, call an agent, then disconnect."""
     from mcp_client_helper import MCPAgentClient
 
     client = MCPAgentClient()
     try:
         await client.connect()
-
         if agent_type == "team_status":
             result = await client.call_agent("team_status", "")
         elif agent_type == "collaborate":
             result = await client.call_agent("collaborate", task)
         else:
             result = await client.call_agent(agent_type, task)
-
         return result
     finally:
         try:
@@ -115,25 +344,185 @@ async def call_mcp_agent(agent_type: str, task: str) -> str:
 
 def init_session_state():
     """Initialize session state variables"""
+    # Auth
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+    if "user" not in st.session_state:
+        st.session_state.user = None
+
+    # Chat
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "current_conversation_id" not in st.session_state:
+        st.session_state.current_conversation_id = None
+    if "conversations_list" not in st.session_state:
+        st.session_state.conversations_list = []
+
+    # Agent state
     if "memory" not in st.session_state:
         st.session_state.memory = {}
     if "documents" not in st.session_state:
         st.session_state.documents = []
+    if "rag" not in st.session_state:
+        from modules.rag import SimpleRAG
+        st.session_state.rag = SimpleRAG()
     if "facts" not in st.session_state:
         st.session_state.facts = {}
     if "last_agent" not in st.session_state:
         st.session_state.last_agent = None
+    if "chat_mode" not in st.session_state:
+        st.session_state.chat_mode = "standard"
+
+
+# ============ LOGIN / REGISTER PAGE ============
+
+def render_login_page():
+    """Render login and registration UI"""
+    st.image("https://img.icons8.com/fluency/96/robot-2.png", width=80)
+    st.title("Llama Agent")
+    st.markdown("---")
+
+    tab_login, tab_register = st.tabs(["Login", "Sign Up"])
+
+    with tab_login:
+        st.subheader("Welcome Back!")
+        login_username = st.text_input("Username", key="login_user")
+        login_password = st.text_input("Password", type="password", key="login_pass")
+
+        if st.button("Login", use_container_width=True, type="primary"):
+            if login_username and login_password:
+                with st.spinner("Logging in..."):
+                    user = _db_authenticate_user(login_username, login_password)
+                    if user:
+                        st.session_state.logged_in = True
+                        st.session_state.user = user
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password")
+            else:
+                st.warning("Please enter username and password")
+
+    with tab_register:
+        st.subheader("Create Account")
+        reg_username = st.text_input("Username", key="reg_user")
+        reg_email = st.text_input("Email", key="reg_email")
+        reg_password = st.text_input("Password", type="password", key="reg_pass")
+        reg_confirm = st.text_input("Confirm Password", type="password", key="reg_confirm")
+
+        if st.button("Sign Up", use_container_width=True, type="primary"):
+            if not reg_username or not reg_email or not reg_password:
+                st.warning("Please fill all fields")
+            elif reg_password != reg_confirm:
+                st.error("Passwords don't match")
+            elif len(reg_password) < 4:
+                st.error("Password must be at least 4 characters")
+            else:
+                with st.spinner("Creating account..."):
+                    user, error = _db_get_or_create_user(reg_username, reg_email, reg_password)
+                    if user:
+                        st.success("Account created! You can now login.")
+                    else:
+                        st.error(error)
+
+    # ---- Guest Mode ----
+    st.markdown("---")
+    st.markdown("**Or** continue as guest (no history saved):")
+    if st.button("Continue as Guest", use_container_width=True):
+        st.session_state.logged_in = True
+        st.session_state.user = {"id": "guest", "username": "Guest"}
+        st.rerun()
 
 
 # ============ SIDEBAR ============
 
 def display_sidebar():
-    """Display sidebar with MCP agent status and options"""
+    """Display sidebar with conversation list, agent status, file upload, and options"""
     with st.sidebar:
         st.image("https://img.icons8.com/fluency/96/robot-2.png", width=80)
         st.title("Llama Agent")
+        st.markdown(f"**Logged in as:** {st.session_state.user.get('username', 'Guest')}")
+        st.markdown("---")
+
+        # ---- New Chat Button ----
+        if st.button("New Chat", use_container_width=True, type="primary"):
+            # Save current conversation if it has messages
+            if st.session_state.get("current_conversation_id") and st.session_state.messages:
+                for msg in st.session_state.messages:
+                    _db_save_message(
+                        st.session_state.current_conversation_id,
+                        msg["role"],
+                        msg["content"]
+                    )
+
+            st.session_state.messages = []
+            st.session_state.current_conversation_id = None
+            st.rerun()
+
+        st.markdown("---")
+
+        # ---- Conversation History ----
+        user_id = st.session_state.user.get("id", "")
+        if user_id and user_id != "guest":
+            st.subheader("Chat History")
+            convos = _db_get_conversations(user_id)
+            st.session_state.conversations_list = convos
+
+            if not convos:
+                st.info("No conversations yet")
+            else:
+                for conv in convos:
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        is_active = conv["id"] == st.session_state.get("current_conversation_id")
+                        label = f"{'**> **' if is_active else ''}{conv['title']}"
+                        if st.button(label, key=f"conv_{conv['id']}", use_container_width=True):
+                            # Load this conversation
+                            st.session_state.current_conversation_id = conv["id"]
+                            messages = _db_get_messages(conv["id"])
+                            st.session_state.messages = messages
+                            st.rerun()
+                    with col2:
+                        if st.button("X", key=f"del_{conv['id']}", help="Delete chat"):
+                            _db_delete_conversation(conv["id"])
+                            if conv["id"] == st.session_state.get("current_conversation_id"):
+                                st.session_state.current_conversation_id = None
+                                st.session_state.messages = []
+                            st.rerun()
+        else:
+            st.info("Login to save chat history")
+
+        st.markdown("---")
+
+        # ---- File Upload ----
+        st.subheader("Upload Document")
+        uploaded_file = st.file_uploader(
+            "Drop a file here",
+            type=["txt", "md", "py", "json", "csv", "pdf", "docx"],
+            help="Supported: TXT, MD, PY, JSON, CSV, PDF, DOCX"
+        )
+        if uploaded_file:
+            with st.spinner("Processing file..."):
+                # Save uploaded file to temp location
+                temp_dir = tempfile.mkdtemp()
+                file_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getvalue())
+
+                # Add to RAG system (reuse same instance across reruns)
+                if "rag" not in st.session_state:
+                    from modules.rag import SimpleRAG
+                    st.session_state.rag = SimpleRAG()
+                rag = st.session_state.rag
+                result = rag.add_document(file_path)
+                if "Added" in result:
+                    st.session_state.documents.append(uploaded_file.name)
+                    st.success(f"Loaded: {uploaded_file.name}")
+                else:
+                    st.error(result)
+
+        if st.session_state.documents:
+            st.caption(f"Loaded: {', '.join(st.session_state.documents)}")
+
         st.markdown("---")
 
         # ---- Chat Mode ----
@@ -145,35 +534,23 @@ def display_sidebar():
             index=0 if st.session_state.get("chat_mode", "standard") == "standard" else 1,
         )
         st.session_state.chat_mode = "standard" if "Standard" in chat_mode else "websocket"
+
         st.markdown("---")
 
-        # ---- MCP Agent Team Status ----
+        # ---- MCP Agent Team ----
         st.subheader("Agent Team (MCP)")
-
         if st.session_state.get("mcp_connected"):
-            st.success("MCP Server: Connected")
-
+            st.success("MCP: Connected")
             tools = st.session_state.get("mcp_tools", [])
-            if tools:
-                for tool_name in tools:
-                    st.write(f"  - {tool_name}")
-            else:
-                st.write("  No tools discovered")
-
-            if st.button("Team Status"):
-                st.session_state.messages.append({
-                    "role": "user",
-                    "content": "/team_status",
-                    "timestamp": datetime.now().strftime("%H:%M:%S")
-                })
-                st.rerun()
+            for tool_name in tools:
+                st.write(f"  - {tool_name}")
         else:
-            st.warning("MCP Server: Not connected")
+            st.warning("MCP: Not connected")
             if st.button("Connect MCP Server"):
-                with st.spinner("Connecting to Agent Server..."):
+                with st.spinner("Connecting..."):
                     success, result = connect_mcp()
                     if success:
-                        st.success(f"Connected! {len(st.session_state.mcp_tools)} agents available.")
+                        st.success(f"Connected! {len(st.session_state.mcp_tools)} agents.")
                         st.rerun()
                     else:
                         st.error(f"Failed: {result}")
@@ -200,7 +577,7 @@ def display_sidebar():
 
         st.markdown("---")
 
-        # ---- Memory section ----
+        # ---- Memory ----
         st.subheader("Memory")
         if st.session_state.facts:
             for key, value in st.session_state.facts.items():
@@ -215,10 +592,15 @@ def display_sidebar():
         if st.button("Clear Chat"):
             st.session_state.messages = []
             st.rerun()
-
         if st.button("Clear Memory"):
             st.session_state.memory = {}
             st.session_state.facts = {}
+            st.rerun()
+        if st.button("Logout"):
+            st.session_state.logged_in = False
+            st.session_state.user = None
+            st.session_state.messages = []
+            st.session_state.current_conversation_id = None
             st.rerun()
 
         st.markdown("---")
@@ -233,10 +615,7 @@ def display_sidebar():
 # ============ MESSAGE PROCESSING ============
 
 async def process_message(user_input: str) -> str:
-    """
-    Process user message for the MCP path only.
-    Special commands and streaming are handled elsewhere.
-    """
+    """Process user message for the MCP path only."""
     try:
         from modules.memory import ConversationMemory, FactMemory
 
@@ -245,14 +624,20 @@ async def process_message(user_input: str) -> str:
 
         memory.add_message("user", user_input)
 
-        # ---- MCP AGENT TEAM ----
+        # Include document context if documents are loaded
+        if "rag" not in st.session_state:
+            from modules.rag import SimpleRAG
+            st.session_state.rag = SimpleRAG()
+        rag = st.session_state.rag
+        doc_context = rag.get_context(user_input)
+        enhanced_input = f"{user_input}\n\n{doc_context}" if doc_context else user_input
+
         force_agent = st.session_state.pop("_mcp_force_agent", None)
 
         if force_agent:
             st.session_state.last_agent = force_agent
-            result = await call_mcp_agent(force_agent, user_input)
+            result = await call_mcp_agent(force_agent, enhanced_input)
         else:
-            # Auto-route using keyword detection
             task_lower = user_input.lower()
             agent = "research"
 
@@ -266,7 +651,7 @@ async def process_message(user_input: str) -> str:
                 agent = "analyzer"
 
             st.session_state.last_agent = agent
-            result = await call_mcp_agent(agent, user_input)
+            result = await call_mcp_agent(agent, enhanced_input)
 
         memory.add_message("assistant", str(result))
         return str(result)
@@ -278,12 +663,7 @@ async def process_message(user_input: str) -> str:
 def _route_command(user_input: str) -> str:
     """
     Check whether a message is a special command, MCP command, or plain single-agent task.
-    Returns one of:
-      "special"  — handled locally, returns immediate text
-      "mcp"      — MCP agent handles it, returns immediate text
-      "stream"   — single-agent streaming, caller should use st.write_stream
-    Also stores the immediate result in st.session_state.processed_result
-    for "special" and "mcp" paths.
+    Returns: "special", "mcp", or "stream"
     """
     from modules.memory import ConversationMemory, FactMemory
     from modules.rag import SimpleRAG
@@ -292,7 +672,7 @@ def _route_command(user_input: str) -> str:
     facts = FactMemory()
     rag = SimpleRAG()
 
-    # ---- SPECIAL COMMANDS (handled locally, no agent needed) ----
+    # ---- SPECIAL COMMANDS ----
 
     if user_input.lower().startswith("remember "):
         content = user_input[9:].strip()
@@ -352,7 +732,13 @@ def _route_command(user_input: str) -> str:
             st.session_state.processed_result = f"Your {key} is **{value}**."
             return "special"
 
-    # ---- MCP AGENT TEAM (complex tasks) ----
+    # ---- IF DOCUMENTS ARE LOADED, ALWAYS USE SINGLE AGENT (streaming) ----
+    # MCP agents ignore document context — they do their own research.
+    # The single agent reads documents from RAG and answers based on them.
+    if st.session_state.get("documents"):
+        return "stream"
+
+    # ---- MCP AGENT TEAM ----
     force_agent = st.session_state.pop("force_agent", None)
 
     if force_agent or st.session_state.get("mcp_connected"):
@@ -367,6 +753,13 @@ def _route_command(user_input: str) -> str:
 
 def main():
     init_session_state()
+
+    # ---- LOGIN GATE ----
+    if not st.session_state.logged_in:
+        render_login_page()
+        return
+
+    # ---- LOGGED IN: show chat ----
     display_sidebar()
 
     st.title("Llama Agent")
@@ -380,10 +773,11 @@ def main():
 
 
 def _render_standard_chat():
-    """Render the standard streaming chat UI"""
+    """Render the standard streaming chat UI with markdown rendering"""
     # Display chat history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
+            # st.markdown renders bold, code, headers, lists, etc.
             st.markdown(message["content"])
             if "agent" in message:
                 st.caption(f"Agent: {message['agent']}")
@@ -406,12 +800,10 @@ def _render_standard_chat():
 
         # Get AI response
         with st.chat_message("assistant"):
-            # Decide which path to take
             route = _route_command(prompt)
             assistant_time = datetime.now().strftime("%H:%M:%S")
 
             if route == "special":
-                # Instant local result (remember, recall, show facts, etc.)
                 response = st.session_state.pop("processed_result", "Done.")
                 st.markdown(response)
                 agent_used = st.session_state.get("last_agent")
@@ -419,9 +811,8 @@ def _render_standard_chat():
                 st.caption(f"Agent: {label} | {assistant_time}")
 
             elif route == "mcp":
-                # MCP agent (non-streaming, returns full text)
                 with st.spinner("Thinking..."):
-                    response = asyncio.run(process_message(prompt))
+                    response = _run_async(process_message(prompt))
                 st.markdown(response)
                 agent_used = st.session_state.get("last_agent", "mcp")
                 agent_labels = {
@@ -437,19 +828,23 @@ def _render_standard_chat():
                 st.caption(f"Agent: {label} | {assistant_time}")
 
             else:
-                # STREAMING single-agent -- tokens appear one by one
                 from modules.memory import ConversationMemory, FactMemory
                 from llama_agent1 import run_agent_stream
 
                 memory_obj = ConversationMemory()
                 facts_obj = FactMemory()
+                # Reuse the same RAG instance (persists uploaded docs across reruns)
+                if "rag" not in st.session_state:
+                    from modules.rag import SimpleRAG
+                    st.session_state.rag = SimpleRAG()
+                rag = st.session_state.rag
                 memory_obj.add_message("user", prompt)
 
                 facts_context = facts_obj.get_context_string()
-                enhanced_input = f"{prompt}\n\n{facts_context}\n\nIMPORTANT: Always respond in English."
+                doc_context = rag.get_context(prompt)
+                enhanced_input = f"{prompt}\n\n{facts_context}\n\n{doc_context}\n\nIMPORTANT: Always respond in English."
 
                 st.session_state.last_agent = "single_agent"
-                # st.write_stream yields tokens in real-time
                 full_response = st.write_stream(run_agent_stream(enhanced_input))
                 response = full_response if full_response else ""
                 label = "Single Agent (Streaming)"
@@ -462,6 +857,22 @@ def _render_standard_chat():
             "agent": st.session_state.get("last_agent"),
             "timestamp": assistant_time
         })
+
+        # ---- SAVE TO DATABASE ----
+        user_id = st.session_state.user.get("id", "")
+        if user_id and user_id != "guest":
+            # Create conversation if needed
+            if not st.session_state.get("current_conversation_id"):
+                conv = _db_create_conversation(user_id, prompt[:50])
+                st.session_state.current_conversation_id = conv["id"]
+
+            # Save user and assistant messages
+            _db_save_message(
+                st.session_state.current_conversation_id, "user", prompt
+            )
+            _db_save_message(
+                st.session_state.current_conversation_id, "assistant", response
+            )
 
     # Quick commands
     st.markdown("---")
@@ -507,8 +918,6 @@ def _render_standard_chat():
 
 def _render_websocket_chat():
     """Render real-time WebSocket chat using an embedded HTML/JS client."""
-
-    # Connection status
     ws_port = st.session_state.get("ws_port", 8000)
     ws_host = st.session_state.get("ws_host", "localhost")
 
@@ -526,7 +935,6 @@ def _render_websocket_chat():
 
     st.info(f"Connecting to: `{ws_url}`  |  Your User ID: `{user_id}`")
 
-    # Embed the WebSocket chat client as HTML/JS
     ws_chat_html = f"""
     <!DOCTYPE html>
     <html>
@@ -599,7 +1007,6 @@ def _render_websocket_chat():
 
         function connect() {{
             if (ws && ws.readyState === WebSocket.OPEN) return;
-
             setStatus('Connecting...', 'thinking');
             ws = new WebSocket(WS_URL);
 
@@ -677,15 +1084,12 @@ def _render_websocket_chat():
         function sendMessage() {{
             const text = msgInput.value.trim();
             if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-
             addMessage('You', text, 'user');
-
             const outMsg = {{
                 type: 'chat',
                 data: {{ content: text }},
                 timestamp: new Date().toISOString()
             }};
-
             ws.send(JSON.stringify(outMsg));
             msgInput.value = '';
             msgInput.focus();
@@ -698,7 +1102,6 @@ def _render_websocket_chat():
             }}
         }});
 
-        // Auto-connect
         connect();
     </script>
     </body>
