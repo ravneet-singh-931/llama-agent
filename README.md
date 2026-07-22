@@ -1,25 +1,64 @@
 # 🤖 Llama Agent - Enterprise Edition
 
 [![CI/CD Pipeline](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml/badge.svg)](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml)
-[![Docker](https://img.shields.io/badge/Docker-ravneet231%2Fllama--agent-blue?logo=docker)](https://hub.docker.com/r/ravneet231/llama-agent)
-[![Python](https://img.shields.io/badge/Python-3.9%20%7C%203.10%20%7C%203.11-blue?logo=python)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10-blue?logo=python)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104.1-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28.0-FF4B4B?logo=streamlit)](https://streamlit.io/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-336791?logo=postgresql)](https://www.postgresql.org/)
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.28-326CE5?logo=kubernetes)](https://kubernetes.io/)
+[![Docker](https://img.shields.io/badge/Docker-10%20Containers-blue?logo=docker)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-A **full-stack AI agent** with Web UI, REST API, WebSocket real-time chat, Authentication, PostgreSQL database, Multi-Agent System, and Kubernetes deployment!
+A **full-stack AI agent** with Web UI, REST API, WebSocket real-time chat, Authentication, Chat History, File Upload, Multi-Agent System via MCP, and a complete DevOps stack with 10 Docker containers!
 
 ---
 
 ## ✨ Features
 
 ### 🌐 Web Interface (Streamlit)
-- Beautiful chat UI
-- Real-time responses
-- Document upload
+- Beautiful dark-themed chat UI
+- Streaming AI responses with `st.write_stream()`
+- **User Login & Sign Up** — accounts stored in PostgreSQL
+- **Chat History** — conversations saved, loaded, and deleted
+- **File Upload** — drag-and-drop CSV, PDF, TXT, MD, PY, JSON, DOCX
+- **Smart CSV Reader** — extracts headers, row count, and sample data
+- **Markdown Rendering** — AI responses show bold, code blocks, headers
 - Memory visualization
+- MCP Multi-Agent team controls
+
+### 🔐 Authentication System
+- User registration & login with PostgreSQL
+- Password hashing (bcrypt)
+- Guest mode (no history saved)
+- JWT token-based auth for API
+- API key authentication
+
+### 🗄️ PostgreSQL Database
+- Synchronous database operations (psycopg2)
+- SQLAlchemy ORM models
+- Tables: users, conversations, messages, facts, documents, api_keys
+- Connection pooling
+- Docker secrets for credentials
+
+### 📄 RAG (Document Reading)
+- Smart CSV reader: headers + row count + sample rows
+- PDF, Word, Text, Markdown, Python, JSON support
+- Document search with keyword matching
+- Automatic context injection into AI prompts
+- When documents are loaded, AI reads them directly
+
+### 🤖 Multi-Agent System (MCP)
+- **5 specialized agents** via Model Context Protocol
+- Automatic task routing based on query content
+- Agent collaboration for complex tasks
+- Real-time agent status
+
+| Agent | Specialization |
+|-------|---------------|
+| 🔍 Research Agent | Information gathering |
+| 💻 Coder Agent | Code writing/review |
+| ✍️ Writer Agent | Content creation |
+| 📊 Analyzer Agent | Data analysis |
+| 📋 Planner Agent | Strategic planning |
 
 ### 🔌 REST API (FastAPI)
 - 20+ API endpoints
@@ -34,47 +73,32 @@ A **full-stack AI agent** with Web UI, REST API, WebSocket real-time chat, Authe
 - Message broadcasting
 - Auto-reconnection
 
-### 🔐 Authentication System
-- JWT token-based auth
-- API key authentication
-- User registration & login
-- Password hashing (bcrypt)
-- Role-based access control
-- Refresh token rotation
-
-### 🗄️ PostgreSQL Database
-- Async database operations (asyncpg)
-- SQLAlchemy ORM models
-- User, Conversation, Message, Fact, Document tables
-- Database migrations (Alembic)
-- Connection pooling
-
-### 🤖 Multi-Agent System
-- 5 specialized agents
-- Automatic task routing
-- Agent collaboration
-- Team orchestration
-
 ### 🧠 Memory System
-- Conversation history
-- Fact storage
+- Conversation history (file-based)
+- Fact storage (remember/recall)
 - Search capabilities
 
-### 📄 RAG (Document Reading)
-- PDF, Word, Text support
-- Document search
-- Knowledge base
+### 📊 DevOps Stack (10 Docker Containers)
 
-### 📊 Monitoring & Logging
-- Performance metrics
-- Error tracking
-- Health checks
+| Service | Port | Purpose |
+|---------|------|---------|
+| **PostgreSQL** | 5432 | Database (users, conversations, messages) |
+| **Redis** | 6379 | Caching layer |
+| **FastAPI** | 8000 | REST API + WebSocket |
+| **Streamlit** | 8501 | Web UI |
+| **Nginx** | 80/443 | SSL termination + load balancing + CDN headers |
+| **Prometheus** | 9090 | Metrics collection |
+| **Grafana** | 3000 | Monitoring dashboards |
+| **Loki** | 3100 | Log aggregation |
+| **Promtail** | 9080 | Log shipping from all containers |
+| **Node Exporter** | 9100 | System metrics (CPU, RAM, disk) |
 
-### ⚙️ Enterprise Architecture
-- Environment-based configuration
-- Feature flags
-- Service dependency injection
+### 🔒 Security
+- Docker secrets management (API keys, DB passwords, JWT secrets)
+- SSL/TLS via Nginx
 - Rate limiting
+- Password hashing with bcrypt
+- `.gitignore` protects all secrets from accidental commits
 
 ---
 
@@ -86,37 +110,33 @@ A **full-stack AI agent** with Web UI, REST API, WebSocket real-time chat, Authe
 git clone https://github.com/ravneet-png/llama-agent.git
 cd llama-agent
 
-# Set your API key
+# Set your Groq API key
 echo "GROQ_API_KEY=your-key" > .env
 
-# Start everything (PostgreSQL + Redis + API + UI)
+# Start everything (10 containers)
 docker-compose up -d
 ```
-- API: http://localhost:8000/docs
-- UI: http://localhost:8501
-- WebSocket: ws://localhost:8765
 
-### Option 2: Web Interface
+| Service | URL |
+|---------|-----|
+| **Web UI** | http://localhost:8501 |
+| **API Docs** | http://localhost:8000/docs |
+| **Grafana** | http://localhost:3000 (admin/admin) |
+| **Prometheus** | http://localhost:9090 |
+
+### Option 2: Local Development
 ```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Start PostgreSQL and Redis
+docker-compose up -d postgres redis
+
+# Run Streamlit
 streamlit run app.py
-```
-Open http://localhost:8501
 
-### Option 3: REST API
-```bash
+# Run API (separate terminal)
 uvicorn api:app --reload
-```
-Open http://localhost:8000/docs
-
-### Option 4: Kubernetes
-```bash
-# Configure secrets
-kubectl create secret generic app-secrets \
-  --from-literal=groq-api-key=YOUR_KEY \
-  --from-literal=jwt-secret-key=YOUR_SECRET
-
-# Deploy
-./k8s/deploy.sh
 ```
 
 ---
@@ -125,93 +145,62 @@ kubectl create secret generic app-secrets \
 
 ```
 llama-agent/
-├── .github/workflows/main.yml    # CI/CD pipeline (8 jobs)
-├── k8s/                           # Kubernetes manifests
-│   ├── namespace.yaml
-│   ├── postgres.yaml
-│   ├── redis.yaml
-│   ├── api.yaml
-│   ├── ingress.yaml
-│   ├── secrets.yaml
-│   └── deploy.sh
+├── .github/workflows/main.yml    # CI/CD pipeline
+├── config/
+│   ├── nginx/nginx.conf          # SSL + Load Balancer + CDN
+│   ├── prometheus/prometheus.yml # Metrics scraping
+│   ├── grafana/                  # Dashboards + provisioning
+│   ├── loki/loki-config.yml      # Log aggregation
+│   └── promtail/                 # Log shipping
+├── k8s/                          # Kubernetes manifests
 ├── modules/
 │   ├── __init__.py
-│   ├── memory.py                 # Conversation & Fact memory
-│   ├── rag.py                    # Document reading & search
-│   ├── monitoring.py             # Logging & metrics
-│   ├── database.py               # PostgreSQL models & connection
-│   ├── auth.py                   # JWT/API Key authentication
-│   ├── websocket.py              # WebSocket real-time chat
+│   ├── auth.py                   # JWT/API Key auth
 │   ├── config.py                 # Enterprise configuration
-│   └── services.py               # Dependency injection
+│   ├── database.py               # PostgreSQL models & connection
+│   ├── memory.py                 # Conversation & Fact memory
+│   ├── monitoring.py             # Logging & metrics
+│   ├── prometheus_metrics.py     # Prometheus metrics
+│   ├── rag.py                    # Document reading + Smart CSV reader
+│   ├── secrets.py                # Docker secrets reader
+│   ├── services.py               # Dependency injection
+│   └── websocket.py              # WebSocket module
+├── secrets/                      # Docker secrets (NEVER commit real keys)
 ├── tests/
-│   ├── test_tools.py             # Core tests (23 tests)
-│   └── test_enterprise.py        # Enterprise tests (17 tests)
-├── app.py                        # Streamlit Web UI
-├── api.py                        # FastAPI REST API (v3.0)
+│   ├── test_tools.py             # Core tests
+│   ├── test_enterprise.py        # Enterprise tests
+│   └── test_mcp.py               # MCP integration tests
+├── app.py                        # Streamlit Web UI (login, chat history, file upload)
+├── api.py                        # FastAPI REST API
+├── llama_agent1.py               # Single agent with streaming
 ├── multi_agent.py                # Multi-Agent System
-├── llama_agent1.py               # Main agent (14 tools)
-├── Dockerfile                    # Docker build
-├── docker-compose.yml            # Local dev stack
+├── mcp_agents_server.py          # MCP Server (5 specialized agents)
+├── mcp_client_helper.py          # MCP Client
+├── Dockerfile                    # Main app Docker build
+├── docker-compose.yml            # 10-service DevOps stack
 ├── init.sql                      # Database init
-├── requirements.txt              # Dependencies
+├── requirements.txt              # Python dependencies
 ├── pyproject.toml                # Pytest config
+├── .gitignore                    # Protects secrets, caches, logs
 └── README.md                     # This file
 ```
 
 ---
 
-## 🔌 API Endpoints
+## 🧪 Running Tests
 
-### Authentication
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/auth/register` | POST | Register new user |
-| `/auth/login` | POST | Login |
-| `/auth/refresh` | POST | Refresh token |
-| `/auth/me` | GET | Current user (JWT) |
+```bash
+# Run all tests
+pytest
 
-### Chat
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/chat` | POST | Chat with agent |
-| `/ws/{user_id}` | WS | Real-time WebSocket chat |
+# Run with coverage
+pytest --cov=modules --cov-report=html
 
-### Memory & Facts
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/memory` | GET | Get conversation memory |
-| `/memory` | DELETE | Clear memory |
-| `/facts` | GET | List all facts |
-| `/remember` | POST | Store a fact |
-| `/recall` | POST | Recall a fact |
-
-### Documents
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/documents` | GET | List loaded documents |
-| `/documents/upload` | POST | Upload document |
-| `/documents/search` | POST | Search documents |
-
-### System
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/metrics` | GET | Performance metrics |
-| `/tools` | GET | List available tools |
-| `/ws/status` | GET | WebSocket status |
-
----
-
-## 🤖 Multi-Agent System
-
-| Agent | Specialization |
-|-------|---------------|
-| 🔍 Research Agent | Information gathering |
-| 💻 Coder Agent | Code writing/review |
-| ✍️ Writer Agent | Content creation |
-| 📊 Analyzer Agent | Data analysis |
-| 📋 Planner Agent | Strategic planning |
+# Run specific test files
+pytest tests/test_tools.py -v
+pytest tests/test_enterprise.py -v
+pytest test_mcp.py -v
+```
 
 ---
 
@@ -226,21 +215,6 @@ llama-agent/
 6. 🎪 Deploy Staging
 7. 🏭 Deploy Production
 8. 📢 Notifications
-
----
-
-## 🧪 Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=modules --cov-report=html
-
-# Run specific test file
-pytest tests/test_enterprise.py -v
-```
 
 ---
 
