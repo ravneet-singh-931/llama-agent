@@ -1,223 +1,286 @@
-# 🤖 Llama Agent - Enterprise Edition
+# Llama Agent
 
-[![CI/CD Pipeline](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml/badge.svg)](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml)
-[![Python](https://img.shields.io/badge/Python-3.10-blue?logo=python)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104.1-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.28.0-FF4B4B?logo=streamlit)](https://streamlit.io/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-336791?logo=postgresql)](https://www.postgresql.org/)
-[![Docker](https://img.shields.io/badge/Docker-10%20Containers-blue?logo=docker)](https://www.docker.com/)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+A production-grade AI assistant that reads your documents and answers questions — with full security, monitoring, and observability.
 
-A **full-stack AI agent** with Web UI, REST API, WebSocket real-time chat, Authentication, Chat History, File Upload, Multi-Agent System via MCP, and a complete DevOps stack with 10 Docker containers!
+## What It Does
 
----
+Upload documents (PDFs, TXTs, CSVs) and ask questions. The AI reads your files and gives you accurate answers based on their content.
 
-## ✨ Features
+```
+You: "What's the refund policy?"
+AI:  "Based on the uploaded documents, our refund policy allows..."
+```
 
-### 🌐 Web Interface (Streamlit)
-- Beautiful dark-themed chat UI
-- Streaming AI responses with `st.write_stream()`
-- **User Login & Sign Up** — accounts stored in PostgreSQL
-- **Chat History** — conversations saved, loaded, and deleted
-- **File Upload** — drag-and-drop CSV, PDF, TXT, MD, PY, JSON, DOCX
-- **Smart CSV Reader** — extracts headers, row count, and sample data
-- **Markdown Rendering** — AI responses show bold, code blocks, headers
-- Memory visualization
-- MCP Multi-Agent team controls
+## Features
 
-### 🔐 Authentication System
-- User registration & login with PostgreSQL
-- Password hashing (bcrypt)
-- Guest mode (no history saved)
-- JWT token-based auth for API
-- API key authentication
+### Core
+- **Document Q&A** — Upload files, ask questions, get answers from your docs
+- **Smart CSV Reader** — Understands headers, row counts, sample data
+- **Multi-Agent Team** — 5 specialized AI agents for complex queries
+- **Real-time Chat** — WebSocket-powered live responses
 
-### 🗄️ PostgreSQL Database
-- Synchronous database operations (psycopg2)
-- SQLAlchemy ORM models
-- Tables: users, conversations, messages, facts, documents, api_keys
-- Connection pooling
-- Docker secrets for credentials
+### Security
+- **JWT Authentication** — Secure login/signup
+- **File Validation** — Checks types, sizes, scans for threats
+- **Rate Limiting** — Prevents abuse
+- **Secrets Management** — API keys never in code
 
-### 📄 RAG (Document Reading)
-- Smart CSV reader: headers + row count + sample rows
-- PDF, Word, Text, Markdown, Python, JSON support
-- Document search with keyword matching
-- Automatic context injection into AI prompts
-- When documents are loaded, AI reads them directly
+### Monitoring
+- **Prometheus + Grafana** — Real-time metrics dashboards
+- **Loki + Promtail** — Centralized log aggregation
+- **Alert Rules** — 8 automatic alerts for issues
 
-### 🤖 Multi-Agent System (MCP)
-- **5 specialized agents** via Model Context Protocol
-- Automatic task routing based on query content
-- Agent collaboration for complex tasks
-- Real-time agent status
+### Observability
+- **Phoenix (Arize AI)** — Traces every AI step
+- **OpenTelemetry** — See exactly what the AI is thinking
+- **Debug Dashboard** — Find why answers are wrong
 
-| Agent | Specialization |
-|-------|---------------|
-| 🔍 Research Agent | Information gathering |
-| 💻 Coder Agent | Code writing/review |
-| ✍️ Writer Agent | Content creation |
-| 📊 Analyzer Agent | Data analysis |
-| 📋 Planner Agent | Strategic planning |
+## Quick Start
 
-### 🔌 REST API (FastAPI)
-- 20+ API endpoints
-- Swagger documentation at `/docs`
-- CORS support
-- Health checks
+### Prerequisites
+- Docker Desktop installed and running
+- Git
 
-### 📡 WebSocket Real-time Chat
-- Bidirectional live communication
-- Typing indicators
-- Connection management
-- Message broadcasting
-- Auto-reconnection
-
-### 🧠 Memory System
-- Conversation history (file-based)
-- Fact storage (remember/recall)
-- Search capabilities
-
-### 📊 DevOps Stack (10 Docker Containers)
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| **PostgreSQL** | 5432 | Database (users, conversations, messages) |
-| **Redis** | 6379 | Caching layer |
-| **FastAPI** | 8000 | REST API + WebSocket |
-| **Streamlit** | 8501 | Web UI |
-| **Nginx** | 80/443 | SSL termination + load balancing + CDN headers |
-| **Prometheus** | 9090 | Metrics collection |
-| **Grafana** | 3000 | Monitoring dashboards |
-| **Loki** | 3100 | Log aggregation |
-| **Promtail** | 9080 | Log shipping from all containers |
-| **Node Exporter** | 9100 | System metrics (CPU, RAM, disk) |
-
-### 🔒 Security
-- Docker secrets management (API keys, DB passwords, JWT secrets)
-- SSL/TLS via Nginx
-- Rate limiting
-- Password hashing with bcrypt
-- `.gitignore` protects all secrets from accidental commits
-
----
-
-## 🚀 Quick Start
-
-### Option 1: Docker Compose (Recommended)
+### 1. Clone the repo
 ```bash
-# Clone the repo
 git clone https://github.com/ravneet-png/llama-agent.git
 cd llama-agent
+```
 
-# Set your Groq API key
-echo "GROQ_API_KEY=your-key" > .env
+### 2. Add your API key
+```bash
+# Create secrets directory
+mkdir -p secrets
 
-# Start everything (10 containers)
+# Add your Groq API key
+echo "gsk_YOUR_KEY_HERE" > secrets/groq_api_key.txt
+
+# Create other secrets
+echo "your_postgres_password" > secrets/postgres_password.txt
+echo "your_jwt_secret" > secrets/jwt_secret_key.txt
+echo "admin_password" > secrets/grafana_admin_password.txt
+```
+
+### 3. Start everything
+```bash
 docker-compose up -d
 ```
 
-| Service | URL |
-|---------|-----|
-| **Web UI** | http://localhost:8501 |
-| **API Docs** | http://localhost:8000/docs |
-| **Grafana** | http://localhost:3000 (admin/admin) |
-| **Prometheus** | http://localhost:9090 |
+### 4. Open the app
+- **Main App:** http://localhost:8501
+- **Phoenix Dashboard:** http://localhost:6006
+- **Grafana Dashboard:** http://localhost:3000 (admin/admin)
+- **Prometheus:** http://localhost:9090
 
-### Option 2: Local Development
-```bash
-# Install dependencies
-pip install -r requirements.txt
+### 5. Create an account
+- Go to http://localhost:8501
+- Click "Sign Up"
+- Create username/password
+- Login and start chatting!
 
-# Start PostgreSQL and Redis
-docker-compose up -d postgres redis
+## Architecture
 
-# Run Streamlit
-streamlit run app.py
-
-# Run API (separate terminal)
-uvicorn api:app --reload
+```
+┌─────────────────────────────────────────────────────────┐
+│                    User (Browser)                        │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│              Nginx (Load Balancer + SSL)                 │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+          ┌─────────────┴─────────────┐
+          │                           │
+          ▼                           ▼
+┌──────────────────┐        ┌──────────────────┐
+│  Streamlit UI    │        │   FastAPI REST    │
+│  (Port 8501)     │        │   (Port 8000)     │
+└────────┬─────────┘        └────────┬─────────┘
+         │                           │
+         └───────────┬───────────────┘
+                     │
+         ┌───────────┴───────────────┐
+         │                           │
+         ▼                           ▼
+┌──────────────────┐        ┌──────────────────┐
+│   PostgreSQL     │        │      Redis       │
+│   (Database)     │        │    (Cache)       │
+└──────────────────┘        └──────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│                    AI Pipeline                           │
+│                                                         │
+│  Query → Router → Search → Re-rank → Answer             │
+│                    │                                     │
+│                    ▼                                     │
+│              ChromaDB (Vectors)                          │
+│              Groq API (LLM)                              │
+└─────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│                 Observability                            │
+│                                                         │
+│  Prometheus → Grafana (Metrics)                          │
+│  Phoenix (AI Traces)                                     │
+│  Loki → Promtail (Logs)                                  │
+└─────────────────────────────────────────────────────────┘
 ```
 
----
+## Tech Stack
 
-## 📁 Project Structure
+| Layer | Technology |
+|-------|-----------|
+| Frontend | Streamlit |
+| Backend | FastAPI, Python 3.10 |
+| Database | PostgreSQL 15, Redis 7 |
+| AI/ML | Groq (Llama 3), ChromaDB, LlamaIndex |
+| Monitoring | Prometheus, Grafana, Loki |
+| Observability | Phoenix (Arize AI), OpenTelemetry |
+| Infrastructure | Docker, Docker Compose, Nginx |
+| Security | JWT, Pydantic, Rate Limiting |
+
+## Docker Containers (11 Total)
+
+| Container | Purpose | Port |
+|-----------|---------|------|
+| `postgres` | Database | 5432 |
+| `redis` | Caching | 6379 |
+| `api` | REST API | 8000 |
+| `web` | Streamlit UI | 8501 |
+| `nginx` | Load Balancer | 80, 443 |
+| `prometheus` | Metrics | 9090 |
+| `grafana` | Dashboards | 3000 |
+| `loki` | Logs | 3100 |
+| `promtail` | Log Shipping | — |
+| `node-exporter` | System Metrics | 9100 |
+| `phoenix` | AI Observability | 6006 |
+
+## Common Commands
+
+```bash
+# Start everything
+docker-compose up -d
+
+# Stop everything
+docker-compose down
+
+# Rebuild after code changes
+docker-compose up -d --build web
+
+# View logs
+docker-compose logs -f web
+docker-compose logs -f api
+
+# Check status
+docker-compose ps
+
+# Run tests locally
+pytest test_advanced_rag.py -v
+```
+
+## Project Structure
 
 ```
 llama-agent/
-├── .github/workflows/main.yml    # CI/CD pipeline
-├── config/
-│   ├── nginx/nginx.conf          # SSL + Load Balancer + CDN
-│   ├── prometheus/prometheus.yml # Metrics scraping
-│   ├── grafana/                  # Dashboards + provisioning
-│   ├── loki/loki-config.yml      # Log aggregation
-│   └── promtail/                 # Log shipping
-├── k8s/                          # Kubernetes manifests
+├── app.py                    # Main Streamlit application
+├── api.py                    # FastAPI REST API
 ├── modules/
-│   ├── __init__.py
-│   ├── auth.py                   # JWT/API Key auth
-│   ├── config.py                 # Enterprise configuration
-│   ├── database.py               # PostgreSQL models & connection
-│   ├── memory.py                 # Conversation & Fact memory
-│   ├── monitoring.py             # Logging & metrics
-│   ├── prometheus_metrics.py     # Prometheus metrics
-│   ├── rag.py                    # Document reading + Smart CSV reader
-│   ├── secrets.py                # Docker secrets reader
-│   ├── services.py               # Dependency injection
-│   └── websocket.py              # WebSocket module
-├── secrets/                      # Docker secrets (NEVER commit real keys)
+│   ├── auth.py               # JWT authentication
+│   ├── config.py             # App configuration
+│   ├── database.py           # PostgreSQL models
+│   ├── memory.py             # Conversation memory
+│   ├── monitoring.py         # Logging + metrics
+│   ├── security.py           # File validation, rate limiting
+│   ├── vector_store.py       # ChromaDB vector search
+│   ├── advanced_rag.py       # RAG pipeline + Phoenix tracing
+│   └── rag.py                # Legacy RAG (simple)
 ├── tests/
-│   ├── test_tools.py             # Core tests
-│   ├── test_enterprise.py        # Enterprise tests
-│   └── test_mcp.py               # MCP integration tests
-├── app.py                        # Streamlit Web UI (login, chat history, file upload)
-├── api.py                        # FastAPI REST API
-├── llama_agent1.py               # Single agent with streaming
-├── multi_agent.py                # Multi-Agent System
-├── mcp_agents_server.py          # MCP Server (5 specialized agents)
-├── mcp_client_helper.py          # MCP Client
-├── Dockerfile                    # Main app Docker build
-├── docker-compose.yml            # 10-service DevOps stack
-├── init.sql                      # Database init
-├── requirements.txt              # Python dependencies
-├── pyproject.toml                # Pytest config
-├── .gitignore                    # Protects secrets, caches, logs
-└── README.md                     # This file
+│   └── test_advanced_rag.py  # 65 unit tests
+├── config/
+│   ├── grafana/              # Dashboard configs
+│   ├── prometheus/           # Metrics + alerts
+│   ├── loki/                 # Log aggregation
+│   └── promtail/             # Log shipping
+├── secrets/                  # API keys (gitignored)
+├── docker-compose.yml        # 11 containers
+├── Dockerfile                # App container
+└── Dockerfile.nginx          # Nginx container
 ```
 
----
+## API Endpoints
 
-## 🧪 Running Tests
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/auth/register` | Create account |
+| `POST` | `/auth/login` | Get JWT token |
+| `GET` | `/health` | Health check |
+| `POST` | `/chat` | Send message |
+| `WebSocket` | `/ws/{token}` | Real-time chat |
 
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DATABASE_URL` | PostgreSQL connection | `postgresql+asyncpg://...` |
+| `REDIS_URL` | Redis connection | `redis://redis:6379` |
+| `GROQ_API_KEY_FILE` | Path to Groq API key | `/run/secrets/groq_api_key` |
+| `JWT_SECRET_KEY_FILE` | Path to JWT secret | `/run/secrets/jwt_secret_key` |
+| `ENVIRONMENT` | `development` or `production` | `development` |
+
+## Troubleshooting
+
+### App won't start
 ```bash
-# Run all tests
-pytest
+# Check if Docker is running
+docker info
 
-# Run with coverage
-pytest --cov=modules --cov-report=html
-
-# Run specific test files
-pytest tests/test_tools.py -v
-pytest tests/test_enterprise.py -v
-pytest test_mcp.py -v
+# Check container logs
+docker-compose logs web
+docker-compose logs api
 ```
 
----
+### Groq API key error
+```bash
+# Verify key exists
+cat secrets/groq_api_key.txt
 
-## 🔄 CI/CD Pipeline
+# Rebuild container
+docker-compose up -d --build web
+```
 
-8 automated jobs:
-1. 🧪 Matrix Testing (Python 3.9, 3.10, 3.11)
-2. 🔒 Security Scanning (pip-audit + bandit)
-3. 🧹 Code Quality (flake8)
-4. 🔗 Integration Tests
-5. 🐳 Docker Build & Push
-6. 🎪 Deploy Staging
-7. 🏭 Deploy Production
-8. 📢 Notifications
+### Phoenix not showing traces
+```bash
+# Check Phoenix is running
+docker-compose ps phoenix
 
----
+# Check web container can reach Phoenix
+docker exec llama-agent-web python -c "import urllib.request; print(urllib.request.urlopen('http://phoenix:6006/').status)"
+```
 
-## 📄 License
+### Database connection failed
+```bash
+# Check PostgreSQL is healthy
+docker-compose ps postgres
 
-MIT License
+# Restart database
+docker-compose restart postgres
+```
+
+## Contributing
+
+1. Fork the repo
+2. Create a branch (`git checkout -b feature/amazing`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing`)
+5. Open a Pull Request
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Author
+
+**Ravneet** - [GitHub](https://github.com/ravneet-png)

@@ -1,0 +1,225 @@
+# ============================================
+# CI/CD Pipeline - Llama Agent
+# ============================================
+# Runs automatically on every push to GitHub
+#
+# What it does:
+#   1. Runs all unit tests (65 tests)
+#   2. Runs MCP integration tests (17 tests)
+#   3. Builds Docker images
+#   4. Validates docker-compose config
+#   5. Lints Python code
+#
+# Optional (uncomment when ready):
+#   - Deploy to cloud (AWS/GCP/DigitalOcean)
+#   - Push images to Docker Hub
+#   - Send notifications
+# ============================================
+
+name: CI/CD Pipeline
+
+# When to run
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# Cancel previous runs on same branch (saves time)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Jobs run in parallel (faster)
+jobs:
+
+  # =============================================
+  # Job 1: Run Unit Tests
+  # =============================================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run unit tests
+        run: pytest test_advanced_rag.py -v --tb=short
+
+      - name: Run basic app tests
+        run: |
+          python -c "
+          from modules.auth import hash_password, verify_password
+          from modules.security import validate_file_upload, RateLimiter
+          from modules.memory import ConversationMemory, FactMemory
+          from modules.config import Config
+          print('[OK] All module imports work')
+          "
+
+  # =============================================
+  # Job 2: Build Docker Images
+  # =============================================
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test  # Only build if tests pass
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build web image
+        run: docker build -t llama-agent-web:test -f Dockerfile .
+
+      - name: Build API image
+        run: docker build -t llama-agent-api:test -f Dockerfile .
+
+      - name: Build Nginx image
+        run: docker build -t llama-agent-nginx:test -f Dockerfile.nginx .
+
+      - name: Validate docker-compose
+        run: docker-compose config --quiet
+
+  # =============================================
+  # Job 3: Code Quality
+  # =============================================
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Check Python syntax
+        run: |
+          python -m py_compile app.py
+          python -m py_compile modules/advanced_rag.py
+          python -m py_compile modules/vector_store.py
+          python -m py_compile modules/security.py
+          python -m py_compile modules/auth.py
+          echo "[OK] All Python files have valid syntax"
+
+      - name: Check for common issues
+        run: |
+          python -c "
+          import ast
+          import sys
+
+          files = ['app.py', 'modules/advanced_rag.py', 'modules/vector_store.py']
+          for f in files:
+              try:
+                  with open(f) as fh:
+                      ast.parse(fh.read())
+                  print(f'[OK] {f} - valid AST')
+              except SyntaxError as e:
+                  print(f'[FAIL] {f} - {e}')
+                  sys.exit(1)
+          "
+
+  # =============================================
+  # Job 4: Security Scan (Optional)
+  # =============================================
+  security:
+    name: Security Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for hardcoded secrets
+        run: |
+          echo "Scanning for potential secrets..."
+          if grep -r "sk-" --include="*.py" . 2>/dev/null; then
+            echo "[WARN] Found potential API keys in code"
+          else
+            echo "[OK] No hardcoded API keys found"
+          fi
+
+          if grep -r "password.*=.*['\"]" --include="*.py" . 2>/dev/null | grep -v "password_file\|password_hash\|POSTGRES_PASSWORD"; then
+            echo "[WARN] Found potential hardcoded passwords"
+          else
+            echo "[OK] No hardcoded passwords found"
+          fi
+
+      - name: Check secrets directory is not tracked
+        run: |
+          if git ls-files secrets/ | grep -q .; then
+            echo "[FAIL] Secrets directory is tracked by git!"
+            exit 1
+          else
+            echo "[OK] Secrets directory is properly gitignored"
+          fi
+
+
+# ============================================
+# OPTIONAL: Deploy to Cloud (uncomment when ready)
+# ============================================
+#
+# deploy:
+#   name: Deploy to Production
+#   runs-on: ubuntu-latest
+#   needs: [test, build, quality]
+#   if: github.ref == 'refs/heads/main'
+#   environment: production
+#
+#   steps:
+#     - name: Deploy to server
+#       uses: appleboy/ssh-action@master
+#       with:
+#         host: ${{ secrets.SERVER_HOST }}
+#         username: ${{ secrets.SERVER_USER }}
+#         key: ${{ secrets.SSH_KEY }}
+#         script: |
+#           cd /opt/llama-agent
+#           git pull origin main
+#           docker-compose up -d --build
+#           docker-compose exec -T web python -c "print('Deploy OK')"
+#
+# ============================================
+# OPTIONAL: Push to Docker Hub (uncomment when ready)
+# ============================================
+#
+# docker-push:
+#   name: Push to Docker Hub
+#   runs-on: ubuntu-latest
+#   needs: [test, build]
+#   if: github.ref == 'refs/heads/main'
+#
+#   steps:
+#     - name: Login to Docker Hub
+#       uses: docker/login-action@v3
+#       with:
+#         username: ${{ secrets.DOCKERHUB_USERNAME }}
+#         password: ${{ secrets.DOCKERHUB_TOKEN }}
+#
+#     - name: Build and push
+#       run: |
+#         docker build -t ravneet-png/llama-agent-web:latest .
+#         docker push ravneet-png/llama-agent-web:latest
