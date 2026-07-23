@@ -96,6 +96,8 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./logs:/app/logs
+      - ./data:/app/data
+      - chroma_model_cache:/root/.cache/chroma
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -125,8 +127,12 @@ services:
     depends_on:
       - api
     command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+    volumes:
+      - ./data:/app/data
+      - chroma_model_cache:/root/.cache/chroma
     networks:
       - backend
+      - monitoring
 
   # =============================================
   # 5. Nginx - SSL + Load Balancer + CDN Headers
@@ -304,3 +310,4 @@ volumes:
   loki_data:
   promtail_positions:
   phoenix_data:
+  chroma_model_cache:

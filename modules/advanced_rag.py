@@ -501,53 +501,42 @@ class RouterQueryEngine:
 
 class PhoenixTracer:
     """
-    Observability layer using Arize Phoenix for LLM tracing.
+    Observability layer using Arize Phoenix + OpenTelemetry.
     
-    Tracks:
-      - Query classification (router)
-      - Sub-question decomposition
-      - Search results and timing
-      - Re-ranking scores
-      - Final answer generation
-    
-    Phoenix features:
-      - Visual trace timeline in Phoenix dashboard
-      - Drift detection for RAG pipelines
-      - OpenTelemetry-native (no vendor lock-in)
-      - Free to self-host
-    
-    Dashboard: http://localhost:6006 (when Phoenix container is running)
+    Sends traces to Phoenix dashboard at http://localhost:6006.
+    Tracks every RAG step as OpenTelemetry spans.
     """
     
     def __init__(
         self,
         phoenix_enabled: bool = False,
-        endpoint: str = "http://localhost:6006",
+        endpoint: str = "http://phoenix:6006",
     ):
-        """
-        Args:
-            phoenix_enabled: Whether to send traces to Phoenix
-            endpoint: Phoenix collector endpoint
-        """
         self.enabled = phoenix_enabled
         self.endpoint = endpoint
         self.traces = []
         self.current_trace = None
-        self.tracer = None
+        self.otel_tracer = None
+        self.current_span = None
         
         if phoenix_enabled:
             try:
-                import phoenix as px
-                # Initialize Phoenix session (connects to local or remote Phoenix)
-                self.session = px.launch_app(endpoint=endpoint)
-                self.tracer = self.session.tracer
-                print(f"[PHOENIX] Connected to Phoenix at {endpoint}")
-                print(f"[PHOENIX] Dashboard: http://localhost:6006")
-            except ImportError:
-                print("[PHOENIX] arize-phoenix not installed. Install: pip install arize-phoenix")
-                self.enabled = False
+                from opentelemetry import trace
+                from opentelemetry.sdk.trace import TracerProvider
+                from opentelemetry.sdk.trace.export import BatchSpanProcessor
+                from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+                
+                # Connect to Phoenix's OTLP endpoint
+                provider = TracerProvider()
+                exporter = OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces")
+                provider.add_span_processor(BatchSpanProcessor(exporter))
+                trace.set_tracer_provider(provider)
+                
+                self.otel_tracer = trace.get_tracer("llama-agent-rag")
+                print(f"[PHOENIX] Sending traces to {endpoint}")
+                print(f"[PHOENIX] Dashboard: {endpoint}")
             except Exception as e:
-                print(f"[PHOENIX] Connection failed: {e}")
+                print(f"[PHOENIX] OTel setup failed: {e}")
                 self.enabled = False
         else:
             print("[PHOENIX] Running in local logging mode")
@@ -556,16 +545,25 @@ class PhoenixTracer:
         """Start a new trace for a query."""
         trace_id = f"trace_{int(time.time() * 1000)}"
         
-        trace = {
+        trace_data = {
             "trace_id": trace_id,
             "query": query,
             "start_time": time.time(),
             "steps": [],
             "status": "in_progress",
         }
+        self.current_trace = trace_data
+        self.traces.append(trace_data)
         
-        self.current_trace = trace
-        self.traces.append(trace)
+        # Start OpenTelemetry span
+        if self.otel_tracer:
+            try:
+                self.current_span = self.otel_tracer.start_span(
+                    "rag_query",
+                    attributes={"query": query},
+                )
+            except Exception:
+                pass
         
         return trace_id
     
@@ -589,8 +587,22 @@ class PhoenixTracer:
             "metadata": metadata or {},
             "timestamp": time.time(),
         }
-        
         self.current_trace["steps"].append(step)
+        
+        # Create OpenTelemetry child span
+        if self.otel_tracer and self.current_span:
+            try:
+                child = self.otel_tracer.start_span(
+                    step_name,
+                    attributes={
+                        "input": str(input_data)[:500] if input_data else "",
+                        "output": str(output_data)[:500] if output_data else "",
+                        "duration_ms": round(duration_ms, 2),
+                    },
+                )
+                child.end()
+            except Exception:
+                pass
     
     def end_trace(self, answer: str = None, success: bool = True):
         """End the current trace."""
@@ -606,11 +618,22 @@ class PhoenixTracer:
         if answer:
             self.current_trace["answer"] = str(answer)[:1000]
         
-        # Calculate total time across all steps
         total_step_time = sum(s.get("duration_ms", 0) for s in self.current_trace["steps"])
         self.current_trace["processing_time_ms"] = round(total_step_time, 2)
         
+        # End OpenTelemetry span
+        if self.otel_tracer and self.current_span:
+            try:
+                self.current_span.set_attribute("status", "success" if success else "error")
+                self.current_span.set_attribute("num_steps", len(self.current_trace["steps"]))
+                if answer:
+                    self.current_span.set_attribute("answer_preview", str(answer)[:200])
+                self.current_span.end()
+            except Exception:
+                pass
+        
         self.current_trace = None
+        self.current_span = None
     
     def get_trace_summary(self, trace_id: str = None) -> Dict:
         """Get a summary of a trace."""

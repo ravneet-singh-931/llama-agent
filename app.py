@@ -368,7 +368,7 @@ def init_session_state():
         from modules.advanced_rag import AdvancedRAG
         base_store = get_vector_store()
         st.session_state.rag = base_store
-        st.session_state.advanced_rag = AdvancedRAG(default_store=base_store)
+        st.session_state.advanced_rag = AdvancedRAG(default_store=base_store, phoenix_enabled=True, phoenix_endpoint="http://phoenix:6006")
     if "facts" not in st.session_state:
         st.session_state.facts = {}
     if "last_agent" not in st.session_state:
@@ -645,7 +645,7 @@ async def process_message(user_input: str) -> str:
             from modules.advanced_rag import AdvancedRAG
             base_store = get_vector_store()
             st.session_state.rag = base_store
-            st.session_state.advanced_rag = AdvancedRAG(default_store=base_store)
+            st.session_state.advanced_rag = AdvancedRAG(default_store=base_store, phoenix_enabled=True, phoenix_endpoint="http://phoenix:6006")
         
         # Use Advanced RAG with re-ranking
         if "advanced_rag" in st.session_state and st.session_state.documents:
@@ -865,7 +865,7 @@ def _render_standard_chat():
                     from modules.advanced_rag import AdvancedRAG
                     base_store = get_vector_store()
                     st.session_state.rag = base_store
-                    st.session_state.advanced_rag = AdvancedRAG(default_store=base_store)
+                    st.session_state.advanced_rag = AdvancedRAG(default_store=base_store, phoenix_enabled=True, phoenix_endpoint="http://phoenix:6006")
                 memory_obj.add_message("user", prompt)
 
                 facts_context = facts_obj.get_context_string()
