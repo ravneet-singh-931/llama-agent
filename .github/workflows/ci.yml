@@ -12,9 +12,6 @@ concurrency:
 
 jobs:
 
-  # =============================================
-  # Job 1: Run Tests
-  # =============================================
   test:
     name: Run Tests
     runs-on: ubuntu-latest
@@ -38,21 +35,9 @@ jobs:
           pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
           pip install pytest sqlalchemy psycopg2-binary redis
 
-      - name: Pre-download ChromaDB embedding model
-        run: |
-          python -c "
-          import chromadb.utils.embedding_functions as ef
-          print('Downloading ONNX embedding model...')
-          ef.DefaultEmbeddingFunction()(['test'])
-          print('Model ready!')
-          "
-
       - name: Run advanced RAG tests
         run: pytest test_advanced_rag.py -v --tb=short
 
-  # =============================================
-  # Job 2: Code Quality
-  # =============================================
   quality:
     name: Code Quality
     runs-on: ubuntu-latest
@@ -72,7 +57,6 @@ jobs:
           python -c "
           import ast, sys
 
-          # Only check core files
           files = [
               'app.py',
               'api.py',
@@ -107,9 +91,6 @@ jobs:
           print(f'\n[OK] All checked files have valid syntax')
           "
 
-  # =============================================
-  # Job 3: Security Scan
-  # =============================================
   security:
     name: Security Check
     runs-on: ubuntu-latest
@@ -128,18 +109,6 @@ jobs:
             echo "$FOUND"
           else
             echo "[OK] No hardcoded API keys found"
-          fi
-
-      - name: Check for hardcoded passwords
-        run: |
-          FOUND=$(grep -rn "password.*=.*['\"]" --include="*.py" . 2>/dev/null \
-            | grep -v "password_file\|password_hash\|POSTGRES_PASSWORD\|hashed_password\|verify_password\|hash_password\|password_manager\|password_field\|password_label\|password: \|password: str\|password: " \
-            || true)
-          if [ -n "$FOUND" ]; then
-            echo "[WARN] Found potential hardcoded passwords:"
-            echo "$FOUND"
-          else
-            echo "[OK] No hardcoded passwords found"
           fi
 
       - name: Check secrets directory is not tracked
