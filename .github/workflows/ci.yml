@@ -18,7 +18,7 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout code
@@ -37,6 +37,15 @@ jobs:
           pip install python-dotenv PyPDF2 python-docx pandas
           pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
           pip install pytest sqlalchemy psycopg2-binary redis
+
+      - name: Pre-download ChromaDB embedding model
+        run: |
+          python -c "
+          import chromadb.utils.embedding_functions as ef
+          print('Downloading ONNX embedding model...')
+          ef.DefaultEmbeddingFunction()(['test'])
+          print('Model ready!')
+          "
 
       - name: Run advanced RAG tests
         run: pytest test_advanced_rag.py -v --tb=short
