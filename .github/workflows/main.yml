@@ -38,7 +38,7 @@ jobs:
           pip install chromadb pydantic fastapi uvicorn python-jose bcrypt
           pip install python-dotenv PyPDF2 python-docx pandas
           pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
-          pip install pytest pytest-cov sqlalchemy psycopg2-binary asyncpg redis
+          pip install pytest pytest-cov pytest-asyncio sqlalchemy psycopg2-binary asyncpg redis
 
       - name: "\U0001F9EA Run tests with coverage"
         run: |
