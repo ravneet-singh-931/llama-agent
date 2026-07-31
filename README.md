@@ -12,62 +12,69 @@
 [![Grafana](https://img.shields.io/badge/Grafana-Dashboards-F46842.svg?logo=grafana)](https://grafana.com/)
 [![Phoenix](https://img.shields.io/badge/Phoenix-Observability-43B58B.svg)](https://arize.com/phoenix/)
 
-A production-grade AI assistant that reads your documents and answers questions — with full security, monitoring, and observability.
+---
 
-## What It Does
+## 🚀 Llama Agent — Production-Grade AI Assistant
 
-Upload documents (PDFs, TXTs, CSVs) and ask questions. The AI reads your files and gives you accurate answers based on their content.
+> **Upload documents (PDFs, TXTs, CSVs) and ask questions. The AI reads your files and gives you accurate answers based on their content.**
 
 ```
 You: "What's the refund policy?"
 AI:  "Based on the uploaded documents, our refund policy allows..."
 ```
 
-## Features
+---
 
-### Core
-- **Document Q&A** — Upload files, ask questions, get answers from your docs
-- **Smart CSV Reader** — Understands headers, row counts, sample data
-- **Multi-Agent Team** — 5 specialized AI agents for complex queries
-- **Real-time Chat** — WebSocket-powered live responses
+## 📋 Table of Contents
 
-### Security
-- **JWT Authentication** — Secure login/signup
-- **File Validation** — Checks types, sizes, scans for threats
-- **Rate Limiting** — Prevents abuse
-- **Brute-Force Protection** — Auto-locks IPs/usernames after repeated failures
-- **Security Headers** — CSP, HSTS, X-Frame-Options, and more on every response
-- **Audit Logging** — Login, registration, uploads, and rate-limit events
-- **Input Sanitization** — SQL injection / XSS / command injection detection
-- **CSRF Protection** — Token-based request validation
-- **Secrets Management** — API keys never in code (Docker secrets)
+- [✨ Demo](#demo)
+- [🚀 Quick Start](#quick-start)
+- [🔐 Security](#security)
+- [📊 Monitoring & Observability](#monitoring--observability)
+- [�� Architecture](#architecture)
+- [💻 Tech Stack](#tech-stack)
+- [� Docker Containers](#docker-containers-13-total)
+- [🔧 Common Commands](#common-commands)
+- [☸️ Kubernetes Deployment](#kubernetes-deployment)
+- [📁 Project Structure](#project-structure)
+- [🔌 API Endpoints](#api-endpoints)
+- [⚙️ Environment Variables](#environment-variables)
+- [🔧 Troubleshooting](#troubleshooting)
+- [🤝 Contributing](#contributing)
+- [📄 License](#license)
 
-### Monitoring
-- **Prometheus + Grafana** — Real-time metrics dashboards (12 panels)
-- **Loki + Promtail** — Centralized log aggregation
-- **Alert Rules** — 8 automatic alerts for issues
-- **Enterprise Dashboard** — `/monitoring/dashboard` (business metrics, costs, SLA, alerts)
-- **Cost Tracking** — Groq API spend per model/user/day
-- **SLA Monitoring** — Uptime, response-time, and error-rate compliance
+---
 
-### Observability
-- **Phoenix (Arize AI)** — Traces every AI step
-- **OpenTelemetry** — See exactly what the AI is thinking
-- **Debug Dashboard** — Find why answers are wrong
+## ✨ Demo
 
-## Quick Start
+### Next.js Frontend (Main UI)
+<img src="docs/demo-frontend.png" alt="Llama Agent Frontend" width="100%" />
+
+### API Documentation (Swagger)
+<img src="docs/demo-api.png" alt="API Documentation" width="100%" />
+
+### Streamlit UI (Legacy)
+<img src="docs/demo-streamlit.png" alt="Streamlit UI" width="100%" />
+
+### Grafana Monitoring Dashboard
+<img src="docs/demo-grafana.png" alt="Grafana Dashboard" width="100%" />
+
+---
+
+## 🚀 Quick Start
 
 ### Prerequisites
-- Docker Desktop installed and running
-- Git
+- 🐳 Docker Desktop installed and running
+- 🐍 Python 3.10+ (for local development)
+- 🔑 Groq API key ([get one here](https://console.groq.com/))
 
-### 1. Clone the repo
+### 1️⃣ Clone the repo
 ```bash
 git clone https://github.com/ravneet-png/llama-agent.git
 cd llama-agent
 ```
 
-### 2. Add your API key
+### 2️⃣ Add your API key
 ```bash
 # Create secrets directory
 mkdir -p secrets
@@ -81,26 +88,62 @@ echo "your_jwt_secret" > secrets/jwt_secret_key.txt
 echo "admin_password" > secrets/grafana_admin_password.txt
 ```
 
-### 3. Start everything
+### 3️⃣ Start everything
 ```bash
 docker-compose up -d
 ```
 
-### 4. Open the app
-- **Main App (Next.js):** http://localhost:3001 (via Nginx: https://localhost)
-- **Streamlit UI (legacy):** http://localhost:8501
-- **API Docs (Swagger):** http://localhost:8000/docs
-- **Grafana Dashboard:** http://localhost:3002 (admin / password in `secrets/grafana_admin_password.txt`)
-- **Prometheus:** http://localhost:9090
-- **Phoenix Dashboard:** http://localhost:6006
+### 4️⃣ Open the app
+| Service | URL |
+|---------|-----|
+| **Main App (Next.js)** | http://localhost:3001 |
+| **Streamlit UI (legacy)** | http://localhost:8501 |
+| **API Docs (Swagger)** | http://localhost:8000/docs |
+| **Grafana Dashboard** | http://localhost:3002 |
+| **Prometheus** | http://localhost:9090 |
+| **Phoenix Dashboard** | http://localhost:6006 |
 
-### 5. Create an account
-- Go to http://localhost:3001 (or http://localhost:8501)
-- Click "Sign Up"
-- Create username/password
-- Login and start chatting!
+### 5️⃣ Create an account
+1. Go to http://localhost:3001
+2. Click "Sign Up"
+3. Create username/password
+4. Login and start chatting!
 
-## Architecture
+---
+
+## 🔐 Security
+
+| Feature | Description |
+|---------|-------------|
+| 🔑 **JWT Authentication** | Secure login/signup with token-based auth |
+| 📁 **File Validation** | Checks types, sizes, scans for threats |
+| 🚦 **Rate Limiting** | Prevents abuse with configurable limits |
+| 🛡️ **Brute-Force Protection** | Auto-locks IPs/usernames after repeated failures |
+| 🛡️ **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options |
+| 📝 **Audit Logging** | Login, registration, uploads, rate-limit events |
+| 🧼 **Input Sanitization** | SQL injection / XSS / command injection detection |
+| 🛡️ **CSRF Protection** | Token-based request validation |
+| 🔐 **Secrets Management** | API keys never in code (Docker secrets) |
+
+---
+
+## 📊 Monitoring & Observability
+
+| Tool | Purpose |
+|------|---------|
+| 📈 **Prometheus + Grafana** | Real-time metrics dashboards (12 panels) |
+| 📜 **Loki + Promtail** | Centralized log aggregation |
+| 🚨 **Alert Rules** | 8 automatic alerts for issues |
+| 📊 **Enterprise Dashboard** | `/monitoring/dashboard` (business metrics, costs, SLA, alerts) |
+| 💰 **Cost Tracking** | Groq API spend per model/user/day |
+| 📏 **SLA Monitoring** | Uptime, response-time, and error-rate compliance |
+| 🔍 **Phoenix (Arize AI)** | Traces every AI step |
+| 📡 **OpenTelemetry** | See exactly what the AI is thinking |
+| 🐞 **Debug Dashboard** | Find why answers are wrong |
+
+---
+
+## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -150,21 +193,25 @@ docker-compose up -d
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Tech Stack
+---
+
+## 💻 Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Next.js 16 (main UI), Streamlit (legacy) |
-| Backend | FastAPI, Python 3.10 |
-| Database | PostgreSQL 15, Redis 7, ChromaDB |
-| AI/ML | Groq (Llama 3), LlamaIndex, 5-agent team |
-| Agents | MCP (Model Context Protocol) over SSE |
-| Monitoring | Prometheus, Grafana, Loki, Enterprise dashboard |
-| Observability | Phoenix (Arize AI), OpenTelemetry |
-| Infrastructure | Docker, Docker Compose, Nginx |
-| Security | JWT, brute-force protection, audit logs, CSP headers, CSRF, rate limiting |
+| **Frontend** | Next.js 16 (main UI), Streamlit (legacy) |
+| **Backend** | FastAPI, Python 3.10 |
+| **Database** | PostgreSQL 15, Redis 7, ChromaDB |
+| **AI/ML** | Groq (Llama 3), LlamaIndex, 5-agent team |
+| **Agents** | MCP (Model Context Protocol) over SSE |
+| **Monitoring** | Prometheus, Grafana, Loki, Enterprise dashboard |
+| **Observability** | Phoenix (Arize AI), OpenTelemetry |
+| **Infrastructure** | Docker, Docker Compose, Nginx |
+| **Security** | JWT, brute-force protection, audit logs, CSP headers, CSRF, rate limiting |
 
-## Docker Containers (13 Total)
+---
+
+## 🐳 Docker Containers (13 Total)
 
 | Container | Purpose | Port |
 |-----------|---------|------|
@@ -182,7 +229,9 @@ docker-compose up -d
 | `node-exporter` | System Metrics | 9100 |
 | `phoenix` | AI Observability | 6006 |
 
-## Common Commands
+---
+
+## 🔧 Common Commands
 
 ```bash
 # Start everything
@@ -205,7 +254,9 @@ docker-compose ps
 pytest tests/ -v -m "not mcp"
 ```
 
-## Kubernetes Deployment
+---
+
+## ☸️ Kubernetes Deployment
 
 Kubernetes manifests live in `k8s/` and cover all application components:
 API, Streamlit web UI, Next.js frontend, MCP agent server, PostgreSQL,
@@ -230,7 +281,9 @@ kubectl apply -f k8s/ingress.yaml
 > (`ravneet231/llama-agent*`) — build and push them first. Real secret values
 > must replace the placeholders in `k8s/secrets.yaml`.
 
-## Project Structure
+---
+
+## 📁 Project Structure
 
 ```
 llama-agent/
@@ -269,7 +322,9 @@ llama-agent/
 └── Dockerfile.nginx          # Nginx container
 ```
 
-## API Endpoints
+---
+
+## 🔌 API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -284,7 +339,9 @@ llama-agent/
 | `GET` | `/monitoring/dashboard` | Enterprise metrics, costs, SLA, alerts |
 | `GET` | `/metrics` | Prometheus metrics |
 
-## Environment Variables
+---
+
+## ⚙️ Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -296,7 +353,9 @@ llama-agent/
 | `LLM_MODEL` | Groq model used by agents (multi-agent, streaming, WebSocket) | `llama-3.3-70b-versatile` |
 | `ENVIRONMENT` | `development` or `production` | `development` |
 
-## Troubleshooting
+---
+
+## 🔧 Troubleshooting
 
 ### App won't start
 ```bash
@@ -335,7 +394,9 @@ docker-compose ps postgres
 docker-compose restart postgres
 ```
 
-## Contributing
+---
+
+## 🤝 Contributing
 
 1. Fork the repo
 2. Create a branch (`git checkout -b feature/amazing`)
@@ -343,10 +404,18 @@ docker-compose restart postgres
 4. Push to branch (`git push origin feature/amazing`)
 5. Open a Pull Request
 
-## License
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+
+---
+
+## 📄 License
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## Author
+## 👤 Author
 
 **Ravneet** - [GitHub](https://github.com/ravneet-png)
+
+---
+
+## ⭐ Star this repo if you find it helpful!
