@@ -295,674 +295,248 @@ tools = [
     FunctionTool.from_defaults(fn=get_agent_health, name="get_agent_health", description="Get agent health stats"),
 ]
 
+# ===================== CREATE AGENT =====================
+
+agent = ReActAgent(
+    tools=tools,
+    llm=llm,
+    verbose=True,
+    streaming=False,
+    max_iterations=20,
+    max_retries=3,
+)
+
+
 # ===================== ENHANCED AGENT COORDINATION =====================
 
-class EnhancedAgentOrchestrator {
-    private agents: Map<string, Agent>;
-    private routingEngine: SmartRoutingEngine;
-    private contextManager: ContextSharingService;
-    
-    constructor(agents: Agent[]) {
-        this.agents = new Map(agents.map(agent => [agent.name, agent]));
-        this.routingEngine = new SmartRoutingEngine();
-        this.contextManager = new ContextSharingService();
-    }
-    
-    async routeQuery(query: string, context: ConversationContext): Promise<RoutingResult> {
-        const complexity = await this.routingEngine.analyzeComplexity(query);
-        const contextRelevance = await this.contextManager.analyzeContextRelevance(query, context);
-        
-        const candidates = this.getRelevantAgents(query, complexity, contextRelevance);
-        const selectedAgent = this.selectBestAgent(candidates, query);
-        
-        return {
-            agent: selectedAgent,
-            reasoning: this.generateRoutingReasoning(query, complexity, contextRelevance),
-            confidence: this.calculateConfidence(query, selectedAgent)
-        };
-    }
-    
-    private getRelevantAgents(query: string, complexity: Complexity, contextRelevance: number): Agent[] {
-        return Array.from(this.agents.values()).filter(agent => 
-            this.isAgentRelevant(agent, query, complexity, contextRelevance)
-        );
-    }
-    
-    private selectBestAgent(candidates: Agent[], query: string): Agent {
-        if (candidates.length === 0) {
-            return this.agents.get("research")!; // Default fallback
-        }
-        
-        // Score candidates based on query match
-        const scored = candidates.map(agent => ({
-            agent,
-            score: this.calculateAgentScore(agent, query)
-        }));
-        
-        return scored.sort((a, b) => b.score - a.score)[0].agent;
-    }
-    
-    private generateRoutingReasoning(query: string, complexity: Complexity, contextRelevance: number): string {
-        const factors = [];
-        
-        if (complexity.level > 5) factors.push("high complexity");
-        if (contextRelevance > 0.7) factors.push("strong context match");
-        if (query.length < 20) factors.push("short query");
-        
-        return factors.length > 0 ? 
-            `Query routed based on: ${factors.join(", ")} (confidence: ${this.calculateConfidence(query, this.agents.get("research")!)})` :
-            "Query routed to research agent (default)";
-    }
-    
-    private calculateConfidence(query: string, agent: Agent): number {
-        const queryWords = query.toLowerCase().split(" ").filter(w => w.length > 3);
-        const agentKeywords = agent.keywords || [];
-        
-        if (queryWords.length === 0 || agentKeywords.length === 0) return 0.5;
-        
-        const matches = queryWords.filter(word => 
-            agentKeywords.some(keyword => keyword.toLowerCase().includes(word))
-        );
-        
-        return Math.min(1.0, matches.length / Math.min(queryWords.length, agentKeywords.length) * 1.5);
-    }
-}
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Any
+from collections import defaultdict
+import asyncio
 
-// Smart Routing Engine
-class SmartRoutingEngine {
-    async analyzeComplexity(query: string): Promise<Complexity> {
-        const wordCount = query.split(" ").length;
-        const hasTechnicalTerms = this.detectTechnicalTerms(query);
-        const hasSpecificTopics = this.detectSpecificTopics(query);
-        const hasContextClues = this.detectContextClues(query);
-        
-        let complexity = 1;
-        
-        if (wordCount > 50) complexity += 3;
-        else if (wordCount > 20) complexity += 2;
-        else if (wordCount > 10) complexity += 1;
-        
-        if (hasTechnicalTerms) complexity += 2;
-        if (hasSpecificTopics) complexity += 1;
-        if (hasContextClues) complexity += 1;
-        
-        return {
-            level: Math.min(10, complexity),
-            factors: this.generateComplexityFactors(query)
-        };
-    }
+@dataclass
+class Complexity:
+    level: int
+    factors: List[str]
+
+@dataclass
+class RoutingResult:
+    agent: Any
+    reasoning: str
+    confidence: float
+
+@dataclass
+class AgentContext:
+    conversation_history: List[Any]
+    shared_knowledge: Dict[str, Any]
+    active_tasks: List[str]
+    last_updated: Any
+
+class EnhancedAgentOrchestrator:
+    def __init__(self, agents: List[Any]):
+        self.agents = {agent.name: agent for agent in agents}
+        self.routing_engine = SmartRoutingEngine()
+        self.context_manager = ContextSharingService()
     
-    private detectTechnicalTerms(query: string): boolean {
-        const technicalTerms = [
+    async def route_query(self, query: str, context: Any) -> RoutingResult:
+        complexity = await self.routing_engine.analyze_complexity(query)
+        context_relevance = await self.context_manager.analyze_context_relevance(query, context)
+        
+        candidates = self.get_relevant_agents(query, complexity, context_relevance)
+        selected_agent = self.select_best_agent(candidates, query)
+        
+        return RoutingResult(
+            agent=selected_agent,
+            reasoning=self.generate_routing_reasoning(query, complexity, context_relevance),
+            confidence=self.calculate_confidence(query, selected_agent)
+        )
+    
+    def get_relevant_agents(self, query: str, complexity: Complexity, context_relevance: float) -> List[Any]:
+        return [agent for agent in self.agents.values() 
+                if self.is_agent_relevant(agent, query, complexity, context_relevance)]
+    
+    def select_best_agent(self, candidates: List[Any], query: str) -> Any:
+        if not candidates:
+            return self.agents.get("research")  # Default fallback
+        
+        # Score candidates based on query match
+        scored = [(agent, self.calculate_agent_score(agent, query)) for agent in candidates]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[0][0]
+    
+    def generate_routing_reasoning(self, query: str, complexity: Complexity, context_relevance: float) -> str:
+        factors = []
+        
+        if complexity.level > 5:
+            factors.append("high complexity")
+        if context_relevance > 0.7:
+            factors.append("strong context match")
+        if len(query) < 20:
+            factors.append("short query")
+        
+        if factors:
+            return f"Query routed based on: {', '.join(factors)} (confidence: {self.calculate_confidence(query, self.agents.get('research'))})"
+        return "Query routed to research agent (default)"
+    
+    def calculate_confidence(self, query: str, agent: Any) -> float:
+        query_words = [w for w in query.lower().split() if len(w) > 3]
+        agent_keywords = getattr(agent, 'keywords', []) or []
+        
+        if not query_words or not agent_keywords:
+            return 0.5
+        
+        matches = sum(1 for word in query_words 
+                     if any(keyword.lower() in word for keyword in agent_keywords))
+        
+        return min(1.0, matches / min(len(query_words), len(agent_keywords)) * 1.5)
+    
+    def is_agent_relevant(self, agent: Any, query: str, complexity: Complexity, context_relevance: float) -> bool:
+        # Simple relevance check
+        return True
+    
+    def calculate_agent_score(self, agent: Any, query: str) -> float:
+        query_words = [w for w in query.lower().split() if len(w) > 3]
+        agent_keywords = getattr(agent, 'keywords', []) or []
+        
+        if not query_words or not agent_keywords:
+            return 0.5
+        
+        matches = sum(1 for word in query_words 
+                     if any(keyword.lower() in word for keyword in agent_keywords))
+        
+        return min(1.0, matches / min(len(query_words), len(agent_keywords)) * 1.5)
+
+# Smart Routing Engine
+class SmartRoutingEngine:
+    async def analyze_complexity(self, query: str) -> Complexity:
+        word_count = len(query.split())
+        has_technical_terms = self.detect_technical_terms(query)
+        has_specific_topics = self.detect_specific_topics(query)
+        has_context_clues = self.detect_context_clues(query)
+        
+        complexity = 1
+        
+        if word_count > 50:
+            complexity += 3
+        elif word_count > 20:
+            complexity += 2
+        elif word_count > 10:
+            complexity += 1
+        
+        if has_technical_terms:
+            complexity += 2
+        if has_specific_topics:
+            complexity += 1
+        if has_context_clues:
+            complexity += 1
+        
+        return Complexity(
+            level=min(10, complexity),
+            factors=self.generate_complexity_factors(query)
+        )
+    
+    def detect_technical_terms(self, query: str) -> bool:
+        technical_terms = [
             "api", "database", "algorithm", "function", "class", "method",
             "interface", "component", "service", "architecture", "framework",
             "library", "protocol", "integration", "deployment", "configuration"
-        ];
-        return technicalTerms.some(term => query.toLowerCase().includes(term));
-    }
+        ]
+        return any(term in query.lower() for term in technical_terms)
     
-    private detectSpecificTopics(query: string): boolean {
-        const specificTopics = [
+    def detect_specific_topics(self, query: str) -> bool:
+        specific_topics = [
             "machine learning", "neural network", "deep learning", "ai model",
             "data science", "big data", "cloud computing", "devops",
             "microservices", "rest api", "graphql", "docker", "kubernetes"
-        ];
-        return specificTopics.some(topic => query.toLowerCase().includes(topic));
-    }
+        ]
+        return any(topic in query.lower() for topic in specific_topics)
     
-    private detectContextClues(query: string): boolean {
-        return query.includes("?") || query.includes("please") || 
-               query.includes("help") || query.includes("need");
-    }
+    def detect_context_clues(self, query: str) -> bool:
+        return any(clue in query for clue in ["?", "please", "help", "need"])
     
-    private generateComplexityFactors(query: string): string[] {
-        const factors = [];
+    def generate_complexity_factors(self, query: str) -> List[str]:
+        factors = []
         
-        if (query.split(" ").length > 50) factors.push("long_query");
-        if (this.detectTechnicalTerms(query)) factors.push("technical");
-        if (this.detectSpecificTopics(query)) factors.push("specific_topic");
-        if (this.detectContextClues(query)) factors.push("uncertain");
+        if len(query.split()) > 50:
+            factors.append("long_query")
+        if self.detect_technical_terms(query):
+            factors.append("technical")
+        if self.detect_specific_topics(query):
+            factors.append("specific_topic")
+        if self.detect_context_clues(query):
+            factors.append("uncertain")
         
-        return factors;
-    }
-}
+        return factors
 
-// Context Sharing Service
-class ContextSharingService {
-    private contexts: Map<string, AgentContext> = new Map();
+# Context Sharing Service
+class ContextSharingService:
+    def __init__(self):
+        self.contexts: Dict[str, AgentContext] = {}
     
-    async shareContext(sourceAgent: string, targetAgents: string[], context: AgentContext): Promise<void> {
-        // Store context for source agent
-        this.contexts.set(sourceAgent, context);
+    async def share_context(self, source_agent: str, target_agents: List[str], context: AgentContext) -> None:
+        # Store context for source agent
+        self.contexts[source_agent] = context
         
-        // Share with target agents
-        for (const targetAgent of targetAgents) {
-            if (this.contexts.has(targetAgent)) {
-                // Merge contexts
-                const existingContext = this.contexts.get(targetAgent)!;
-                const mergedContext = this.mergeContexts(existingContext, context);
-                this.contexts.set(targetAgent, mergedContext);
-            }
-        }
-    }
+        # Share with target agents
+        for target_agent in target_agents:
+            if target_agent in self.contexts:
+                # Merge contexts
+                existing_context = self.contexts[target_agent]
+                merged_context = self.merge_contexts(existing_context, context)
+                self.contexts[target_agent] = merged_context
     
-    async retrieveContext(agentId: string, query: string): Promise<AgentContext> {
-        if (!this.contexts.has(agentId)) {
-            return this.createDefaultContext();
-        }
+    async def retrieve_context(self, agent_id: str, query: str) -> AgentContext:
+        if agent_id not in self.contexts:
+            return self.create_default_context()
         
-        const context = this.contexts.get(agentId)!;
+        context = self.contexts[agent_id]
         
-        // Filter context based on query relevance
-        return this.filterContextByQuery(context, query);
-    }
+        # Filter context based on query relevance
+        return self.filter_context_by_query(context, query)
     
-    private mergeContexts(context1: AgentContext, context2: AgentContext): AgentContext {
-        return {
-            conversationHistory: [...context1.conversationHistory, ...context2.conversationHistory],
-            sharedKnowledge: {...context1.sharedKnowledge, ...context2.sharedKnowledge},
-            activeTasks: [...context1.activeTasks, ...context2.activeTasks],
-            lastUpdated: new Date()
-        };
-    }
+    def merge_contexts(self, context1: AgentContext, context2: AgentContext) -> AgentContext:
+        return AgentContext(
+            conversation_history=context1.conversation_history + context2.conversation_history,
+            shared_knowledge={**context1.shared_knowledge, **context2.shared_knowledge},
+            active_tasks=context1.active_tasks + context2.active_tasks,
+            last_updated=__import__('datetime').datetime.now()
+        )
     
-    private filterContextByQuery(context: AgentContext, query: string): AgentContext {
-        const relevantHistory = context.conversationHistory.filter(msg => 
-            this.isMessageRelevant(msg, query)
-        );
+    def filter_context_by_query(self, context: AgentContext, query: str) -> AgentContext:
+        relevant_history = [msg for msg in context.conversation_history 
+                           if self.is_message_relevant(msg, query)]
         
-        const relevantKnowledge = Object.entries(context.sharedKnowledge)
-            .filter(([key, value]) => this.isKnowledgeRelevant(key, value, query))
-            .reduce((acc, [key, value]) => ({...acc, [key]: value}), {});
+        relevant_knowledge = {k: v for k, v in context.shared_knowledge.items()
+                             if self.is_knowledge_relevant(k, v, query)}
         
-        return {
-            conversationHistory: relevantHistory,
-            sharedKnowledge: relevantKnowledge,
-            activeTasks: context.activeTasks,
-            lastUpdated: context.lastUpdated
-        };
-    }
+        return AgentContext(
+            conversation_history=relevant_history,
+            shared_knowledge=relevant_knowledge,
+            active_tasks=context.active_tasks,
+            last_updated=context.last_updated
+        )
     
-    private isMessageRelevant(message: ChatMessage, query: string): boolean {
-        const messageText = message.content.toLowerCase();
-        const queryWords = query.toLowerCase().split(" ");
-        
-        return queryWords.some(word => messageText.includes(word) && word.length > 3);
-    }
+    def is_message_relevant(self, message: Any, query: str) -> bool:
+        message_text = str(message.content).lower() if hasattr(message, 'content') else str(message).lower()
+        query_words = query.lower().split()
+        return any(word in message_text for word in query_words if len(word) > 3)
     
-    private isKnowledgeRelevant(key: string, value: any, query: string): boolean {
-        const keyLower = key.toLowerCase();
-        const queryLower = query.toLowerCase();
-        
-        return keyLower.includes(queryLower) || 
-               (typeof value === "string" && value.toLowerCase().includes(queryLower));
-    }
+    def is_knowledge_relevant(self, key: str, value: Any, query: str) -> bool:
+        key_lower = key.lower()
+        query_lower = query.lower()
+        return key_lower in query_lower or (isinstance(value, str) and query_lower in value.lower())
     
-    private createDefaultContext(): AgentContext {
-        return {
-            conversationHistory: [],
-            sharedKnowledge: {},
-            activeTasks: [],
-            lastUpdated: new Date()
-        };
-    }
-}
-
-// ===================== PHASE 2: ADVANCED RAG CAPABILITIES =====================
-
-// Enhanced RAG Capabilities
-interface AdvancedRAG {
-  // Multi-modal search with context awareness
-  multiModalSearch(query: string, filters: SearchFilters): Promise<MultiModalResult>;
-  
-  // Context-aware retrieval with conversation history
-  contextAwareRetrieval(query: string, conversationHistory: Message[]): Promise<ContextResponse>;
-  
-  // Knowledge graph integration and querying
-  integrateKnowledgeGraph(graph: KnowledgeGraph): Promise<void>;
-  queryKnowledgeGraph(query: string, context: AgentContext): Promise<KnowledgeGraphQueryResult>;
-}
-
-// Search Filters
-interface SearchFilters {
-  relevanceThreshold?: number;
-  contextWeight?: number;
-  temporalWeight?: number;
-  maxResults?: number;
-  sourceTypes?: string[];
-}
-
-// Multi-Modal Search Result Types
-interface MultiModalResult {
-  results: SearchResult[];
-  metadata: {
-    totalResults: number;
-    searchTime: number;
-    queryType: string;
-  };
-}
-
-interface SearchResult {
-  id: string;
-  content: string;
-  score: number;
-  source: string;
-  metadata: Record<string, any>;
-}
-
-interface TextSearchResult extends SearchResult {
-  type: "text";
-}
-
-interface ImageSearchResult extends SearchResult {
-  type: "image";
-  imageUrl?: string;
-}
-
-interface StructuredSearchResult extends SearchResult {
-  type: "structured";
-  schema?: Record<string, any>;
-}
-
-// Context-Aware Retrieval Types
-interface ContextResponse {
-  content: string;
-  citations: Citation[];
-  contextUsed: {
-    documentsReferenced: string[];
-    conversationLength: number;
-    temporalContext: TemporalContext;
-  };
-}
-
-interface Citation {
-  documentId: string;
-  excerpt: string;
-  relevanceScore: number;
-}
-
-interface TemporalContext {
-  recent: boolean;
-  timeRange?: string;
-}
-
-interface ContextAnalysis {
-  userIntent: string;
-  conversationTopic: string;
-  temporalContext: TemporalContext;
-  entityContext: string[];
-}
-
-interface Message {
-  role: string;
-  content: string;
-  timestamp?: Date;
-}
-
-interface Document {
-  id: string;
-  content: string;
-  metadata: Record<string, any>;
-  source: string;
-}
-
-// Multi-Modal Search Engine
-class MultiModalSearchEngine {
-  async search(query: string, filters: SearchFilters): Promise<MultiModalResult> {
-    // Text search
-    const textResults = await this.searchText(query, filters);
+    def create_default_context(self) -> AgentContext:
+        return AgentContext(
+            conversation_history=[],
+            shared_knowledge={},
+            active_tasks=[],
+            last_updated=__import__('datetime').datetime.now()
+        )
     
-    // Image search (if applicable)
-    const imageResults = await this.searchImages(query, filters);
-    
-    // Structured data search
-    const structuredResults = await this.searchStructuredData(query, filters);
-    
-    // Combine and rank results
-    return this.combineAndRankResults(textResults, imageResults, structuredResults, query);
-  }
-  
-  private async searchText(query: string, filters: SearchFilters): Promise<TextSearchResult[]> {
-    // Implement text search with relevance scoring
-    const vectorQuery = await this.generateQueryEmbedding(query);
-    const textResults = await this.vectorDatabase.search(vectorQuery, filters);
-    
-    return textResults.map(result => ({
-      id: result.id,
-      content: result.content,
-      score: result.score,
-      source: result.source,
-      metadata: result.metadata,
-      type: "text"
-    }));
-  }
-  
-  private async searchImages(query: string, filters: SearchFilters): Promise<ImageSearchResult[]> {
-    // Implement image search using vision models
-    const imageDescriptions = await this.generateImageDescriptions(query);
-    const imageResults = await this.imageDatabase.search(imageDescriptions, filters);
-    
-    return imageResults.map(result => ({
-      id: result.id,
-      content: result.content,
-      score: result.score,
-      source: result.source,
-      metadata: result.metadata,
-      type: "image",
-      imageUrl: result.imageUrl
-    }));
-  }
-  
-  private async searchStructuredData(query: string, filters: SearchFilters): Promise<StructuredSearchResult[]> {
-    // Implement structured data search
-    const structuredResults = await this.database.search(query, filters);
-    
-    return structuredResults.map(result => ({
-      id: result.id,
-      content: result.content,
-      score: result.score,
-      source: result.source,
-      metadata: result.metadata,
-      type: "structured",
-      schema: result.schema
-    }));
-  }
-  
-  private async generateQueryEmbedding(query: string): Promise<number[]> {
-    // Generate embeddings for text query
-    return await this.embeddingService.generate(query);
-  }
-  
-  private async generateImageDescriptions(query: string): Promise<string[]> {
-    // Generate descriptions for images using vision model
-    return await this.visionService.describeImages(query);
-  }
-  
-  private combineAndRankResults(
-    textResults: TextSearchResult[],
-    imageResults: ImageSearchResult[],
-    structuredResults: StructuredSearchResult[],
-    query: string
-  ): MultiModalResult {
-    const allResults = [...textResults, ...imageResults, ...structuredResults];
-    
-    // Apply ranking algorithm
-    const rankedResults = this.rankResults(allResults, query);
-    
-    return {
-      results: rankedResults,
-      metadata: {
-        totalResults: allResults.length,
-        searchTime: Date.now(),
-        queryType: "multi_modal"
-      }
-    };
-  }
-  
-  private rankResults(results: SearchResult[], query: string): SearchResult[] {
-    // Simple ranking by score, can be enhanced with more sophisticated algorithms
-    return results.sort((a, b) => b.score - a.score);
-  }
-}
-
-// Context-Aware Retrieval System
-class ContextAwareRetrieval {
-  async retrieve(query: string, conversationHistory: Message[]): Promise<ContextResponse> {
-    // Analyze conversation context
-    const contextAnalysis = await this.analyzeContext(conversationHistory);
-    
-    // Generate context-enhanced query
-    const enhancedQuery = this.enhanceQueryWithContext(query, contextAnalysis);
-    
-    // Retrieve relevant documents
-    const relevantDocuments = await this.retrieveRelevantDocuments(enhancedQuery, contextAnalysis);
-    
-    // Generate context-aware response
-    return this.generateContextAwareResponse(relevantDocuments, conversationHistory, query);
-  }
-  
-  private async analyzeContext(conversationHistory: Message[]): Promise<ContextAnalysis> {
-    const recentMessages = conversationHistory.slice(-5); // Last 5 messages
-    const userQueries = recentMessages.filter(msg => msg.role === 'user').map(msg => msg.content);
-    const assistantResponses = recentMessages.filter(msg => msg.role === 'assistant').map(msg => msg.content);
-    
-    return {
-      userIntent: this.inferIntent(userQueries),
-      conversationTopic: this.inferTopic(userQueries, assistantResponses),
-      temporalContext: this.analyzeTemporalContext(conversationHistory),
-      entityContext: this.extractEntities(conversationHistory)
-    };
-  }
-  
-  private enhanceQueryWithContext(query: string, context: ContextAnalysis): string {
-    let enhancedQuery = query;
-    
-    // Add context clues
-    if (context.userIntent) {
-      enhancedQuery += ` (user intent: ${context.userIntent})`;
-    }
-    
-    if (context.conversationTopic) {
-      enhancedQuery += ` (topic: ${context.conversationTopic})`;
-    }
-    
-    // Add temporal context
-    if (context.temporalContext.recent) {
-      enhancedQuery += ` (recent: ${context.temporalContext.recent})`;
-    }
-    
-    // Add entity context
-    if (context.entityContext.length > 0) {
-      enhancedQuery += ` (entities: ${context.entityContext.join(', ')})`;
-    }
-    
-    return enhancedQuery;
-  }
-  
-  private async retrieveRelevantDocuments(
-    query: string,
-    context: ContextAnalysis
-  ): Promise<Document[]> {
-    // Use context-enhanced query for retrieval
-    const searchQuery = this.enhanceQueryWithContext(query, context);
-    
-    // Retrieve documents with context awareness
-    const documents = await this.documentDatabase.search(searchQuery, {
-      relevanceThreshold: 0.7,
-      contextWeight: 0.3,
-      temporalWeight: 0.2
-    });
-    
-    return documents;
-  }
-  
-  private generateContextAwareResponse(
-    documents: Document[],
-    conversationHistory: Message[],
-    originalQuery: string
-  ): ContextResponse {
-    // Generate response that considers conversation context
-    const contextAwareContent = this.generateContextAwareContent(documents, conversationHistory, originalQuery);
-    
-    // Include citations to relevant sources
-    const citations = this.generateCitations(documents);
-    
-    return {
-      content: contextAwareContent,
-      citations: citations,
-      contextUsed: {
-        documentsReferenced: documents.map(d => d.id),
-        conversationLength: conversationHistory.length,
-        temporalContext: this.analyzeTemporalContext(conversationHistory)
-      }
-    };
-  }
-  
-  private inferIntent(queries: string[]): string {
-    // Simple intent inference
-    const combined = queries.join(" ").toLowerCase();
-    if (combined.includes("how") || combined.includes("what")) return "informational";
-    if (combined.includes("create") || combined.includes("write") || combined.includes("build")) return "creative";
-    if (combined.includes("analyze") || combined.includes("compare")) return "analytical";
-    return "general";
-  }
-  
-  private inferTopic(userQueries: string[], assistantResponses: string[]): string {
-    const allText = [...userQueries, ...assistantResponses].join(" ").toLowerCase();
-    if (allText.includes("code") || allText.includes("program")) return "programming";
-    if (allText.includes("data") || allText.includes("analysis")) return "data analysis";
-    if (allText.includes("write") || allText.includes("article")) return "writing";
-    return "general";
-  }
-  
-  private analyzeTemporalContext(history: Message[]): TemporalContext {
-    if (history.length === 0) return { recent: false };
-    const lastMessage = history[history.length - 1];
-    // Simple check - if last message was within last hour
-    return { recent: true, timeRange: "last hour" };
-  }
-  
-  private extractEntities(history: Message[]): string[] {
-    const allText = history.map(m => m.content).join(" ");
-    const entityRegex = /\b[A-Z][a-z]+\b/g;
-    return Array.from(allText.matchAll(entityRegex)).map(match => match[0]);
-  }
-  
-  private generateContextAwareContent(documents: Document[], history: Message[], query: string): string {
-    // Generate context-aware response content
-    const docContent = documents.map(d => d.content).join("\n\n");
-    return `Based on the provided documents and conversation context:\n\n${docContent}\n\nAnswer: [Generated response based on context]`;
-  }
-  
-  private generateCitations(documents: Document[]): Citation[] {
-    return documents.map(doc => ({
-      documentId: doc.id,
-      excerpt: doc.content.substring(0, 200) + "...",
-      relevanceScore: 0.8
-    }));
-  }
-}
-
-// Knowledge Graph Integration
-class KnowledgeGraphIntegration {
-  private knowledgeGraph: KnowledgeGraph;
-  
-  constructor() {
-    this.knowledgeGraph = new KnowledgeGraph();
-  }
-  
-  async integrateKnowledgeGraph(graph: KnowledgeGraph): Promise<void> {
-    this.knowledgeGraph = graph;
-    await this.indexKnowledgeGraph();
-  }
-  
-  async queryKnowledgeGraph(
-    query: string,
-    context: AgentContext
-  ): Promise<KnowledgeGraphQueryResult> {
-    // Extract entities from query
-    const entities = this.extractEntitiesFromQuery(query);
-    
-    // Find relationships between entities
-    const relationships = this.findRelationships(entities);
-    
-    // Generate answer using knowledge graph
-    const answer = await this.generateKnowledgeGraphAnswer(query, entities, relationships);
-    
-    return {
-      answer,
-      entities: entities,
-      relationships: relationships,
-      confidence: this.calculateKnowledgeGraphConfidence(query, entities)
-    };
-  }
-  
-  private async indexKnowledgeGraph(): Promise<void> {
-    // Index knowledge graph for efficient querying
-    // This would involve creating indexes on entities, relationships, and concepts
-  }
-  
-  private extractEntitiesFromQuery(query: string): string[] {
-    // Extract named entities from query
-    const entityRegex = /\b[A-Z][a-z]+\b/g;
-    return Array.from(query.matchAll(entityRegex)).map(match => match[0]);
-  }
-  
-  private findRelationships(entities: string[]): Promise<Relationship[]> {
-    // Find relationships between entities in the knowledge graph
-    return this.knowledgeGraph.findRelationships(entities);
-  }
-  
-  private async generateKnowledgeGraphAnswer(
-    query: string,
-    entities: string[],
-    relationships: Relationship[]
-  ): Promise<string> {
-    // Generate answer using knowledge graph reasoning
-    const relevantRelationships = this.filterRelevantRelationships(relationships, entities);
-    
-    if (relevantRelationships.length === 0) {
-      return "I don't have enough information in the knowledge graph to answer this question.";
-    }
-    
-    // Generate a coherent response based on relationships
-    return this.synthesizeResponseFromRelationships(relevantRelationships, query);
-  }
-  
-  private filterRelevantRelationships(relationships: Relationship[], entities: string[]): Relationship[] {
-    return relationships.filter(rel => 
-      entities.includes(rel.source) || entities.includes(rel.target)
-    );
-  }
-  
-  private synthesizeResponseFromRelationships(relationships: Relationship[], query: string): string {
-    return `Based on the knowledge graph relationships: ${relationships.map(r => `${r.source} -> ${r.target}`).join(", ")}`;
-  }
-  
-  private calculateKnowledgeGraphConfidence(
-    query: string,
-    entities: string[]
-  ): number {
-    // Calculate confidence based on entity relevance and relationship strength
-    const entityConfidence = entities.length / 10; // Normalize to 0-1
-    const queryComplexity = query.split(" ").length / 20; // Normalize to 0-1
-    
-    return Math.min(1.0, (entityConfidence + (1 - queryComplexity)) / 2);
-  }
-}
-
-// Supporting Types
-interface KnowledgeGraph {
-  findRelationships(entities: string[]): Promise<Relationship[]>;
-}
-
-interface Relationship {
-  source: string;
-  target: string;
-  type: string;
-  strength: number;
-}
-
-interface KnowledgeGraphQueryResult {
-  answer: string;
-  entities: string[];
-  relationships: Relationship[];
-  confidence: number;
-}
-
-interface AgentContext {
-  conversationHistory: ChatMessage[];
-  sharedKnowledge: Record<string, any>;
-  activeTasks: string[];
-  lastUpdated: Date;
-}
-
-interface ChatMessage {
-  role: string;
-  content: string;
-}
-
-# ===================== MAIN LOOP =====================
+async def analyze_context_relevance(self, query: str, context: Any) -> float:
+        # Simple relevance analysis
+        return 0.5
 
 async def run_agent(user_input: str) -> str:
     # Add context from memory
