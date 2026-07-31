@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/layout/app-shell";
-import { ChatInterface } from "@/components/chat/chat-interface";
+import { EnhancedChatInterface } from "@/components/chat/EnhancedChatInterface";
 import { useAuthStore } from "@/store/auth-store";
 
 export default function DashboardPage() {
@@ -17,7 +17,7 @@ export default function DashboardPage() {
 
   return (
     <AppShell>
-      <ChatInterface />
+      <EnhancedChatInterface />
     </AppShell>
   );
 }

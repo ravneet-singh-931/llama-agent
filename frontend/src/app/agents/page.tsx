@@ -17,6 +17,8 @@ import {
   Server,
   XCircle,
   Zap,
+  Users,
+  BarChart3,
 } from "lucide-react";
 import { AppShell } from "@/components/layout/app-shell";
 import { Card } from "@/components/ui/card";
@@ -24,6 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
+import { AgentCollaborationDashboard } from "@/components/chat/AgentCollaborationDashboard";
 
 const agents = [
   {
@@ -364,6 +367,16 @@ export default function AgentsPage() {
                 </div>
               </div>
             </Card>
+          </motion.div>
+
+          {/* Enhanced Agent Collaboration Dashboard */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.8 }}
+            className="mx-auto mt-8 max-w-5xl"
+          >
+            <AgentCollaborationDashboard />
           </motion.div>
         </div>
       </div>
