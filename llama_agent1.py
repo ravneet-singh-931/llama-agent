@@ -295,15 +295,218 @@ tools = [
     FunctionTool.from_defaults(fn=get_agent_health, name="get_agent_health", description="Get agent health stats"),
 ]
 
-# ===================== CREATE AGENT =====================
+# ===================== ENHANCED AGENT COORDINATION =====================
 
-agent = ReActAgent(
-    tools=tools,
-    llm=llm,
-    verbose=True,
-    streaming=False,
-    max_iterations=10,
-)
+class EnhancedAgentOrchestrator {
+    private agents: Map<string, Agent>;
+    private routingEngine: SmartRoutingEngine;
+    private contextManager: ContextSharingService;
+    
+    constructor(agents: Agent[]) {
+        this.agents = new Map(agents.map(agent => [agent.name, agent]));
+        this.routingEngine = new SmartRoutingEngine();
+        this.contextManager = new ContextSharingService();
+    }
+    
+    async routeQuery(query: string, context: ConversationContext): Promise<RoutingResult> {
+        const complexity = await this.routingEngine.analyzeComplexity(query);
+        const contextRelevance = await this.contextManager.analyzeContextRelevance(query, context);
+        
+        const candidates = this.getRelevantAgents(query, complexity, contextRelevance);
+        const selectedAgent = this.selectBestAgent(candidates, query);
+        
+        return {
+            agent: selectedAgent,
+            reasoning: this.generateRoutingReasoning(query, complexity, contextRelevance),
+            confidence: this.calculateConfidence(query, selectedAgent)
+        };
+    }
+    
+    private getRelevantAgents(query: string, complexity: Complexity, contextRelevance: number): Agent[] {
+        return Array.from(this.agents.values()).filter(agent => 
+            this.isAgentRelevant(agent, query, complexity, contextRelevance)
+        );
+    }
+    
+    private selectBestAgent(candidates: Agent[], query: string): Agent {
+        if (candidates.length === 0) {
+            return this.agents.get("research")!; // Default fallback
+        }
+        
+        // Score candidates based on query match
+        const scored = candidates.map(agent => ({
+            agent,
+            score: this.calculateAgentScore(agent, query)
+        }));
+        
+        return scored.sort((a, b) => b.score - a.score)[0].agent;
+    }
+    
+    private generateRoutingReasoning(query: string, complexity: Complexity, contextRelevance: number): string {
+        const factors = [];
+        
+        if (complexity.level > 5) factors.push("high complexity");
+        if (contextRelevance > 0.7) factors.push("strong context match");
+        if (query.length < 20) factors.push("short query");
+        
+        return factors.length > 0 ? 
+            `Query routed based on: ${factors.join(", ")} (confidence: ${this.calculateConfidence(query, this.agents.get("research")!)})` :
+            "Query routed to research agent (default)";
+    }
+    
+    private calculateConfidence(query: string, agent: Agent): number {
+        const queryWords = query.toLowerCase().split(" ").filter(w => w.length > 3);
+        const agentKeywords = agent.keywords || [];
+        
+        if (queryWords.length === 0 || agentKeywords.length === 0) return 0.5;
+        
+        const matches = queryWords.filter(word => 
+            agentKeywords.some(keyword => keyword.toLowerCase().includes(word))
+        );
+        
+        return Math.min(1.0, matches.length / Math.min(queryWords.length, agentKeywords.length) * 1.5);
+    }
+}
+
+// Smart Routing Engine
+class SmartRoutingEngine {
+    async analyzeComplexity(query: string): Promise<Complexity> {
+        const wordCount = query.split(" ").length;
+        const hasTechnicalTerms = this.detectTechnicalTerms(query);
+        const hasSpecificTopics = this.detectSpecificTopics(query);
+        const hasContextClues = this.detectContextClues(query);
+        
+        let complexity = 1;
+        
+        if (wordCount > 50) complexity += 3;
+        else if (wordCount > 20) complexity += 2;
+        else if (wordCount > 10) complexity += 1;
+        
+        if (hasTechnicalTerms) complexity += 2;
+        if (hasSpecificTopics) complexity += 1;
+        if (hasContextClues) complexity += 1;
+        
+        return {
+            level: Math.min(10, complexity),
+            factors: this.generateComplexityFactors(query)
+        };
+    }
+    
+    private detectTechnicalTerms(query: string): boolean {
+        const technicalTerms = [
+            "api", "database", "algorithm", "function", "class", "method",
+            "interface", "component", "service", "architecture", "framework",
+            "library", "protocol", "integration", "deployment", "configuration"
+        ];
+        return technicalTerms.some(term => query.toLowerCase().includes(term));
+    }
+    
+    private detectSpecificTopics(query: string): boolean {
+        const specificTopics = [
+            "machine learning", "neural network", "deep learning", "ai model",
+            "data science", "big data", "cloud computing", "devops",
+            "microservices", "rest api", "graphql", "docker", "kubernetes"
+        ];
+        return specificTopics.some(topic => query.toLowerCase().includes(topic));
+    }
+    
+    private detectContextClues(query: string): boolean {
+        return query.includes("?") || query.includes("please") || 
+               query.includes("help") || query.includes("need");
+    }
+    
+    private generateComplexityFactors(query: string): string[] {
+        const factors = [];
+        
+        if (query.split(" ").length > 50) factors.push("long_query");
+        if (this.detectTechnicalTerms(query)) factors.push("technical");
+        if (this.detectSpecificTopics(query)) factors.push("specific_topic");
+        if (this.detectContextClues(query)) factors.push("uncertain");
+        
+        return factors;
+    }
+}
+
+// Context Sharing Service
+class ContextSharingService {
+    private contexts: Map<string, AgentContext> = new Map();
+    
+    async shareContext(sourceAgent: string, targetAgents: string[], context: AgentContext): Promise<void> {
+        // Store context for source agent
+        this.contexts.set(sourceAgent, context);
+        
+        // Share with target agents
+        for (const targetAgent of targetAgents) {
+            if (this.contexts.has(targetAgent)) {
+                // Merge contexts
+                const existingContext = this.contexts.get(targetAgent)!;
+                const mergedContext = this.mergeContexts(existingContext, context);
+                this.contexts.set(targetAgent, mergedContext);
+            }
+        }
+    }
+    
+    async retrieveContext(agentId: string, query: string): Promise<AgentContext> {
+        if (!this.contexts.has(agentId)) {
+            return this.createDefaultContext();
+        }
+        
+        const context = this.contexts.get(agentId)!;
+        
+        // Filter context based on query relevance
+        return this.filterContextByQuery(context, query);
+    }
+    
+    private mergeContexts(context1: AgentContext, context2: AgentContext): AgentContext {
+        return {
+            conversationHistory: [...context1.conversationHistory, ...context2.conversationHistory],
+            sharedKnowledge: {...context1.sharedKnowledge, ...context2.sharedKnowledge},
+            activeTasks: [...context1.activeTasks, ...context2.activeTasks],
+            lastUpdated: new Date()
+        };
+    }
+    
+    private filterContextByQuery(context: AgentContext, query: string): AgentContext {
+        const relevantHistory = context.conversationHistory.filter(msg => 
+            this.isMessageRelevant(msg, query)
+        );
+        
+        const relevantKnowledge = Object.entries(context.sharedKnowledge)
+            .filter(([key, value]) => this.isKnowledgeRelevant(key, value, query))
+            .reduce((acc, [key, value]) => ({...acc, [key]: value}), {});
+        
+        return {
+            conversationHistory: relevantHistory,
+            sharedKnowledge: relevantKnowledge,
+            activeTasks: context.activeTasks,
+            lastUpdated: context.lastUpdated
+        };
+    }
+    
+    private isMessageRelevant(message: ChatMessage, query: string): boolean {
+        const messageText = message.content.toLowerCase();
+        const queryWords = query.toLowerCase().split(" ");
+        
+        return queryWords.some(word => messageText.includes(word) && word.length > 3);
+    }
+    
+    private isKnowledgeRelevant(key: string, value: any, query: string): boolean {
+        const keyLower = key.toLowerCase();
+        const queryLower = query.toLowerCase();
+        
+        return keyLower.includes(queryLower) || 
+               (typeof value === "string" && value.toLowerCase().includes(queryLower));
+    }
+    
+    private createDefaultContext(): AgentContext {
+        return {
+            conversationHistory: [],
+            sharedKnowledge: {},
+            activeTasks: [],
+            lastUpdated: new Date()
+        };
+    }
+}
 
 # ===================== MAIN LOOP =====================
 
