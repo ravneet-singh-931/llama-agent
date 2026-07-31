@@ -622,59 +622,64 @@ async def chat(
                     break
             
             if not fact_answered:
-                # Try routing through multi-agent system for specialized tasks
-                from multi_agent import MultiAgentOrchestrator
-                
-                # Keyword patterns for specialized agents
-                code_keywords = ["write code", "function", "class", "debug", "fix bug",
-                    "programming", "python", "javascript", "code review",
-                    "refactor", "implement", "algorithm", "script", "api",
-                    "database", "sql", "html", "css", "react", "django",
-                    "flask", "fastapi", "code for", "program to"]
-                writer_keywords = ["write an article", "write a blog", "write content",
-                    "draft", "compose", "write an essay", "write a story",
-                    "creative writing", "copywriting", "write a report",
-                    "write documentation", "write a post", "write a letter"]
-                planner_keywords = ["plan", "strategy", "roadmap", "steps to",
-                    "how to start", "create a plan", "project plan",
-                    "action plan", "timeline", "milestones", "phases"]
-                analyzer_keywords = ["analyze", "analysis", "statistics", "trends",
-                    "patterns", "data analysis", "evaluate", "assess",
-                    "break down", "metrics", "insights"]
-                research_keywords = ["research", "explain", "what is", "how does",
-                    "tell me about", "compare", "difference between",
-                    "pros and cons", "investigate", "explore"]
-                
-                task_lower = lower_input
-                use_multi_agent = False
-                agent_type = "research"  # default
-                
-                if any(kw in task_lower for kw in code_keywords):
-                    use_multi_agent = True
-                    agent_type = "coder"
-                elif any(kw in task_lower for kw in writer_keywords):
-                    use_multi_agent = True
-                    agent_type = "writer"
-                elif any(kw in task_lower for kw in planner_keywords):
-                    use_multi_agent = True
-                    agent_type = "planner"
-                elif any(kw in task_lower for kw in analyzer_keywords):
-                    use_multi_agent = True
-                    agent_type = "analyzer"
-                elif any(kw in task_lower for kw in research_keywords):
-                    use_multi_agent = True
-                    agent_type = "research"
-                
-                if use_multi_agent:
-                    query_type = f"multi_agent:{agent_type}"
-                    orchestrator = MultiAgentOrchestrator()
-                    response = orchestrator.agents[agent_type].execute(request.message)
+                # Simple greeting handler - bypass agent for simple messages
+                greetings = ["hi", "hello", "hey", "hola", "good morning", "good afternoon", "good evening", "howdy", "yo", "sup"]
+                if any(g in lower_input for g in greetings):
+                    response = "Hello! How can I help you today?"
                 else:
-                    # Fall back to general ReAct agent
-                    facts_context = facts.get_context_string()
-                    enhanced_input = f"{request.message}\n\n{facts_context}\n\nIMPORTANT: Always respond in English."
-                    from llama_agent1 import run_agent
-                    response = await run_agent(enhanced_input)
+                    # Try routing through multi-agent system for specialized tasks
+                    from multi_agent import MultiAgentOrchestrator
+                    
+                    # Keyword patterns for specialized agents
+                    code_keywords = ["write code", "function", "class", "debug", "fix bug",
+                        "programming", "python", "javascript", "code review",
+                        "refactor", "implement", "algorithm", "script", "api",
+                        "database", "sql", "html", "css", "react", "django",
+                        "flask", "fastapi", "code for", "program to"]
+                    writer_keywords = ["write an article", "write a blog", "write content",
+                        "draft", "compose", "write an essay", "write a story",
+                        "creative writing", "copywriting", "write a report",
+                        "write documentation", "write a post", "write a letter"]
+                    planner_keywords = ["plan", "strategy", "roadmap", "steps to",
+                        "how to start", "create a plan", "project plan",
+                        "action plan", "timeline", "milestones", "phases"]
+                    analyzer_keywords = ["analyze", "analysis", "statistics", "trends",
+                        "patterns", "data analysis", "evaluate", "assess",
+                        "break down", "metrics", "insights"]
+                    research_keywords = ["research", "explain", "what is", "how does",
+                        "tell me about", "compare", "difference between",
+                        "pros and cons", "investigate", "explore"]
+                    
+                    task_lower = lower_input
+                    use_multi_agent = False
+                    agent_type = "research"  # default
+                    
+                    if any(kw in task_lower for kw in code_keywords):
+                        use_multi_agent = True
+                        agent_type = "coder"
+                    elif any(kw in task_lower for kw in writer_keywords):
+                        use_multi_agent = True
+                        agent_type = "writer"
+                    elif any(kw in task_lower for kw in planner_keywords):
+                        use_multi_agent = True
+                        agent_type = "planner"
+                    elif any(kw in task_lower for kw in analyzer_keywords):
+                        use_multi_agent = True
+                        agent_type = "analyzer"
+                    elif any(kw in task_lower for kw in research_keywords):
+                        use_multi_agent = True
+                        agent_type = "research"
+                    
+                    if use_multi_agent:
+                        query_type = f"multi_agent:{agent_type}"
+                        orchestrator = MultiAgentOrchestrator()
+                        response = orchestrator.agents[agent_type].execute(request.message)
+                    else:
+                        # Fall back to general ReAct agent
+                        facts_context = facts.get_context_string()
+                        enhanced_input = f"{request.message}\n\n{facts_context}\n\nIMPORTANT: Always respond in English."
+                        from llama_agent1 import run_agent
+                        response = await run_agent(enhanced_input)
         
         # Calculate response time
         elapsed = (datetime.now() - start_time).total_seconds()

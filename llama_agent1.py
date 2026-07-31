@@ -302,6 +302,7 @@ agent = ReActAgent(
     llm=llm,
     verbose=True,
     streaming=False,
+    max_iterations=10,
 )
 
 # ===================== MAIN LOOP =====================
@@ -317,7 +318,7 @@ async def run_agent(user_input: str) -> str:
     
     try:
         handler = agent.run(user_input)
-        output = await handler
+        output = await asyncio.wait_for(handler, timeout=60)
         result = str(output)
         
         # Log success
