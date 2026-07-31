@@ -52,6 +52,9 @@ def sanitize_filename(filename: str) -> str:
     # Replace dangerous characters with underscores
     filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', filename)
     
+    # Remove any remaining path traversal sequences (..)
+    filename = filename.replace('..', '')
+    
     # Collapse multiple underscores
     filename = re.sub(r'_+', '_', filename)
     
