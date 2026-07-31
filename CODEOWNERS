@@ -1,0 +1,30 @@
+# CODEOWNERS
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings/about-code-owners
+
+# Default owners for the entire repository
+*       @ravneet-png
+
+# Backend (Python API, modules, agents)
+api.py                  @ravneet-png
+app.py                  @ravneet-png
+llama_agent1.py         @ravneet-png
+multi_agent.py          @ravneet-png
+mcp_agents_server.py    @ravneet-png
+modules/                @ravneet-png
+tests/                  @ravneet-png
+
+# Frontend (Next.js)
+frontend/               @ravneet-png
+
+# Infrastructure & DevOps
+docker-compose.yml      @ravneet-png
+Dockerfile              @ravneet-png
+Dockerfile.nginx        @ravneet-png
+k8s/                    @ravneet-png
+.github/                @ravneet-png
+
+# Documentation
+README.md               @ravneet-png
+ARCHITECTURE.md         @ravneet-png
+CONTRIBUTING.md         @ravneet-png
+API_DOCUMENTATION.md    @ravneet-png
