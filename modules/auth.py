@@ -11,7 +11,7 @@ Features:
 
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from functools import wraps
 
@@ -117,13 +117,13 @@ class JWTManager:
         to_encode = data.copy()
         
         if expires_delta:
-            expire = datetime.utcnow() + expires_delta
+            expire = datetime.now(timezone.utc) + expires_delta
         else:
-            expire = datetime.utcnow() + timedelta(minutes=self.access_expire_minutes)
+            expire = datetime.now(timezone.utc) + timedelta(minutes=self.access_expire_minutes)
         
         to_encode.update({
             "exp": expire,
-            "iat": datetime.utcnow(),
+            "iat": datetime.now(timezone.utc),
             "type": "access",
         })
         
@@ -132,11 +132,11 @@ class JWTManager:
     def create_refresh_token(self, data: Dict[str, Any]) -> str:
         """Create refresh token (longer expiration)"""
         to_encode = data.copy()
-        expire = datetime.utcnow() + timedelta(days=self.refresh_expire_days)
+        expire = datetime.now(timezone.utc) + timedelta(days=self.refresh_expire_days)
         
         to_encode.update({
             "exp": expire,
-            "iat": datetime.utcnow(),
+            "iat": datetime.now(timezone.utc),
             "type": "refresh",
         })
         
@@ -304,10 +304,17 @@ class UserManager:
         from sqlalchemy import select
         from modules.database import get_db_manager
 
+        # Validate UUID format up-front so a malformed JWT `sub`
+        # returns 404/401 instead of raising a 500 error
+        try:
+            user_uuid = uuid.UUID(user_id)
+        except (ValueError, AttributeError, TypeError):
+            return None
+
         db = get_db_manager()
         async with db.session() as session:
             result = await session.execute(
-                select(User).where(User.id == uuid.UUID(user_id))
+                select(User).where(User.id == user_uuid)
             )
             user = result.scalar_one_or_none()
             
@@ -338,7 +345,7 @@ class UserManager:
                 key=generate_api_key(),
                 name=name,
                 user_id=uuid.UUID(user_id),
-                expires_at=datetime.utcnow() + timedelta(days=expires_days),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=expires_days),
             )
             session.add(api_key)
             await session.flush()
@@ -368,11 +375,14 @@ class UserManager:
                 return None
 
             # Check expiration
-            if key_record.expires_at and key_record.expires_at < datetime.utcnow():
+            # NOTE: DB stores naive UTC timestamps (DateTime columns without tz),
+            # so compare against naive UTC to match the stored values.
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            if key_record.expires_at and key_record.expires_at < now_utc:
                 return None
 
             # Update last used
-            key_record.last_used = datetime.utcnow()
+            key_record.last_used = now_utc
 
             # Get user
             user_result = await session.execute(
@@ -395,7 +405,7 @@ user_manager = UserManager()
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> Dict[str, Any]:
     """
     FastAPI dependency to get current authenticated user
@@ -405,6 +415,13 @@ async def get_current_user(
         async def protected_route(user = Depends(get_current_user)):
             return {"user": user}
     """
+    if credentials is None:
+        # auto_error=False makes the dependency return None instead of
+        # raising 401 when no Authorization header is present
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
     token = credentials.credentials
     payload = jwt_manager.verify_token(token)
     
@@ -519,3 +536,38 @@ async def optional_auth(
 
     # Not authenticated - that's OK
     return None
+
+
+async def authenticate_ws_token(token: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Validate a WebSocket JWT token passed as a `token` query parameter.
+
+    Used by the /ws/{user_id} endpoint so that:
+      - A valid access token resolves the caller's REAL user identity
+        (username + user id), preventing impersonation of other user_ids.
+      - An invalid/expired token is rejected by the caller (connection
+        refused), instead of silently accepting an anonymous identity.
+
+    Returns the user dict on success, or None when:
+      - no token supplied (anonymous connection is allowed by the caller)
+      - token is malformed/expired/wrong type
+      - the user no longer exists
+      - the user database is unreachable (defensive: fail closed for
+        token-authenticated connections; anonymous stays available)
+    """
+    if not token:
+        return None
+
+    payload = jwt_manager.verify_token(token)
+    if not payload or payload.get("type") != "access":
+        return None
+
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+
+    try:
+        return await user_manager.get_user(user_id)
+    except Exception:
+        # Database unreachable: treat as unauthenticated rather than 500
+        return None

@@ -15,10 +15,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 # ============ TEST CALCULATOR ============
 
+# Use the canonical safe evaluator from the security module
+# (same implementation as llama_agent1.calculator, without importing
+# the agent module which requires GROQ_API_KEY at import time).
+from modules.security import safe_math_eval
+
+
 def calculator(expression: str) -> str:
     try:
-        allowed_names = {k: v for k, v in math.__dict__.items() if not k.startswith("__")}
-        result = eval(expression, {"__builtins__": {}}, allowed_names)
+        result = safe_math_eval(expression)
         return f"Result: {result}"
     except Exception as e:
         return f"Error: {str(e)}"
@@ -35,6 +40,12 @@ def test_calculator_sqrt():
 
 def test_calculator_error():
     assert "Error" in calculator("invalid")
+
+def test_calculator_blocks_code_execution():
+    # Security regression: arbitrary code must NOT execute
+    assert "Error" in calculator("__import__('os').system('echo hacked')")
+    assert "Error" in calculator("open('test.txt').read()")
+    assert "Error" in calculator("[1, 2, 3] * 2")  # list literals not allowed
 
 
 # ============ TEST TEXT ANALYZER ============

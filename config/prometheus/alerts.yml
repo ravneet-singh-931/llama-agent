@@ -99,65 +99,72 @@ groups:
           description: "Only {{ $value | humanize }}% disk space remaining."
 
   # ---- Database Alerts ----
-  - name: llama_agent_db
-    rules:
-      # Alert: PostgreSQL is down
-      - alert: PostgresDown
-        expr: pg_up == 0
-        for: 2m
-        labels:
-          severity: critical
-          service: database
-        annotations:
-          summary: "PostgreSQL is DOWN"
-          description: "PostgreSQL database has been unreachable for 2 minutes."
-
-      # Alert: High database connections
-      - alert: HighDbConnections
-        expr: pg_stat_activity_count > 80
-        for: 5m
-        labels:
-          severity: warning
-          service: database
-        annotations:
-          summary: "High database connection count"
-          description: "{{ $value }} active connections (threshold: 80)."
+  # NOTE: Disabled - no postgres-exporter is deployed in this stack.
+  # These rules reference metrics (pg_up, pg_stat_activity_count) that
+  # do not exist, so they would never fire and would spam error logs.
+  # To enable: add a postgres-exporter sidecar and uncomment.
+  # - name: llama_agent_db
+  #   rules:
+  #     - alert: PostgresDown
+  #       expr: pg_up == 0
+  #       for: 2m
+  #       labels:
+  #         severity: critical
+  #         service: database
+  #       annotations:
+  #         summary: "PostgreSQL is DOWN"
+  #         description: "PostgreSQL database has been unreachable for 2 minutes."
+  #
+  #     - alert: HighDbConnections
+  #       expr: pg_stat_activity_count > 80
+  #       for: 5m
+  #       labels:
+  #         severity: warning
+  #         service: database
+  #       annotations:
+  #         summary: "High database connection count"
+  #         description: "{{ $value }} active connections (threshold: 80)."
 
   # ---- Redis Alerts ----
-  - name: llama_agent_redis
-    rules:
-      # Alert: Redis is down
-      - alert: RedisDown
-        expr: redis_up == 0
-        for: 2m
-        labels:
-          severity: critical
-          service: redis
-        annotations:
-          summary: "Redis is DOWN"
-          description: "Redis has been unreachable for 2 minutes."
-
-      # Alert: High Redis memory usage
-      - alert: HighRedisMemory
-        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
-        for: 5m
-        labels:
-          severity: warning
-          service: redis
-        annotations:
-          summary: "Redis memory usage high"
-          description: "Redis memory usage is {{ $value | humanizePercentage }}."
+  # NOTE: Disabled - no redis-exporter is deployed in this stack.
+  # These rules reference metrics (redis_up, redis_memory_used_bytes) that
+  # do not exist, so they would never fire and would spam error logs.
+  # To enable: add a redis-exporter sidecar and uncomment.
+  # - name: llama_agent_redis
+  #   rules:
+  #     - alert: RedisDown
+  #       expr: redis_up == 0
+  #       for: 2m
+  #       labels:
+  #         severity: critical
+  #         service: redis
+  #       annotations:
+  #         summary: "Redis is DOWN"
+  #         description: "Redis has been unreachable for 2 minutes."
+  #
+  #     - alert: HighRedisMemory
+  #       expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+  #       for: 5m
+  #       labels:
+  #         severity: warning
+  #         service: redis
+  #       annotations:
+  #         summary: "Redis memory usage high"
+  #         description: "Redis memory usage is {{ $value | humanizePercentage }}."
 
   # ---- Container Alerts ----
-  - name: llama_agent_containers
-    rules:
-      # Alert: Container not running
-      - alert: ContainerNotRunning
-        expr: absent(container_last_seen{name=~"llama-agent-.*"})
-        for: 2m
-        labels:
-          severity: critical
-          service: containers
-        annotations:
-          summary: "Container not running"
-          description: "Container {{ $labels.name }} has not been seen for 2 minutes."
+  # NOTE: Disabled - no cadvisor is deployed in this stack.
+  # This rule references container_last_seen which does not exist.
+  # Container uptime is covered by ApiDown + node-exporter alerts.
+  # To enable: add a cadvisor container and uncomment.
+  # - name: llama_agent_containers
+  #   rules:
+  #     - alert: ContainerNotRunning
+  #       expr: absent(container_last_seen{name=~"llama-agent-.*"})
+  #       for: 2m
+  #       labels:
+  #         severity: critical
+  #         service: containers
+  #       annotations:
+  #         summary: "Container not running"
+  #         description: "Container {{ $labels.name }} has not been seen for 2 minutes."

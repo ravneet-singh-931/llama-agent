@@ -42,8 +42,21 @@ kubectl wait --for=condition=ready pod -l app=redis -n $NAMESPACE --timeout=120s
 echo "🤖 Deploying Llama Agent API..."
 kubectl apply -f k8s/api.yaml
 
+echo "🔧 Deploying MCP Agent Server..."
+kubectl apply -f k8s/mcp-server.yaml
+
 echo "🌐 Deploying Streamlit Web UI..."
 kubectl apply -f k8s/web.yaml
+
+echo "🖥️  Deploying Next.js Frontend..."
+kubectl apply -f k8s/frontend.yaml
+
+# Wait for application pods
+echo "⏳ Waiting for application pods..."
+kubectl wait --for=condition=ready pod -l component=api -n $NAMESPACE --timeout=180s
+kubectl wait --for=condition=ready pod -l component=mcp-server -n $NAMESPACE --timeout=120s
+kubectl wait --for=condition=ready pod -l component=web -n $NAMESPACE --timeout=120s
+kubectl wait --for=condition=ready pod -l component=frontend -n $NAMESPACE --timeout=120s
 
 # Setup ingress
 echo "🌐 Setting up Ingress..."
@@ -53,5 +66,7 @@ echo "✅ Deployment complete!"
 echo ""
 echo "📊 Check status: kubectl get pods -n $NAMESPACE"
 echo "📋 API logs:     kubectl logs -f deployment/llama-agent-api -n $NAMESPACE"
+echo "📋 MCP logs:     kubectl logs -f deployment/llama-agent-mcp-server -n $NAMESPACE"
 echo "📋 Web logs:     kubectl logs -f deployment/llama-agent-web -n $NAMESPACE"
-echo "🔗 API URL:      http://llama-agent.local (or configure your ingress)"
+echo "📋 Frontend logs: kubectl logs -f deployment/llama-agent-frontend -n $NAMESPACE"
+echo "🔗 App URL:      http://llama-agent.local (add to /etc/hosts, then use the ingress)"

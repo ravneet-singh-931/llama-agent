@@ -28,8 +28,6 @@ spec:
           ports:
             - containerPort: 8000
               name: http
-            - containerPort: 8765
-              name: websocket
           env:
             - name: DATABASE_URL
               valueFrom:
@@ -51,6 +49,12 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: jwt-secret-key
+            - name: MCP_SERVER_URL
+              value: http://llama-agent-mcp-server-service:8001
+            # TEMPORARY: llama-3.3-70b-versatile free-tier daily limit still 429s
+            # (verified live 2026-07-31). Remove once quota resets or tier upgraded.
+            - name: LLM_MODEL
+              value: llama-3.1-8b-instant
             - name: ENVIRONMENT
               value: production
           resources:
@@ -97,9 +101,6 @@ spec:
     - port: 8000
       targetPort: 8000
       name: http
-    - port: 8765
-      targetPort: 8765
-      name: websocket
   type: ClusterIP
 ---
 apiVersion: v1

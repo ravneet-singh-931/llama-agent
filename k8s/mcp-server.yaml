@@ -1,0 +1,73 @@
+# ============================================
+# MCP Agent Server Deployment + Service
+# Exposes 5 specialized agents as MCP tools (SSE transport)
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-agent-mcp-server
+  namespace: llama-agent
+  labels:
+    app: llama-agent
+    component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llama-agent
+      component: mcp-server
+  template:
+    metadata:
+      labels:
+        app: llama-agent
+        component: mcp-server
+    spec:
+      containers:
+        - name: mcp-server
+          image: ravneet231/llama-agent-mcp-server:latest
+          command: ["python", "mcp_agents_server.py", "--transport", "sse", "--port", "8001", "--host", "0.0.0.0"]
+          ports:
+            - containerPort: 8001
+              name: sse
+          env:
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: groq-api-key
+            # TEMPORARY: llama-3.3-70b-versatile free-tier daily limit still 429s
+            # (verified live 2026-07-31). Remove once quota resets or tier upgraded.
+            - name: LLM_MODEL
+              value: llama-3.1-8b-instant
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            tcpSocket:
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8001
+            initialDelaySeconds: 30
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-agent-mcp-server-service
+  namespace: llama-agent
+spec:
+  selector:
+    app: llama-agent
+    component: mcp-server
+  ports:
+    - port: 8001
+      targetPort: 8001
+      name: sse
+  type: ClusterIP

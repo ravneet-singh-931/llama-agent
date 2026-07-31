@@ -49,7 +49,7 @@ class InMemoryCache:
     
     def _make_key(self, key: str) -> str:
         """Create a hash key for the cache."""
-        return hashlib.md5(key.encode()).hexdigest()
+        return hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
     
     def get(self, key: str) -> Optional[Any]:
         """Get a value from cache."""
@@ -251,7 +251,7 @@ class ResponseCache:
         # Sort kwargs for consistent keys
         sorted_kwargs = sorted(kwargs.items())
         key_data = f"{prefix}:{json.dumps(sorted_kwargs, default=str)}"
-        return hashlib.md5(key_data.encode()).hexdigest()
+        return hashlib.md5(key_data.encode(), usedforsecurity=False).hexdigest()
     
     def get(self, prefix: str, **kwargs) -> Optional[Any]:
         """Get a cached response."""
@@ -291,7 +291,7 @@ class ResponseCache:
             def wrapper(*args, **kwargs):
                 # Generate cache key from function name and arguments
                 cache_key = f"{func.__name__}:{args}:{kwargs}"
-                key = hashlib.md5(cache_key.encode()).hexdigest()
+                key = hashlib.md5(cache_key.encode(), usedforsecurity=False).hexdigest()
                 
                 # Check cache
                 cached = self.cache.get(key)
@@ -376,12 +376,12 @@ class EmbeddingCache:
     
     def get_embedding(self, text: str) -> Optional[list]:
         """Get cached embedding for text."""
-        key = f"embedding:{hashlib.md5(text.encode()).hexdigest()}"
+        key = f"embedding:{hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()}"
         return self.cache.get(key)
     
     def set_embedding(self, text: str, embedding: list) -> None:
         """Cache an embedding."""
-        key = f"embedding:{hashlib.md5(text.encode()).hexdigest()}"
+        key = f"embedding:{hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()}"
         self.cache.set(key, embedding, self.ttl)
     
     def get_document_embeddings(self, document_id: str) -> Optional[Dict]:
@@ -484,7 +484,7 @@ def cached(ttl: int = 300, prefix: str = "default"):
         def wrapper(*args, **kwargs):
             # Generate cache key
             key_data = f"{prefix}:{func.__name__}:{args}:{kwargs}"
-            cache_key = hashlib.md5(key_data.encode()).hexdigest()
+            cache_key = hashlib.md5(key_data.encode(), usedforsecurity=False).hexdigest()
             
             # Check cache
             cached_value = response_cache.get(prefix, cache_key=cache_key)

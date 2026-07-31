@@ -16,7 +16,7 @@ import hashlib
 import secrets
 from typing import Tuple, Optional, Dict, List
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 # ============ INPUT SANITIZATION ============
@@ -293,7 +293,7 @@ class AuditLogger:
     ) -> None:
         """Log a login attempt."""
         event = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "event_type": "LOGIN_SUCCESS" if success else "LOGIN_FAILURE",
             "identifier": username,
             "ip_address": ip_address,
@@ -310,7 +310,7 @@ class AuditLogger:
     ) -> None:
         """Log a registration attempt."""
         event = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "event_type": "REGISTRATION_SUCCESS" if success else "REGISTRATION_FAILURE",
             "identifier": username,
             "ip_address": ip_address,
@@ -327,7 +327,7 @@ class AuditLogger:
     ) -> None:
         """Log a file upload attempt."""
         event = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "event_type": "FILE_UPLOAD_SUCCESS" if success else "FILE_UPLOAD_FAILURE",
             "identifier": user_id,
             "details": f"filename={filename}, reason={reason}",
@@ -341,7 +341,7 @@ class AuditLogger:
     ) -> None:
         """Log a rate limit violation."""
         event = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "event_type": "RATE_LIMIT_VIOLATION",
             "identifier": ip_address,
             "details": f"endpoint={endpoint}",
@@ -356,7 +356,7 @@ class AuditLogger:
     ) -> None:
         """Log suspicious activity."""
         event = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "event_type": "SUSPICIOUS_ACTIVITY",
             "identifier": ip_address,
             "details": f"type={activity_type}, details={details}",
@@ -365,7 +365,7 @@ class AuditLogger:
     
     def get_recent_events(self, hours: int = 24) -> List[Dict]:
         """Get events from the last N hours."""
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         return [
             e for e in self.events
             if datetime.fromisoformat(e["timestamp"]) > cutoff

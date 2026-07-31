@@ -629,8 +629,15 @@ def display_sidebar():
 
 # ============ MESSAGE PROCESSING ============
 
-async def process_message(user_input: str) -> str:
-    """Process user message for the MCP path only."""
+async def process_message(user_input: str, doc_context: str = "", force_agent: str | None = None):
+    """Process user message for the MCP path only.
+
+    NOTE: This coroutine runs inside a background thread (_run_async), where
+    st.session_state is NOT the real session state ("missing ScriptRunContext").
+    It must therefore never read or write st.session_state — all context is
+    computed in the main thread and passed in as arguments.
+    Returns (result, agent_used).
+    """
     try:
         from modules.memory import ConversationMemory, FactMemory
 
@@ -639,29 +646,10 @@ async def process_message(user_input: str) -> str:
 
         memory.add_message("user", user_input)
 
-        # Include document context if documents are loaded
-        if "rag" not in st.session_state:
-            from modules.vector_store import get_vector_store
-            from modules.advanced_rag import AdvancedRAG
-            base_store = get_vector_store()
-            st.session_state.rag = base_store
-            st.session_state.advanced_rag = AdvancedRAG(default_store=base_store, phoenix_enabled=True, phoenix_endpoint="http://phoenix:6006")
-        
-        # Use Advanced RAG with re-ranking
-        if "advanced_rag" in st.session_state and st.session_state.documents:
-            advanced = st.session_state.advanced_rag
-            rag_result = advanced.query(user_input, use_subquestion=False)
-            doc_context = rag_result["context"]
-        else:
-            rag = st.session_state.rag
-            doc_context = rag.get_context(user_input)
-        
         enhanced_input = f"{user_input}\n\n{doc_context}" if doc_context else user_input
 
-        force_agent = st.session_state.pop("_mcp_force_agent", None)
-
         if force_agent:
-            st.session_state.last_agent = force_agent
+            agent = force_agent
             result = await call_mcp_agent(force_agent, enhanced_input)
         else:
             task_lower = user_input.lower()
@@ -676,14 +664,13 @@ async def process_message(user_input: str) -> str:
             elif any(kw in task_lower for kw in ["analyze", "analysis", "evaluate", "assess", "patterns", "insights"]):
                 agent = "analyzer"
 
-            st.session_state.last_agent = agent
             result = await call_mcp_agent(agent, enhanced_input)
 
         memory.add_message("assistant", str(result))
-        return str(result)
+        return str(result), agent
 
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {str(e)}", None
 
 
 def _route_command(user_input: str) -> str:
@@ -838,9 +825,18 @@ def _render_standard_chat():
 
             elif route == "mcp":
                 with st.spinner("Thinking..."):
-                    response = _run_async(process_message(prompt))
+                    # Build RAG context in the MAIN thread: st.session_state is
+                    # not readable from the background thread _run_async uses.
+                    if "advanced_rag" in st.session_state and st.session_state.documents:
+                        advanced = st.session_state.advanced_rag
+                        rag_result = advanced.query(prompt, use_subquestion=False)
+                        doc_context = rag_result["context"]
+                    else:
+                        rag = st.session_state.rag
+                        doc_context = rag.get_context(prompt)
+                    force_agent = st.session_state.pop("_mcp_force_agent", None)
+                    response, agent_used = _run_async(process_message(prompt, doc_context, force_agent))
                 st.markdown(response)
-                agent_used = st.session_state.get("last_agent", "mcp")
                 agent_labels = {
                     "research": "Research Agent (MCP)",
                     "coder": "Coder Agent (MCP)",
@@ -850,6 +846,7 @@ def _render_standard_chat():
                     "collaborate": "All Agents (MCP)",
                     "team_status": "Team Status",
                 }
+                st.session_state.last_agent = agent_used
                 label = agent_labels.get(agent_used, agent_used)
                 st.caption(f"Agent: {label} | {assistant_time}")
 

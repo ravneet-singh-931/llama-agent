@@ -37,8 +37,8 @@ class TestAuthenticationFlow:
         assert verify_password(password, hashed), "Password verification failed"
         print("  Step 2: Password hashing works")
 
-        # Step 3: Verify JWT creation works
-        token = jwt_manager.create_access_token(user_id=1, username="testuser")
+        # Step 3: Verify JWT creation works (sub must be a string per PyJWT)
+        token = jwt_manager.create_access_token({"sub": "1", "username": "testuser"})
         assert token is not None, "JWT token creation failed"
         assert len(token) > 50, "JWT token too short"
         print("  Step 3: JWT token created")
@@ -95,12 +95,13 @@ class TestChatFlow:
         """Test: Query → Embedding → Search → Re-rank → Answer"""
         from modules.advanced_rag import ReRanker, RouterQueryEngine
 
-        # Step 1: Router classifies query
+        # Step 1: Router classifies query (routes to configured collections;
+        # a fresh router with only the default store routes to ["default"])
         router = RouterQueryEngine()
         query = "What is the refund policy?"
         query_type = router.classify_query(query)
-        assert query_type in ["document", "general", "complex"], f"Unknown type: {query_type}"
-        print(f"  Step 1: Query classified as '{query_type}'")
+        assert isinstance(query_type, list) and query_type == ["default"], f"Unknown type: {query_type}"
+        print(f"  Step 1: Query routed to '{query_type}'")
 
         # Step 2: Re-ranker processes results
         reranker = ReRanker()
@@ -126,9 +127,9 @@ class TestSecurityFlow:
 
     def test_rate_limiting(self):
         """Test: Rate limiter blocks excessive requests"""
-        from modules.security import RateLimiter
+        from modules.security import SimpleRateLimiter
 
-        limiter = RateLimiter(max_requests=3, window_seconds=1)
+        limiter = SimpleRateLimiter(requests_per_minute=3, requests_per_hour=100)
         test_ip = "192.168.1.100"
 
         # First 3 requests should pass
@@ -160,21 +161,50 @@ class TestSecurityFlow:
 
         print("  ✅ File upload validation works")
 
-    def test_input_sanitization(self):
-        """Test: User input is sanitized"""
-        from modules.security import sanitize_input
+    def test_input_validation(self):
+        """Test: User input is validated before processing.
 
-        # SQL injection attempt
-        malicious = "'; DROP TABLE users; --"
-        sanitized = sanitize_input(malicious)
-        assert "DROP" not in sanitized.upper() or "DROP" in sanitized.upper(), "SQL injection not blocked"
+        SQL-injection / XSS neutralization is handled by parameterized
+        SQL (SQLAlchemy) on the backend and React's default output
+        escaping on the frontend — the security module validates input
+        length and format instead of string-sanitizing.
+        """
+        from modules.security import (
+            validate_message,
+            validate_username,
+            validate_email,
+            validate_password,
+            validate_search_query,
+        )
 
-        # XSS attempt
-        xss = '<script>alert("hacked")</script>'
-        sanitized = sanitize_input(xss)
-        assert "<script>" not in sanitized, "XSS not blocked"
+        # Chat messages: empty / oversized rejected
+        ok, msg = validate_message("")
+        assert not ok and "empty" in msg.lower(), f"Empty message accepted: {msg}"
+        ok, msg = validate_message("x" * 20000)
+        assert not ok and "long" in msg.lower(), f"Oversized message accepted: {msg}"
+        assert validate_message("Hello there") == (True, "")
 
-        print("  ✅ Input sanitization works")
+        # Usernames: format enforced (rejects SQLi payloads too)
+        assert validate_username("valid_user-1") == (True, "")
+        ok, msg = validate_username("bad user!")
+        assert not ok and "only contain" in msg.lower(), f"Bad username accepted: {msg}"
+
+        # Email format enforced
+        assert validate_email("a@b.co") == (True, "")
+        ok, msg = validate_email("not-an-email")
+        assert not ok and "format" in msg.lower(), f"Bad email accepted: {msg}"
+
+        # Password: minimum length enforced
+        assert validate_password("StrongPass1!") == (True, "")
+        ok, msg = validate_password("123")
+        assert not ok and "least" in msg.lower(), f"Weak password accepted: {msg}"
+
+        # Search query: empty rejected
+        assert validate_search_query("largest planet") == (True, "")
+        ok, msg = validate_search_query("")
+        assert not ok, "Empty search query accepted"
+
+        print("  ✅ Input validation works")
 
 
 class TestMemoryFlow:
@@ -182,41 +212,45 @@ class TestMemoryFlow:
 
     def test_conversation_memory(self):
         """Test: Messages are stored and retrieved"""
+        import tempfile
         from modules.memory import ConversationMemory
 
-        memory = ConversationMemory()
+        with tempfile.TemporaryDirectory() as td:
+            memory = ConversationMemory(memory_file=os.path.join(td, "conv.json"))
 
-        # Add messages
-        memory.add_message("user", "Hello")
-        memory.add_message("assistant", "Hi there!")
-        memory.add_message("user", "What's the refund policy?")
+            # Add messages
+            memory.add_message("user", "Hello")
+            memory.add_message("assistant", "Hi there!")
+            memory.add_message("user", "What's the refund policy?")
 
-        # Get context
-        context = memory.get_context()
-        assert "Hello" in context, "User message not stored"
-        assert "Hi there!" in context, "Assistant message not stored"
+            # Get context
+            context = memory.get_context_string()
+            assert "Hello" in context, "User message not stored"
+            assert "Hi there!" in context, "Assistant message not stored"
 
         print("  ✅ Conversation memory works")
 
     def test_fact_memory(self):
         """Test: Facts are stored, recalled, and forgotten"""
+        import tempfile
         from modules.memory import FactMemory
 
-        facts = FactMemory()
+        with tempfile.TemporaryDirectory() as td:
+            facts = FactMemory(facts_file=os.path.join(td, "facts.json"))
 
-        # Remember a fact
-        facts.remember("name", "Ravneet")
-        value = facts.recall("name")
-        assert value == "Ravneet", "Fact not stored correctly"
+            # Remember a fact
+            facts.remember("name", "Ravneet")
+            value = facts.recall("name")
+            assert value == "Ravneet", "Fact not stored correctly"
 
-        # Recall all facts
-        all_facts = facts.get_all_facts()
-        assert "name" in all_facts, "Fact not in all facts"
+            # Recall all facts
+            all_facts = facts.get_all_facts()
+            assert "name" in all_facts, "Fact not in all facts"
 
-        # Forget a fact
-        facts.forget("name")
-        value = facts.recall("name")
-        assert value is None or value == "Fact 'name' not found", "Fact not forgotten"
+            # Forget a fact
+            facts.forget("name")
+            value = facts.recall("name")
+            assert "don't remember" in value, f"Fact not forgotten: {value!r}"
 
         print("  ✅ Fact memory works")
 
@@ -249,9 +283,9 @@ class TestMonitoringFlow:
         # Track an error
         monitor.track_error()
 
-        # Health should reflect error
+        # Health should reflect the tracked error
         health = monitor.get_health()
-        assert "errors" in health or health.get("error_count", 0) > 0, "Error not tracked"
+        assert health.get("total_errors", 0) > 0, "Error not tracked"
 
         print("  ✅ Error tracking works")
 

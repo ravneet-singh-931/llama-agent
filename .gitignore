@@ -29,6 +29,13 @@ conversation_memory.json
 fact_memory.json
 notes.txt
 
+# Runtime data (ChromaDB, embeddings, etc.)
+data/
+
+# Runtime DB tooling state (created by modules/database_improvements.py)
+migrations/
+backups/
+
 # IDE
 .vscode/
 .idea/

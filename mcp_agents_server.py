@@ -31,6 +31,7 @@ except ImportError:
 load_dotenv()
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # Import our multi-agent system
 from multi_agent import MultiAgentOrchestrator
@@ -41,8 +42,37 @@ _groq_key = get_secret("GROQ_API_KEY", default=os.getenv("GROQ_API_KEY", ""))
 if _groq_key:
     os.environ["GROQ_API_KEY"] = _groq_key
 
-# Create the MCP server
-mcp = FastMCP("Llama Agent Multi-Agent Team")
+# Create the MCP server.
+# NOTE: FastMCP auto-enables DNS rebinding protection (Host header validation)
+# when constructed with a loopback host. We bind to 0.0.0.0 for Docker, so we
+# pass explicit TransportSecuritySettings to keep the protection ON while
+# allowing the real Host values that reach this server:
+#   - "localhost" / "localhost:*"  -> external clients via Nginx reverse proxy
+#   - "mcp-server:*"               -> internal clients on the Docker network
+# Without this, Nginx proxies (Host: localhost) get rejected with HTTP 421.
+mcp = FastMCP(
+    "Llama Agent Multi-Agent Team",
+    host="0.0.0.0",
+    port=8001,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "localhost",
+            "localhost:*",
+            "127.0.0.1",
+            "127.0.0.1:*",
+            "[::1]:*",
+            "mcp-server",
+            "mcp-server:*",
+        ],
+        allowed_origins=[
+            "http://localhost:*",
+            "https://localhost:*",
+            "http://127.0.0.1:*",
+            "http://mcp-server:*",
+        ],
+    ),
+)
 
 # Create a shared orchestrator (initialized once when server starts)
 orchestrator = MultiAgentOrchestrator()
@@ -199,11 +229,41 @@ def team_status() -> str:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MCP Agent Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse"],
+        default="stdio",
+        help="Transport protocol (stdio for subprocess, sse for HTTP server)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8001,
+        help="Port for SSE transport (default: 8001)",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host for SSE transport (default: 0.0.0.0)",
+    )
+    args = parser.parse_args()
+
     print("=" * 60)
     print("  MCP Agent Server - Starting...")
-    print("  Agents: Research, Coder, Writer, Analyzer, Planner")
-    print("  Transport: stdio")
+    print(f"  Agents: Research, Coder, Writer, Analyzer, Planner")
+    print(f"  Transport: {args.transport}")
+    if args.transport == "sse":
+        print(f"  Endpoint: http://{args.host}:{args.port}/sse")
+        print(f"  Messages: http://{args.host}:{args.port}/messages/")
     print("=" * 60)
 
-    # Run the MCP server with stdio transport
-    mcp.run(transport="stdio")
+    # Run the MCP server with SSE transport for Docker or stdio for subprocess
+    if args.transport == "sse":
+        # Set host and port via settings object
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+    mcp.run(transport=args.transport)

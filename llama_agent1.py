@@ -36,6 +36,7 @@ from modules.memory import ConversationMemory, FactMemory
 from modules.rag import SimpleRAG, DocumentReader
 from modules.monitoring import AgentLogger, PerformanceMonitor
 from modules.secrets import get_secret
+from modules.security import safe_math_eval
 
 # ===================== SETUP =====================
 load_dotenv()
@@ -143,15 +144,14 @@ class GroqLLM(LLM):
         return await asyncio.to_thread(self.stream_complete, prompt, formatted=formatted, **kwargs)
 
 
-llm = GroqLLM(model="llama-3.3-70b-versatile", api_key=GROQ_API_KEY)
+llm = GroqLLM(model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"), api_key=GROQ_API_KEY)
 
 # ===================== ENHANCED TOOLS =====================
 
 def calculator(expression: str) -> str:
-    """Evaluates a mathematical expression."""
+    """Evaluates a mathematical expression safely (no arbitrary code)."""
     try:
-        allowed_names = {k: v for k, v in math.__dict__.items() if not k.startswith("__")}
-        result = eval(expression, {"__builtins__": {}}, allowed_names)
+        result = safe_math_eval(expression)
         return f"Result: {result}"
     except Exception as e:
         return f"Error calculating: {str(e)}"
@@ -368,19 +368,23 @@ def run_agent_stream(user_input: str):
     messages.append({"role": "user", "content": user_input})
 
     # Stream from Groq API
-    stream = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=messages,
-        stream=True,
-        max_tokens=2048,
-    )
+    try:
+        stream = client.chat.completions.create(
+            model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"),
+            messages=messages,
+            stream=True,
+            max_tokens=2048,
+        )
 
-    full_response = ""
-    for chunk in stream:
-        if chunk.choices[0].delta.content:
-            token = chunk.choices[0].delta.content
-            full_response += token
-            yield token
+        full_response = ""
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                token = chunk.choices[0].delta.content
+                full_response += token
+                yield token
+    except Exception as e:
+        # Never let the stream die silently - yield a readable error instead
+        yield f"\n\n⚠️ Error while generating response: {e}"
 
     # Save to memory after streaming is done
     memory.add_message("user", user_input)

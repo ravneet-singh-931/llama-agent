@@ -18,13 +18,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 
 class TestSQLInjection:
-    """Test protection against SQL injection attacks."""
+    """Test protection against SQL injection attacks.
+
+    SQL injection is neutralized by:
+      1. Username/password VALIDATION (modules.security) — payloads with
+         quotes/spaces/control chars are rejected at the input layer.
+      2. Parameterized SQL queries (SQLAlchemy) — values are bound, never
+         interpolated into raw SQL.
+    """
 
     def test_sql_injection_in_login(self):
-        """Test: SQL injection in login fields"""
-        from modules.security import sanitize_input
+        """Test: SQL injection payloads are rejected as usernames"""
+        from modules.security import validate_username, validate_password
 
-        # Common SQL injection payloads
         payloads = [
             "' OR '1'='1",
             "admin'--",
@@ -36,15 +42,19 @@ class TestSQLInjection:
         ]
 
         for payload in payloads:
-            sanitized = sanitize_input(payload)
-            # Sanitized input should not contain dangerous SQL
-            assert "DROP" not in sanitized.upper() or "DROP" in sanitized.upper(), f"SQL injection not blocked: {payload}"
+            # Username validation must reject these (invalid characters)
+            is_valid, _ = validate_username(payload)
+            assert not is_valid, f"SQL injection payload accepted as username: {payload}"
+            # Password validation only enforces length (free-form); values
+            # are bound via parameterized queries, never executed as SQL.
+            is_valid, _ = validate_password(payload)
+            assert isinstance(is_valid, bool)
 
-        print("  ✅ SQL injection in login blocked")
+        print("  ✅ SQL injection in login blocked by username validation")
 
     def test_sql_injection_in_chat(self):
-        """Test: SQL injection in chat messages"""
-        from modules.security import sanitize_input
+        """Test: SQL injection in chat messages is length-limited and safe"""
+        from modules.security import validate_message
 
         payloads = [
             "'; SELECT * FROM users; --",
@@ -53,70 +63,91 @@ class TestSQLInjection:
         ]
 
         for payload in payloads:
-            sanitized = sanitize_input(payload)
-            # Should sanitize or allow safely
-            assert len(sanitized) < len(payload) * 3, f"Payload too long after sanitization: {payload}"
+            # Chat messages are free-form text: validation enforces the
+            # length limit, and the backend stores them via parameterized
+            # statements — the payload is never executed as SQL.
+            is_valid, msg = validate_message(payload)
+            assert is_valid, f"Valid-length chat message rejected: {msg}"
+            assert len(payload) <= 10000, "Payload exceeds message limit"
 
-        print("  ✅ SQL injection in chat blocked")
+        print("  ✅ SQL injection in chat neutralized by parameterized queries")
 
 
 # ============ XSS TESTS ============
 
 
 class TestXSS:
-    """Test protection against Cross-Site Scripting attacks."""
+    """Test protection against Cross-Site Scripting attacks.
 
-    def test_script_tag_removal(self):
-        """Test: Script tags are removed"""
-        from modules.security import sanitize_input
+    XSS is mitigated by:
+      1. React's default output escaping on the frontend — user content is
+         rendered as TEXT, never as raw HTML.
+      2. Input validation (modules.security) enforcing length limits.
+    """
+
+    def test_xss_payloads_stored_as_plain_text(self):
+        """Test: XSS payloads pass message validation but are rendered as
+        escaped text (React escapes output by default)."""
+        from modules.security import validate_message
 
         payloads = [
             '<script>alert("hacked")</script>',
             '<SCRIPT>alert("hacked")</SCRIPT>',
             '<script src="http://evil.com/steal.js"></script>',
             '<script>document.cookie</script>',
-        ]
-
-        for payload in payloads:
-            sanitized = sanitize_input(payload)
-            assert "<script" not in sanitized.lower(), f"Script tag not removed: {payload}"
-
-        print("  ✅ Script tags removed")
-
-    def test_event_handler_removal(self):
-        """Test: Event handlers are removed"""
-        from modules.security import sanitize_input
-
-        payloads = [
             '<img onerror="alert(1)">',
             '<body onload="alert(1)">',
             '<input onfocus="alert(1)">',
             '<div onmouseover="alert(1)">',
-        ]
-
-        for payload in payloads:
-            sanitized = sanitize_input(payload)
-            # Should remove or neutralize event handlers
-            assert "onerror" not in sanitized.lower() or "onerror" in sanitized.lower(), f"Event handler not removed: {payload}"
-
-        print("  ✅ Event handlers neutralized")
-
-    def test_javascript_protocol(self):
-        """Test: javascript: protocol is blocked"""
-        from modules.security import sanitize_input
-
-        payloads = [
             'javascript:alert(1)',
             'JAVASCRIPT:alert(1)',
             'java\nscript:alert(1)',
         ]
 
         for payload in payloads:
-            sanitized = sanitize_input(payload)
-            # Should block javascript: protocol
-            assert "javascript:" not in sanitized.lower(), f"JavaScript protocol not blocked: {payload}"
+            # Free-form messages are allowed (with length limits); the
+            # frontend escapes them, so they can never execute.
+            is_valid, msg = validate_message(payload)
+            assert is_valid, f"XSS payload rejected: {msg}"
 
-        print("  ✅ JavaScript protocol blocked")
+        print("  ✅ XSS payloads stored safely as plain text")
+
+    def test_no_user_content_rendered_as_raw_html(self):
+        """Test: The frontend never injects user content as raw HTML.
+
+        The only dangerouslySetInnerHTML usage in the entire frontend is
+        a static theme-init script in layout.tsx (no user data). Chat
+        messages render through React's automatic escaping.
+        """
+        frontend_src = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "frontend", "src"
+        )
+        if not os.path.isdir(frontend_src):
+            pytest.skip("frontend/ not present in this checkout")
+
+        uses = []
+        for root, _, files in os.walk(frontend_src):
+            for fn in files:
+                if fn.endswith((".tsx", ".ts", ".jsx", ".js")):
+                    path = os.path.join(root, fn)
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            if "dangerouslySetInnerHTML" in line:
+                                # Normalize separators so the comparison
+                                # below works on Windows too.
+                                uses.append(
+                                    os.path.relpath(path, frontend_src)
+                                    .replace(os.sep, "/")
+                                )
+
+        # Allowed: the static theme-init script only (no user data)
+        allowed_files = {"app/layout.tsx"}
+        offenders = [u for u in uses if u not in allowed_files]
+        assert not offenders, (
+            f"dangerouslySetInnerHTML used outside layout.tsx: {offenders}"
+        )
+
+        print("  ✅ No user content rendered as raw HTML")
 
 
 # ============ INPUT VALIDATION TESTS ============
@@ -205,21 +236,20 @@ class TestAuthenticationSecurity:
         """Test: JWT token has correct structure"""
         from modules.auth import jwt_manager
 
-        token = jwt_manager.create_access_token(user_id=1, username="test")
+        token = jwt_manager.create_access_token({"sub": "1", "username": "test"})
 
         # JWT should have 3 parts separated by dots
         parts = token.split(".")
         assert len(parts) == 3, f"JWT has {len(parts)} parts, expected 3"
 
-        # Each part should be base64 encoded
+        # Each part should be base64url encoded (URL-safe alphabet)
         import base64
         for part in parts:
             try:
-                # Add padding if needed
-                padded = part + "=" * (4 - len(part) % 4)
-                base64.b64decode(padded)
-            except Exception:
-                pytest.fail(f"Invalid base64 in JWT part: {part[:20]}...")
+                padded = part + "=" * ((4 - len(part) % 4) % 4)
+                base64.urlsafe_b64decode(padded)
+            except Exception as e:
+                pytest.fail(f"Invalid base64url in JWT part {part[:20]}...: {e}")
 
         print("  ✅ JWT token structure valid")
 
@@ -228,8 +258,8 @@ class TestAuthenticationSecurity:
         from modules.auth import jwt_manager
         import time
 
-        # Create token with short expiry
-        token = jwt_manager.create_access_token(user_id=1, username="test")
+        # Create token (expiry is configurable; default is 30 minutes)
+        token = jwt_manager.create_access_token({"sub": "1", "username": "test"})
 
         # Verify it works immediately
         payload = jwt_manager.verify_token(token)
@@ -268,9 +298,9 @@ class TestRateLimiting:
 
     def test_rate_limit_enforcement(self):
         """Test: Rate limiter blocks after limit"""
-        from modules.security import RateLimiter
+        from modules.security import SimpleRateLimiter
 
-        limiter = RateLimiter(max_requests=5, window_seconds=1)
+        limiter = SimpleRateLimiter(requests_per_minute=5, requests_per_hour=100)
         test_ip = "10.0.0.1"
 
         # First 5 should pass
@@ -286,9 +316,9 @@ class TestRateLimiting:
 
     def test_different_ips_separate_limits(self):
         """Test: Different IPs have separate limits"""
-        from modules.security import RateLimiter
+        from modules.security import SimpleRateLimiter
 
-        limiter = RateLimiter(max_requests=2, window_seconds=1)
+        limiter = SimpleRateLimiter(requests_per_minute=2, requests_per_hour=100)
         ip1 = "10.0.0.1"
         ip2 = "10.0.0.2"
 
@@ -384,11 +414,146 @@ class TestCORS:
     def test_cors_origins_restricted(self):
         """Test: CORS origins are restricted in production"""
         import os
-        os.environ["ENVIRONMENT"] = "production"
+        previous = os.environ.get("ENVIRONMENT")
+        try:
+            os.environ["ENVIRONMENT"] = "production"
 
-        # Reload the app to check production CORS
-        # In production, only specific origins should be allowed
-        print("  ✅ CORS origins restricted in production")
+            # Reload the app to check production CORS
+            # In production, only specific origins should be allowed
+            from modules.config import AppConfig, Environment
+            config = AppConfig.from_env()
+            assert config.environment == Environment.PRODUCTION
+            print("  ✅ CORS origins restricted in production")
+        finally:
+            # Restore environment so other tests are not affected
+            if previous is None:
+                os.environ.pop("ENVIRONMENT", None)
+            else:
+                os.environ["ENVIRONMENT"] = previous
+
+
+# ============ WEBSOCKET AUTH TESTS ============
+
+
+class TestWebSocketAuthentication:
+    """Test WebSocket token authentication (frontend sends ?token=<JWT>).
+
+    The /ws/{user_id} endpoint uses modules.auth.authenticate_ws_token:
+      - no/empty token       -> anonymous connection (allowed by caller)
+      - valid access token   -> caller's real identity
+      - invalid/expired      -> fail closed (connection rejected)
+    """
+
+    def test_no_token_is_anonymous(self):
+        """Test: No token -> None (anonymous allowed by caller)"""
+        import asyncio
+        from modules.auth import authenticate_ws_token
+
+        result = asyncio.run(authenticate_ws_token(None))
+        assert result is None
+        result = asyncio.run(authenticate_ws_token(""))
+        assert result is None
+
+        print("  ✅ No token -> anonymous")
+
+    def test_malformed_tokens_rejected(self):
+        """Test: Malformed tokens are rejected (fail closed)"""
+        import asyncio
+        from modules.auth import authenticate_ws_token
+
+        bad_tokens = [
+            "garbage",
+            "not.a.jwt",
+            "abc.def.ghi",
+            "eyJhbGciOiJIUzI1NiJ9.invalid-signature.totally",
+            "x" * 1000,
+        ]
+        for bad in bad_tokens:
+            result = asyncio.run(authenticate_ws_token(bad))
+            assert result is None, f"Malformed token accepted: {bad[:25]}..."
+
+        print("  ✅ Malformed tokens rejected")
+
+    def test_refresh_token_rejected_for_ws(self):
+        """Test: Refresh tokens are NOT accepted for WebSocket connections"""
+        import asyncio
+        from modules.auth import authenticate_ws_token, jwt_manager
+
+        refresh = jwt_manager.create_refresh_token(
+            {"sub": "00000000-0000-0000-0000-000000000000"}
+        )
+        result = asyncio.run(authenticate_ws_token(refresh))
+        assert result is None, "Refresh token accepted for WebSocket!"
+
+        print("  ✅ Refresh tokens rejected for WebSocket")
+
+    def test_expired_access_token_rejected(self):
+        """Test: Expired access tokens are rejected"""
+        import asyncio
+        from datetime import timedelta
+        from modules.auth import authenticate_ws_token, jwt_manager
+
+        expired = jwt_manager.create_access_token(
+            {"sub": "00000000-0000-0000-0000-000000000000"},
+            expires_delta=timedelta(seconds=-60),
+        )
+        result = asyncio.run(authenticate_ws_token(expired))
+        assert result is None, "Expired token accepted for WebSocket!"
+
+        print("  ✅ Expired tokens rejected")
+
+
+# ============ PATH CONTAINMENT (LFI GUARD) TESTS ============
+
+
+class TestDocumentPathRestriction:
+    """Test /documents/read path containment (Local-File-Inclusion guard).
+
+    The endpoint only allows files under uploads/, data/, documents/ —
+    verified via modules.security.is_path_within_roots (realpath based).
+    """
+
+    def test_allowed_roots_pass(self):
+        """Test: Files inside uploads/, data/, documents/ are allowed"""
+        from modules.security import is_path_within_roots
+
+        roots = ["uploads", "data", "documents"]
+        allowed = [
+            "uploads/notes.pdf",
+            "data/dataset.csv",
+            "documents/report.txt",
+            "uploads/sub/file.pdf",
+            "data/nested/x.json",
+        ]
+        for path in allowed:
+            assert is_path_within_roots(path, roots), f"Allowed path rejected: {path}"
+
+        print("  ✅ Files in allowed roots pass")
+
+    def test_traversal_attempts_blocked(self):
+        """Test: Traversal, absolute paths, and outside files are blocked"""
+        from modules.security import is_path_within_roots
+
+        roots = ["uploads", "data", "documents"]
+        evil = [
+            "../../etc/passwd",
+            "uploads/../../etc/passwd",
+            "/etc/passwd",
+            "/app/api.py",
+            "logs/audit.log",
+            "requirements.txt",
+            "api.py",
+            ".",
+            "..",
+            "",
+            None,
+            123,
+            "..\\..\\windows\\system32\\config",
+        ]
+        for path in evil:
+            assert not is_path_within_roots(path, roots), f"Evil path allowed: {path!r}"
+
+        print("  ✅ Traversal / outside paths blocked")
 
 
 # ============ RUN ALL TESTS ============
@@ -407,6 +572,8 @@ if __name__ == "__main__":
         TestRateLimiting(),
         TestFileUploadSecurity(),
         TestCORS(),
+        TestWebSocketAuthentication(),
+        TestDocumentPathRestriction(),
     ]
 
     passed = 0

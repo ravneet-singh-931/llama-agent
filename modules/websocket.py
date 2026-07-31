@@ -14,7 +14,7 @@ import os
 import json
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Set, Optional, Any, List
 from dataclasses import dataclass, field
 from enum import Enum
@@ -45,7 +45,7 @@ class WSMessage:
     """WebSocket message structure"""
     type: MessageType
     data: Dict[str, Any]
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def to_json(self) -> str:
@@ -111,7 +111,7 @@ class ConnectionManager:
         # Store user info
         self.user_info[user_id] = {
             "username": username,
-            "connected_at": datetime.utcnow().isoformat(),
+            "connected_at": datetime.now(timezone.utc).isoformat(),
             "connection_count": len(self.active_connections[user_id]),
         }
         

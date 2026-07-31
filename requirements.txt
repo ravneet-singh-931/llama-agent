@@ -11,7 +11,9 @@ llama-index-llms-groq
 python-dotenv
 
 # --- Document Reading ---
-PyPDF2
+# pypdf is the maintained successor of PyPDF2 (PyPDF2 is unmaintained
+# and has unfixed CVEs, e.g. PYSEC-2026-1835). >=3.9.0 includes the fixes.
+pypdf>=3.9.0
 python-docx
 
 # --- Vector Database (Smart RAG) ---

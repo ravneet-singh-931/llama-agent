@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 from contextlib import contextmanager
+from psycopg2 import sql as psql
 
 
 # ============ DATABASE MIGRATIONS ============
@@ -243,21 +244,25 @@ class BackupManager:
                 
                 for table in tables:
                     f.write(f"-- Table: {table}\n")
-                    cursor.execute(f"SELECT * FROM {table}")
+                    cursor.execute(
+                        psql.SQL("SELECT * FROM {}").format(psql.Identifier(table))
+                    )
                     rows = cursor.fetchall()
                     
                     # Get column names
-                    cursor.execute(f"""
-                        SELECT column_name 
-                        FROM information_schema.columns 
-                        WHERE table_name = '{table}'
-                    """)
+                    cursor.execute(
+                        psql.SQL(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_name = {}"
+                        ).format(psql.Literal(table))
+                    )
                     columns = [row[0] for row in cursor.fetchall()]
                     
                     # Write INSERT statements
                     for row in rows:
                         values = ", ".join([f"'{str(v)}'" for v in row])
-                        f.write(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({values});\n")
+                        # Static SQL dump written to a backup file; never executed.
+                        f.write(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({values});\n")  # nosec B608
                     
                     f.write("\n")
             

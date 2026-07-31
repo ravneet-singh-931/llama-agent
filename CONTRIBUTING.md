@@ -49,29 +49,44 @@ We expect all contributors to:
 - Python 3.10+
 - Docker Desktop
 - Git
+- Node.js 20+ (only needed for frontend work)
 
 ### Setup Steps
 
-1. **Install dependencies**
+1. **Install Python dependencies**
    ```bash
    pip install -r requirements.txt
    pip install pytest
    ```
 
-2. **Start Docker services**
+2. **Start the full stack (13 containers)**
    ```bash
-   docker-compose up -d postgres redis
+   docker-compose up -d
    ```
 
 3. **Run tests**
    ```bash
-   pytest test_advanced_rag.py -v
+   pytest tests/ -v -m "not mcp"
    ```
 
-4. **Start the app**
+4. **Frontend development (optional)**
    ```bash
-   streamlit run app.py
+   cd frontend
+   npm install
+   npm run dev        # http://localhost:3001
    ```
+
+### Services after startup
+
+| Service | URL |
+| --- | --- |
+| Main UI (Next.js, via Nginx) | https://localhost |
+| Next.js (direct) | http://localhost:3001 |
+| Streamlit (legacy UI) | http://localhost:8501 |
+| API docs (Swagger) | http://localhost:8000/docs |
+| Grafana (admin / password in `secrets/grafana_admin_password.txt`) | http://localhost:3002 |
+| Prometheus | http://localhost:9090 |
+| Phoenix traces | http://localhost:6006 |
 
 ## Making Changes
 
@@ -87,9 +102,10 @@ git checkout -b feature/amazing-feature
 
 ### 3. Test your changes
 ```bash
-# Run all tests
-pytest test_advanced_rag.py -v
-pytest tests/test_e2e.py -v
+# Run all tests (MCP tests are excluded; they need the MCP server running)
+pytest tests/ -v -m "not mcp"
+
+# Run a single test file
 pytest tests/test_security.py -v
 
 # Check syntax
@@ -122,18 +138,24 @@ git push origin feature/amazing-feature
 ### Running Tests
 
 ```bash
-# Unit tests
-pytest test_advanced_rag.py -v
+# Core test suite (no MCP server required)
+pytest tests/ -v -m "not mcp"
 
-# End-to-end tests
-pytest tests/test_e2e.py -v
+# Individual suites
+pytest tests/test_security.py -v       # Security tests
+pytest tests/test_enterprise.py -v     # Enterprise / security-hardening tests
+pytest tests/test_e2e.py -v            # End-to-end tests
+pytest tests/test_tools.py -v          # Tool tests
 
-# Security tests
-pytest tests/test_security.py -v
+# MCP tests (requires the MCP agent server on port 8001)
+pytest tests/test_mcp.py -v
 
 # All tests with coverage
 pytest --cov=modules --cov-report=html
 ```
+
+> **Note:** MCP tests talk to a live MCP server. Start the full stack
+> (`docker-compose up -d`) before running them.
 
 ### Writing Tests
 
@@ -271,31 +293,56 @@ from modules.cache import ResponseCache
 
 ```
 llama-agent/
-├── app.py                    # Main Streamlit application
-├── api.py                    # FastAPI REST API
+├── api.py                    # FastAPI REST API (REST + SSE + WebSocket + MCP proxy)
+├── app.py                    # Legacy Streamlit application
+├── mcp_agents_server.py      # MCP agent server (SSE, multi-agent routing)
+├── mcp_client_helper.py      # MCP client helper
+├── multi_agent.py            # Multi-agent orchestration (Groq)
+├── init.sql                  # Postgres init schema
+├── Dockerfile                # API/web image
+├── Dockerfile.nginx          # Nginx reverse proxy image
+├── docker-compose.yml        # 13-service Docker setup
+├── frontend/                 # Next.js 16 frontend
+│   ├── src/                  # App router pages + components
+│   ├── package.json
+│   └── Dockerfile
 ├── modules/
-│   ├── auth.py               # Authentication
+│   ├── auth.py               # Authentication (JWT, API keys)
+│   ├── advanced_monitoring.py # Business metrics, alerts, cost/SLA tracking
+│   ├── advanced_rag.py       # RAG pipeline (advanced)
 │   ├── cache.py              # Caching layer
 │   ├── cicd_improvements.py  # Feature flags, A/B testing
 │   ├── config.py             # Configuration
 │   ├── database.py           # Database models
-│   ├── database_improvements.py  # Migrations, backups
-│   ├── advanced_monitoring.py # Business metrics, alerts
+│   ├── database_improvements.py  # Migrations, backups, health checks
+│   ├── mcp_client.py         # MCP client
 │   ├── memory.py             # Conversation memory
 │   ├── monitoring.py         # Basic monitoring
+│   ├── prometheus_metrics.py # Prometheus metrics
+│   ├── rag.py                # RAG pipeline
 │   ├── security.py           # Basic security
-│   ├── security_hardening.py # Advanced security
+│   ├── security_hardening.py # Brute-force, audit log, input sanitization, headers
+│   ├── secrets.py            # Secret management
+│   ├── services.py           # Service helpers
 │   ├── vector_store.py       # ChromaDB integration
-│   └── advanced_rag.py       # RAG pipeline
+│   └── websocket.py          # WebSocket support
 ├── tests/
 │   ├── test_e2e.py           # End-to-end tests
-│   └── test_security.py      # Security tests
+│   ├── test_enterprise.py    # Enterprise / security-hardening tests
+│   ├── test_mcp.py           # MCP tests (needs running server)
+│   ├── test_security.py      # Security tests
+│   └── test_tools.py         # Tool tests
 ├── config/
 │   ├── grafana/              # Grafana dashboards
-│   ├── prometheus/           # Prometheus config
-│   └── feature_flags.json    # Feature flags
-├── migrations/               # Database migrations
-├── backups/                  # Database backups
+│   ├── prometheus/           # Prometheus config + alerts
+│   ├── nginx/                # Nginx config
+│   ├── feature_flags.json    # Feature flags
+│   └── deployments.json      # Deployment tracking (generated)
+├── k8s/                      # Kubernetes manifests
+├── migrations/               # Database migrations (generated)
+├── backups/                  # Database backups (generated)
+├── logs/                     # Logs (audit.log, etc.)
+├── secrets/                  # Local secrets (gitignored, never commit)
 ├── docker-compose.yml        # Docker setup
 └── requirements.txt          # Python dependencies
 ```

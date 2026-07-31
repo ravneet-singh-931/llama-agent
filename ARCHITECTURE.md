@@ -31,14 +31,19 @@
 │          APPLICATION LAYER           │       │          API LAYER                  │
 │                                     │       │                                     │
 │  ┌───────────────────────────────┐  │       │  ┌───────────────────────────────┐  │
-│  │    Streamlit UI (Port 8501)   │  │       │  │   FastAPI REST (Port 8000)    │  │
-│  │                               │  │       │  │                               │  │
-│  │  • Chat Interface             │  │       │  │  • REST Endpoints             │  │
-│  │  • File Upload                │  │       │  │  • WebSocket Server           │  │
-│  │  • Login/Signup               │  │       │  │  • JWT Authentication         │  │
-│  │  • Session Management         │  │       │  │  • Pydantic Validation        │  │
-│  │  • Real-time Streaming        │  │       │  │  • Rate Limiting              │  │
-│  └───────────────────────────────┘  │       │  └───────────────────────────────┘  │
+│  │  Next.js UI (Port 3001)       │  │       │  │   FastAPI REST (Port 8000)    │  │
+│  │  Streamlit UI (Port 8501)     │  │       │  │                               │  │
+│  │                               │  │       │  │  • REST Endpoints             │  │
+│  │  • Chat Interface             │  │       │  │  • WebSocket Server           │  │
+│  │  • File Upload                │  │       │  │  • JWT Authentication         │  │
+│  │  • Login/Signup               │  │       │  │  • Pydantic Validation        │  │
+│  │  • Session Management         │  │       │  │  • Rate Limiting              │  │
+│  │  • Real-time Streaming        │  │       │  └───────────────────────────────┘  │
+│  └───────────────────────────────┘  │       │  ┌───────────────────────────────┐  │
+│                                     │       │  │  MCP Agent Server (Port 8001) │  │
+│                                     │       │  │  • SSE transport              │  │
+│                                     │       │  │  • 5 specialized agents       │  │
+│                                     │       │  └───────────────────────────────┘  │
 └─────────────────────────────────────┘       └─────────────────────────────────────┘
                           │                                         │
                           └────────────────────┬────────────────────┘
@@ -148,7 +153,7 @@
 ### 1. User Uploads Document
 
 ```
-User ──→ Nginx ──→ Streamlit ──→ FastAPI ──→ PostgreSQL (metadata)
+User ──→ Nginx ──→ Next.js/Streamlit ──→ FastAPI ──→ PostgreSQL (metadata)
                                     │
                                     ├──→ File System (save file)
                                     │
@@ -158,7 +163,7 @@ User ──→ Nginx ──→ Streamlit ──→ FastAPI ──→ PostgreSQL 
 ### 2. User Asks Question
 
 ```
-User ──→ Nginx ──→ Streamlit ──→ FastAPI
+User ──→ Nginx ──→ Next.js/Streamlit ──→ FastAPI
                                     │
                                     ▼
                               Query Router
@@ -177,7 +182,7 @@ User ──→ Nginx ──→ Streamlit ──→ FastAPI
                            Answer Generation
                                     │
                                     ▼
-                              Streamlit ──→ User
+                              Next.js/Streamlit ──→ User
 ```
 
 ### 3. Observability Flow
@@ -192,23 +197,28 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
 
 ```
 ┌──────────────┐
-│   Nginx      │──────→ Streamlit (8501)
-└──────────────┘       FastAPI (8000)
-       │
+│   Nginx      │──────→ Next.js (3001)
+└──────────────┘       Streamlit (8501)
+       │               FastAPI (8000)
        │ HTTP
        ▼
 ┌──────────────┐
-│  Streamlit   │──────→ FastAPI (8000)
-└──────────────┘       PostgreSQL (5432)
-       │               Redis (6379)
+│  Next.js /   │──────→ FastAPI (8000)
+│  Streamlit   │       PostgreSQL (5432)
+└──────────────┘       Redis (6379)
        │               Phoenix (6006)
        │ HTTP
        ▼
 ┌──────────────┐
 │   FastAPI    │──────→ PostgreSQL (5432)
 └──────────────┘       Redis (6379)
-                       Groq API (external)
-                       ChromaDB (local)
+       │               Groq API (external)
+       │               ChromaDB (local)
+       │ SSE
+       ▼
+┌──────────────┐
+│ MCP Server   │──────→ Multi-Agent System ──→ Groq API
+└──────────────┘
 ```
 
 ## Security Layers
@@ -219,6 +229,7 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
 │ • Nginx rate limiting                                        │
 │ • CORS restrictions                                          │
 │ • SSL/TLS encryption                                         │
+│ • Security headers (CSP, HSTS, X-Frame-Options, etc.)       │
 └─────────────────────────────────────────────────────────────┘
                             │
                             ▼
@@ -234,8 +245,10 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
 │ Layer 3: Input Validation                                    │
 │ • Pydantic models                                            │
 │ • File type checking                                         │
-│ • Size limits (50MB)                                         │
+│ • Size limits (10MB)                                         │
 │ • SQL injection prevention                                   │
+│ • Input sanitization + audit logging                         │
+│ • Brute-force protection (IP + username lockout)             │
 └─────────────────────────────────────────────────────────────┘
                             │
                             ▼
@@ -262,6 +275,10 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
 │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐           │
 │  │ nginx   │ │prometheus│ │ grafana │ │ phoenix │           │
 │  └─────────┘ └─────────┘ └─────────┘ └─────────┘           │
+│                                                               │
+│  ┌─────────┐ ┌─────────┐                                     │
+│  │ frontend│ │ mcp-srv │                                     │
+│  └─────────┘ └─────────┘                                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 

@@ -33,11 +33,20 @@ if _groq_key:
 class BaseAgent:
     """Base class for all agents"""
     
-    def __init__(self, name: str, role: str, model: str = "llama-3.3-70b-versatile"):
+    def __init__(self, name: str, role: str, model: str = ""):
         self.name = name
         self.role = role
-        self.model = model
-        self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        # Model is configurable via LLM_MODEL env var (falls back to the default)
+        self.model = model or os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+        # Use env var (already set by module-level code or docker-compose)
+        api_key = os.environ.get("GROQ_API_KEY", "")
+        if not api_key:
+            # If not set, try reading from Docker secret file directly
+            from modules.secrets import get_secret
+            api_key = get_secret("GROQ_API_KEY", default="")
+            if api_key:
+                os.environ["GROQ_API_KEY"] = api_key
+        self.client = Groq(api_key=api_key)
         self.memory: List[Dict] = []
     
     def think(self, task: str) -> str:
@@ -299,7 +308,7 @@ Respond with ONLY the agent name (research/coder/writer/analyzer/planner)."""
         # Use Groq to determine routing
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"),
             messages=[
                 {"role": "system", "content": "You are a task router."},
                 {"role": "user", "content": routing_prompt}

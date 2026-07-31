@@ -1,5 +1,13 @@
 # ============================================
 # Ingress - Routes external traffic
+# Host: llama-agent.local (add to /etc/hosts)
+#
+# Path routing (capture groups are passed through via rewrite-target):
+#   /api/*      -> API backend (prefix stripped)
+#   /ws/*       -> API WebSocket port (prefix stripped)
+#   /mcp/*      -> MCP agent server (prefix stripped)
+#   /streamlit/*-> Streamlit web UI (prefix stripped)
+#   /*          -> Next.js frontend (paths passed through)
 # ============================================
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -7,32 +15,55 @@ metadata:
   name: llama-agent-ingress
   namespace: llama-agent
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
-    # WebSocket support
+    # WebSocket + SSE support (harmless for plain HTTP backends)
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/configuration-snippet: |
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
+      proxy_set_header X-Forwarded-Prefix /streamlit;
 spec:
   ingressClassName: nginx
   rules:
     - host: llama-agent.local
       http:
         paths:
-          - path: /
-            pathType: Prefix
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: llama-agent-api-service
                 port:
                   number: 8000
-          - path: /ws
-            pathType: Prefix
+          - path: /ws(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: llama-agent-api-service
                 port:
-                  number: 8765
+                  number: 8000
+          - path: /mcp(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: llama-agent-mcp-server-service
+                port:
+                  number: 8001
+          - path: /streamlit(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: llama-agent-web-service
+                port:
+                  number: 8501
+          - path: /(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: llama-agent-frontend-service
+                port:
+                  number: 3000

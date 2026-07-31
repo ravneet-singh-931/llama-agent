@@ -106,7 +106,7 @@ class FeatureFlagManager:
         rollout_percent = flag.get("rollout_percent", 100)
         if rollout_percent < 100 and user_id:
             # Deterministic rollout based on user_id
-            user_hash = int(hashlib.md5(user_id.encode()).hexdigest(), 16) % 100
+            user_hash = int(hashlib.md5(user_id.encode(), usedforsecurity=False).hexdigest(), 16) % 100
             if user_hash >= rollout_percent:
                 return False
         
@@ -207,7 +207,7 @@ class ABTestManager:
         experiment = self.experiments[experiment_id]
         variants = experiment["variants"]
         
-        user_hash = int(hashlib.md5(user_id.encode()).hexdigest(), 16) % len(variants)
+        user_hash = int(hashlib.md5(user_id.encode(), usedforsecurity=False).hexdigest(), 16) % len(variants)
         variant = variants[user_hash]
         
         # Store assignment

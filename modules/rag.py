@@ -71,15 +71,15 @@ class DocumentReader:
     def read_pdf(file_path: str) -> str:
         """Read a PDF file"""
         try:
-            import PyPDF2
+            import pypdf  # maintained successor of PyPDF2 (CVE fixes)
             with open(file_path, 'rb') as f:
-                reader = PyPDF2.PdfReader(f)
+                reader = pypdf.PdfReader(f)
                 text = ""
                 for page in reader.pages:
                     text += page.extract_text() + "\n"
                 return text
         except ImportError:
-            return "PDF reading not available. Install PyPDF2: pip install PyPDF2"
+            return "PDF reading not available. Install pypdf: pip install pypdf"
         except Exception as e:
             return f"Error reading PDF: {str(e)}"
     

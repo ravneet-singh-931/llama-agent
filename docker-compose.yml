@@ -8,11 +8,13 @@
 #   docker-compose logs -f grafana          (watch Grafana logs)
 #   docker-compose down                     (stop everything)
 #
-# Services: 11 total
+# Services: 13 total
 #   - postgres       (database)
 #   - redis          (caching)
 #   - api            (FastAPI REST + WebSocket)
 #   - web            (Streamlit UI)
+#   - mcp-server     (Model Context Protocol agent server)
+#   - frontend       (Next.js UI)
 #   - nginx          (SSL + Load Balancer + CDN headers)
 #   - prometheus      (metrics collection)
 #   - grafana         (monitoring dashboards)
@@ -38,6 +40,9 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Initialize schema, extensions (pgvector, pg_trgm, uuid-ossp) and grants
+      # on first start of an empty data volume
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     secrets:
       - postgres_password
     healthcheck:
@@ -79,11 +84,15 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:$(cat /run/secrets/postgres_password)@postgres:5432/llama_agent
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
       - REDIS_URL=redis://redis:6379
       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
       - ENVIRONMENT=production
+      # TEMPORARY: llama-3.3-70b-versatile free-tier daily limit still 429s
+      # (verified live 2026-07-31 with current key). Remove once quota resets
+      # or Groq tier is upgraded; default is the 70b model.
+      - LLM_MODEL=llama-3.1-8b-instant
     secrets:
       - groq_api_key
       - jwt_secret_key
@@ -121,6 +130,8 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      # TEMPORARY override - see LLM_MODEL comment under api service
+      - LLM_MODEL=llama-3.1-8b-instant
     secrets:
       - groq_api_key
       - postgres_password
@@ -135,7 +146,57 @@ services:
       - monitoring
 
   # =============================================
-  # 5. Nginx - SSL + Load Balancer + CDN Headers
+  # 5. MCP Agent Server (Model Context Protocol)
+  #    Exposes 5 specialized agents as MCP tools
+  #    Protocol: SSE (Server-Sent Events) via HTTP
+  # =============================================
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llama-agent-mcp
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      # TEMPORARY override - see LLM_MODEL comment under api service
+      - LLM_MODEL=llama-3.1-8b-instant
+    secrets:
+      - groq_api_key
+    # Also inject the key directly so Python code can access it
+    # This works because docker-compose reads the file and sets the env var
+    command: python mcp_agents_server.py --transport sse --port 8001 --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost', 8001), timeout=5); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - backend
+      - monitoring
+
+  # =============================================
+  # 6. Next.js Frontend (auto-scales to Vercel later)
+  # =============================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=/api
+    container_name: llama-agent-frontend
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    depends_on:
+      - api
+    networks:
+      - backend
+
+  # =============================================
+  # 7. Nginx - SSL + Load Balancer + CDN Headers
   # =============================================
   nginx:
     build:
@@ -151,13 +212,15 @@ services:
     depends_on:
       - api
       - web
+      - frontend
+      - mcp-server
       - grafana
     networks:
       - backend
       - monitoring
 
   # =============================================
-  # 6. Prometheus (Metrics Collection)
+  # 8. Prometheus (Metrics Collection)
   # =============================================
   prometheus:
     image: prom/prometheus:v2.51.0
@@ -177,15 +240,16 @@ services:
       - monitoring
 
   # =============================================
-  # 7. Grafana (Monitoring Dashboards)
+  # 9. Grafana (Monitoring Dashboards)
   # =============================================
   grafana:
     image: grafana/grafana:10.4.0
     container_name: llama-agent-grafana
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
+      - GF_SERVER_HTTP_PORT=3000
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD_FILE=/run/secrets/grafana_admin_password
       - GF_USERS_ALLOW_SIGN_UP=false
@@ -203,7 +267,7 @@ services:
       - monitoring
 
   # =============================================
-  # 8. Loki (Log Aggregation - like Elasticsearch)
+  # 10. Loki (Log Aggregation - like Elasticsearch)
   # =============================================
   loki:
     image: grafana/loki:2.9.6
@@ -219,7 +283,7 @@ services:
       - monitoring
 
   # =============================================
-  # 9. Promtail (Log Shipping to Loki)
+  # 11. Promtail (Log Shipping to Loki)
   # =============================================
   promtail:
     image: grafana/promtail:2.9.6
@@ -238,7 +302,7 @@ services:
       - monitoring
 
   # =============================================
-  # 10. Node Exporter (System Metrics for Prometheus)
+  # 12. Node Exporter (System Metrics for Prometheus)
   # =============================================
   node-exporter:
     image: prom/node-exporter:v1.7.0
@@ -258,7 +322,7 @@ services:
       - monitoring
 
   # =============================================
-  # 11. Phoenix (LLM Observability by Arize AI)
+  # 13. Phoenix (LLM Observability by Arize AI)
   # =============================================
   phoenix:
     image: arizephoenix/phoenix:latest

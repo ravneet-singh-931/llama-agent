@@ -42,7 +42,7 @@ jobs:
 
       - name: "\U0001F9EA Run tests with coverage"
         run: |
-          pytest tests/ -v -m "not mcp" --tb=short || true
+          pytest tests/ -v -m "not mcp" --tb=short
           python test_advanced_rag.py
 
       - name: "\U0001F4CA Upload coverage"
@@ -72,8 +72,26 @@ jobs:
       - name: "\U0001F50D Scan for vulnerabilities"
         run: |
           pip install pip-audit bandit
-          pip-audit -r requirements.txt --progress-spinner off || echo "Some vulnerabilities found"
-          bandit -r . -f json -o bandit-report.json --exit-zero || true
+          # Ignored CVEs are reviewed + documented:
+          #  - PYSEC-2025-217, PYSEC-2026-2288/2289/2290: transformers (<5 pinned by
+          #    llama-index-llms-openai-like; no 4.x fix exists upstream)
+          #  - PYSEC-2026-311: chromadb (latest 1.5.9, no upstream fix yet)
+          #  - PYSEC-2026-1325: ecdsa (latest 0.19.2, no upstream fix yet)
+          # Re-evaluate on every dependency bump; new CVEs still fail the build.
+          pip-audit -r requirements.txt --progress-spinner off \
+            --ignore-vuln PYSEC-2025-217 \
+            --ignore-vuln PYSEC-2026-2288 \
+            --ignore-vuln PYSEC-2026-2289 \
+            --ignore-vuln PYSEC-2026-2290 \
+            --ignore-vuln PYSEC-2026-311 \
+            --ignore-vuln PYSEC-2026-1325
+          # bandit: skip known non-issues (documented):
+          #  B101 assert in tests (pytest standard), B105/B106/B107 hardcoded
+          #  credentials in test fixtures only, B110 intentional except-pass
+          #  cleanup paths, B104 binding 0.0.0.0 (required for containerized
+          #  services behind nginx). Everything else stays strict.
+          bandit -r . -f json -o bandit-report.json \
+            --skip B101,B104,B105,B106,B107,B110
 
       - name: "\U0001F4CB Upload security report"
         uses: actions/upload-artifact@v4
@@ -102,7 +120,7 @@ jobs:
 
       - name: "\U0001F50D Check for critical errors"
         run: |
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exit-zero
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
   # ============================================================
   # JOB 4: INTEGRATION TEST

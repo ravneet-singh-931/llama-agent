@@ -249,5 +249,152 @@ class TestEnvironment:
         assert config.is_production() == False
 
 
+# ============ ENTERPRISE MODULES TESTS ============
+
+class TestEnterpriseModules:
+    """Smoke tests for the enterprise security/monitoring/operations modules
+    that are now wired into api.py (security_hardening, advanced_monitoring,
+    cicd_improvements, database_improvements)."""
+
+    # ---- Security hardening ----
+
+    def test_sanitize_input_removes_scripts(self):
+        from modules.security_hardening import sanitize_input
+
+        clean = sanitize_input('<script>alert(1)</script> hello')
+        assert '<script' not in clean
+        assert 'hello' in clean
+
+    def test_sanitize_input_removes_sql_patterns(self):
+        from modules.security_hardening import sanitize_input
+
+        clean = sanitize_input("DROP TABLE users; select * from x")
+        assert 'DROP' not in clean.upper()
+
+    def test_sanitize_filename_blocks_traversal(self):
+        from modules.security_hardening import sanitize_filename
+
+        assert '/' not in sanitize_filename('../../etc/passwd')
+        assert '\\' not in sanitize_filename('..\\..\\windows\\system32')
+        assert sanitize_filename('report.pdf') == 'report.pdf'
+
+    def test_brute_force_lockout(self):
+        from modules.security_hardening import BruteForceProtection
+
+        protection = BruteForceProtection(max_attempts=3)
+        for _ in range(3):
+            protection.record_failure("attacker-ip")
+        locked, _ = protection.is_locked("attacker-ip")
+        assert locked is True
+
+        # Success resets the counter
+        protection.record_success("attacker-ip")
+        locked, _ = protection.is_locked("attacker-ip")
+        assert locked is False
+
+    def test_security_headers_present(self):
+        from modules.security_hardening import get_security_headers
+
+        headers = get_security_headers()
+        assert "Content-Security-Policy" in headers
+        assert "X-Frame-Options" in headers
+        assert "Strict-Transport-Security" in headers
+
+    def test_audit_logger_writes_events(self, tmp_path):
+        from modules.security_hardening import AuditLogger
+
+        logger = AuditLogger(log_file=str(tmp_path / "audit.log"))
+        logger.log_login_attempt("alice", "127.0.0.1", success=False, reason="bad password")
+        logger.log_file_upload("evil.pdf", "user-1", success=False, reason="blocked extension")
+
+        assert len(logger.events) == 2
+        assert logger.events[0]["event_type"] == "LOGIN_FAILURE"
+        assert logger.events[1]["event_type"] == "FILE_UPLOAD_FAILURE"
+        assert (tmp_path / "audit.log").exists()
+
+    # ---- Advanced monitoring ----
+
+    def test_business_metrics_recording(self):
+        from modules.advanced_monitoring import BusinessMetrics
+
+        metrics = BusinessMetrics()
+        metrics.record_question(user_id="u1", success=True, response_time=0.5, query_type="research")
+        metrics.record_question(user_id="u1", success=False, response_time=2.0, query_type="research")
+        metrics.record_document_upload("u1")
+
+        summary = metrics.get_metrics()
+        assert summary["total_questions"] == 2
+        assert summary["success_rate"] == 50.0
+        assert summary["documents_uploaded"] == 1
+        assert summary["total_users"] == 1
+
+    def test_sla_monitor_status(self):
+        from modules.advanced_monitoring import SLAMonitor
+
+        sla = SLAMonitor()
+        sla.record_response_time(0.3)
+        sla.record_response_time(0.7)
+        status = sla.get_sla_status()
+        assert status["overall_status"] in ("COMPLIANT", "NON-COMPLIANT")
+        assert "uptime" in status["compliance"]
+
+    def test_alert_manager_triggers(self):
+        from modules.advanced_monitoring import AlertManager
+
+        manager = AlertManager()
+        triggered = manager.check_alerts({"error_rate": 99, "avg_response_time": 0.1})
+        assert any(a["type"] == "high_error_rate" for a in triggered)
+
+    def test_monitoring_dashboard_shape(self):
+        from modules.advanced_monitoring import get_monitoring_dashboard
+
+        dashboard = get_monitoring_dashboard()
+        assert "business" in dashboard
+        assert "costs" in dashboard
+        assert "sla" in dashboard
+        assert "alerts" in dashboard
+
+    # ---- Feature flags (cicd_improvements) ----
+
+    def test_feature_flags_enabled(self):
+        from modules.cicd_improvements import feature_flags
+
+        # Unknown flags are always disabled
+        assert feature_flags.is_enabled("does_not_exist") is False
+        # Known, enabled flags evaluate as booleans
+        assert isinstance(feature_flags.is_enabled("enable_rate_limiting"), bool)
+
+    def test_feature_flags_file_based(self, tmp_path):
+        from modules.cicd_improvements import FeatureFlagManager
+
+        manager = FeatureFlagManager(config_file=str(tmp_path / "flags.json"))
+        manager.set_flag("test_flag", enabled=True, description="temp flag")
+        assert manager.is_enabled("test_flag") is True
+        manager.set_flag("test_flag", enabled=False)
+        assert manager.is_enabled("test_flag") is False
+
+    # ---- Database improvements ----
+
+    def test_db_health_check_handles_failure(self):
+        from modules.database_improvements import DatabaseHealthCheck
+        from unittest.mock import MagicMock
+
+        broken_conn = MagicMock()
+        broken_conn.cursor.side_effect = Exception("connection refused")
+
+        check = DatabaseHealthCheck()
+        result = check.run_health_check(broken_conn)
+        assert result["status"] == "unhealthy"
+        assert result["checks"]["connection"]["status"] == "unhealthy"
+
+    def test_migration_manager_status(self, tmp_path):
+        from modules.database_improvements import MigrationManager
+
+        manager = MigrationManager(migrations_dir=str(tmp_path / "migrations"))
+        status = manager.get_status()
+        assert "applied" in status
+        assert "pending" in status
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

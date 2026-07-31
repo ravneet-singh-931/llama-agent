@@ -39,6 +39,10 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: database-url
+            # TEMPORARY: llama-3.3-70b-versatile free-tier daily limit still 429s
+            # (verified live 2026-07-31). Remove once quota resets or tier upgraded.
+            - name: LLM_MODEL
+              value: llama-3.1-8b-instant
             - name: ENVIRONMENT
               value: production
           resources:

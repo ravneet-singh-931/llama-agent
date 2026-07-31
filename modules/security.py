@@ -8,6 +8,9 @@ Features:
 - Path traversal prevention
 """
 
+import ast
+import math
+import operator
 import os
 import re
 from pathlib import Path
@@ -138,6 +141,34 @@ def get_upload_path(upload_dir: str, filename: str) -> str:
         raise ValueError(f"Path traversal detected: {filename}")
     
     return full_path
+
+
+def is_path_within_roots(file_path: str, allowed_roots: List[str]) -> bool:
+    """
+    Check that a user-supplied file path resolves inside one of the allowed
+    root directories.
+
+    This is the authoritative guard against Local-File-Inclusion style
+    attacks (e.g. /documents/read?file_path=../../etc/passwd or symlinks
+    pointing outside the data roots). Both '..' components and symlinks are
+    neutralized by os.path.realpath before comparison.
+    """
+    if not file_path or not isinstance(file_path, str):
+        return False
+
+    # Normalize separators for cross-platform consistency, then resolve
+    # symlinks/.. so the containment check cannot be bypassed.
+    try:
+        resolved = os.path.realpath(os.path.normpath(file_path))
+    except (OSError, ValueError):
+        return False
+
+    for root in allowed_roots:
+        root_resolved = os.path.realpath(os.path.normpath(root))
+        if resolved == root_resolved or resolved.startswith(root_resolved + os.sep):
+            return True
+
+    return False
 
 
 # ============ INPUT VALIDATION ============
@@ -289,3 +320,65 @@ class SimpleRateLimiter:
 
 # Global rate limiter instance
 rate_limiter = SimpleRateLimiter()
+
+
+# ============ SAFE MATH EVALUATION ============
+
+# Whitelisted binary/unary operators for safe_math_eval
+_MATH_BIN_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+
+_MATH_UNARY_OPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+# Whitelisted functions/constants (subset of the math module)
+_MATH_FUNCS = {
+    "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos, "tan": math.tan,
+    "log": math.log, "log10": math.log10, "exp": math.exp,
+    "floor": math.floor, "ceil": math.ceil, "degrees": math.degrees,
+    "radians": math.radians, "abs": abs,
+    "pi": math.pi, "e": math.e, "tau": math.tau,
+}
+
+
+def safe_math_eval(expression: str) -> float:
+    """Evaluate a mathematical expression WITHOUT arbitrary code execution.
+
+    Replaces the previous ``eval(expression, {"__builtins__": {}}, ...)``
+    approach, which is a classic sandbox-escape vector. Only whitelisted
+    arithmetic operators, numeric constants, and math functions are allowed.
+
+    Args:
+        expression: A math expression, e.g. "2 + 3 * sqrt(16)".
+
+    Returns:
+        The numeric result.
+
+    Raises:
+        ValueError / TypeError: if the expression contains anything unsafe.
+    """
+    def _eval(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in _MATH_BIN_OPS:
+            return _MATH_BIN_OPS[type(node.op)](_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _MATH_UNARY_OPS:
+            return _MATH_UNARY_OPS[type(node.op)](_eval(node.operand))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _MATH_FUNCS):
+            return _MATH_FUNCS[node.func.id](*[_eval(a) for a in node.args])
+        if isinstance(node, ast.Name) and node.id in _MATH_FUNCS:
+            return _MATH_FUNCS[node.id]
+        raise ValueError(f"Unsupported expression element: {type(node).__name__}")
+
+    tree = ast.parse(expression, mode="eval")
+    return _eval(tree.body)

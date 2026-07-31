@@ -1,7 +1,56 @@
+# Version control
 .git
+.gitignore
 .github
+
+# Python
 __pycache__
 *.pyc
-.env
+*.pyo
+*.pyd
+*.egg-info
+dist/
+build/
+*.egg
 .venv
-node_modules
+venv/
+env/
+
+# Node.js
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.yml
+Dockerfile*
+!Dockerfile
+Dockerfile.nginx
+
+# Data & Logs
+logs/
+data/
+uploads/
+*.log
+
+# Docs
+docs/
+*.md
+!README.md
