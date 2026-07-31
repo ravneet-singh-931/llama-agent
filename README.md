@@ -47,17 +47,12 @@ AI:  "Based on the uploaded documents, our refund policy allows..."
 
 ## ✨ Demo
 
-### Next.js Frontend (Main UI)
-<img src="docs/demo-frontend.png" alt="Llama Agent Frontend" width="100%" />
+The Llama Agent provides a full-stack AI assistant experience with multiple interfaces:
 
-### API Documentation (Swagger)
-<img src="docs/demo-api.png" alt="API Documentation" width="100%" />
-
-### Streamlit UI (Legacy)
-<img src="docs/demo-streamlit.png" alt="Streamlit UI" width="100%" />
-
-### Grafana Monitoring Dashboard
-<img src="docs/demo-grafana.png" alt="Grafana Dashboard" width="100%" />
+- **Next.js Frontend** — Modern web UI with chat, document management, and agent dashboard
+- **API Documentation** — Interactive Swagger UI for all REST endpoints
+- **Streamlit UI** — Legacy interface for quick testing
+- **Grafana Dashboard** — Real-time monitoring with 12 panels covering metrics, costs, and SLA
 
 ---
 
