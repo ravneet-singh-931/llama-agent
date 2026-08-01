@@ -446,6 +446,26 @@ def display_sidebar():
         st.markdown(f"**Logged in as:** {st.session_state.user.get('username', 'Guest')}")
         st.markdown("---")
 
+        # ---- NEW WEB SOCKET CONFIGURATION ----
+        st.subheader("WebSocket Settings")
+        ws_host = st.text_input("API Host", value="localhost", key="ws_host_input")
+        ws_port = st.number_input("API Port", value=8000, key="ws_port_input")
+        
+        # Validate connection before proceeding
+        if st.button("Test Connection", key="test_ws_connection"):
+            try:
+                import requests
+                response = requests.get(f"http://{ws_host}:{ws_port}/health", timeout=5)
+                if response.status_code == 200:
+                    st.success("✅ Connection successful!")
+                else:
+                    st.error(f"❌ Connection failed: HTTP {response.status_code}")
+            except Exception as e:
+                st.error(f"❌ Connection failed: {str(e)}")
+        
+        st.session_state.ws_host = ws_host
+        st.session_state.ws_port = ws_port
+
         # ---- New Chat Button ----
         if st.button("New Chat", use_container_width=True, type="primary"):
             # Save current conversation if it has messages

@@ -51,6 +51,9 @@ from modules.websocket import get_ws_handler, MessageType, WSMessage
 # MCP client (real Model Context Protocol over SSE)
 from modules.mcp_client import MCP_SERVER_URL, get_mcp_status, call_mcp_tool
 
+# WebSocket handler
+ws_handler = get_ws_handler()
+
 # Prometheus metrics
 from modules.prometheus_metrics import (
     init_metrics,
