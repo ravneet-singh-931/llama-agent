@@ -97,9 +97,9 @@ class ResearchAgent(BaseAgent):
 
         prompt = f"""Research task: {task}
 
-Give a concise, accurate answer: the key facts, a short comparison where
-relevant, and only the most useful examples. Avoid generic filler, verbose
-introductions, and redundant headings."""
+Answer the question directly and concisely. Give the key facts and the most
+useful examples. Do NOT analyze the user's intent, add meta-commentary, or
+use verbose numbered sections. Be accurate and to the point."""
 
         messages = [
             {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
@@ -195,8 +195,9 @@ class AnalyzerAgent(BaseAgent):
         """Analyze data or information"""
         prompt = f"""Analysis task: {task}
 
-Analyze it and give the key insights in a concise, clear answer. Use short
-paragraphs or bullets. No marketing language or filler."""
+Analyze the topic directly and give the key insights as concise bullets or a
+short paragraph. Do NOT analyze the user's intent or add meta-commentary.
+Be clear and to the point."""
 
         messages = [
             {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
