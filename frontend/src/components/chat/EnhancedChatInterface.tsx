@@ -6,8 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { Send, Bot, User, Loader2, Sparkles, Brain, Zap, Search, FileText, Copy, Check } from "lucide-react";
+import { Send, Bot, User, Loader2, Sparkles, Brain, Zap, Search, FileText, Copy, Check, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 
 interface Message {
   id: string;
@@ -46,6 +47,7 @@ export function EnhancedChatInterface() {
   const [agentSuggestions, setAgentSuggestions] = useState<AgentSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
@@ -61,11 +63,15 @@ export function EnhancedChatInterface() {
     scrollToBottom();
   }, [messages]);
 
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  const handleSend = async () => {
+  const handleSend = () => {
     if (!input.trim() || isLoading) return;
 
     const userMessage: Message = {
@@ -74,37 +80,61 @@ export function EnhancedChatInterface() {
       content: input,
       timestamp: new Date(),
     };
+    const assistantId = (Date.now() + 1).toString();
 
-    setMessages(prev => [...prev, userMessage]);
+    setMessages(prev => [
+      ...prev,
+      userMessage,
+      {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        timestamp: new Date(),
+      },
+    ]);
     const currentInput = input;
     setInput("");
     setIsLoading(true);
     setShowSuggestions(false);
+    setSelectedAgent(null);
 
-    // Simulate agent selection
-    const suggestedAgent = agents[Math.floor(Math.random() * agents.length)];
-    setSelectedAgent(suggestedAgent.name);
+    // Stream a real response from the backend over SSE
+    const startTime = Date.now();
+    let fullContent = "";
 
-    // Simulate API call
-    setTimeout(() => {
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: `I'll help you with "${currentInput}". Let me use the ${suggestedAgent.name} to provide you with a comprehensive response. This is a simulated response demonstrating the enhanced chat interface with agent selection, citations, and response metadata.`,
-        timestamp: new Date(),
-        agentUsed: suggestedAgent.name,
-        toolsUsed: ["web_search", "document_analysis", "knowledge_graph"],
-        responseTime: Math.random() * 3 + 1,
-        citations: [
-          { documentId: "doc-1", excerpt: "Relevant excerpt from document...", relevanceScore: 0.92 },
-          { documentId: "doc-2", excerpt: "Another relevant excerpt...", relevanceScore: 0.87 },
-        ],
-      };
-
-      setMessages(prev => [...prev, assistantMessage]);
-      setIsLoading(false);
-      setSelectedAgent(null);
-    }, 1500);
+    api.chatStream(
+      currentInput,
+      (token) => {
+        fullContent += token;
+        setMessages(prev =>
+          prev.map(m => (m.id === assistantId ? { ...m, content: fullContent } : m))
+        );
+      },
+      () => {
+        setIsLoading(false);
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === assistantId
+              ? {
+                  ...m,
+                  content: fullContent.trim() || "No response received.",
+                  responseTime: (Date.now() - startTime) / 1000,
+                }
+              : m
+          )
+        );
+      },
+      (err) => {
+        setIsLoading(false);
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === assistantId
+              ? { ...m, content: `⚠️ Stream error: ${err.message}` }
+              : m
+          )
+        );
+      }
+    );
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -150,8 +180,9 @@ export function EnhancedChatInterface() {
                 ))}
               </div>
             </div>
-          </CardHeader>
-        </Card>
+          </div>
+        </CardHeader>
+      </Card>
 
       {/* Chat Messages */}
       <Card className="flex-1 flex flex-col">
@@ -171,7 +202,7 @@ export function EnhancedChatInterface() {
                     <p className="whitespace-pre-wrap">{message.content}</p>
                   </div>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                    <span>{message.timestamp.toLocaleTimeString()}</span>
+                    {mounted && <span>{message.timestamp.toLocaleTimeString()}</span>}
                     {message.agentUsed && (
                       <Badge variant="secondary" className="gap-1">
                         <Zap className="h-3 w-3" />

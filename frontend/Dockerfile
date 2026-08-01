@@ -16,9 +16,13 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-# Same-origin API calls: frontend -> /api/* -> Nginx -> FastAPI
+# Same-origin API calls: frontend -> /api/* -> (Next.js rewrite) -> FastAPI
 ARG NEXT_PUBLIC_API_URL=/api
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# Backend upstream for the /api/* rewrite. Inside Docker Compose the API
+# service resolves via http://api:8000; the rewrite is baked at build time.
+ARG API_PROXY_URL=http://api:8000
+ENV API_PROXY_URL=$API_PROXY_URL
 RUN npm run build
 
 # Production stage

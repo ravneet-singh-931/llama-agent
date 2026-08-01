@@ -188,6 +188,10 @@ services:
         - NEXT_PUBLIC_API_URL=/api
     container_name: llama-agent-frontend
     restart: unless-stopped
+    environment:
+      # Backend upstream used by Next.js rewrites so the standalone server on
+      # port 3001 can proxy /api/* to FastAPI without going through Nginx.
+      - API_PROXY_URL=http://api:8000
     ports:
       - "3001:3000"
     depends_on:
