@@ -92,12 +92,36 @@ class ConversationMemory:
                 "messages": [],
             }
 
+    def _resolve_conversation_id(self, user_id: str, conversation_id: str) -> str:
+        """Return the conversation id this user should write to.
+
+        A conversation id may only ever belong to ONE user. If the requested
+        id already exists but belongs to a DIFFERENT user (e.g. two users both
+        sending their first message without a conversation_id), we must NOT
+        rebind or pollute it - instead create a brand-new conversation for the
+        current user. This is what kept conversations from appearing after
+        signup: a signed-up user's first message was silently appended to
+        another user's "default" conversation and its owner was overwritten.
+        """
+        conv = self.data["conversations"].get(conversation_id)
+        if conv is None:
+            self._ensure(user_id, conversation_id)
+            return conversation_id
+        if conv["user_id"] == user_id:
+            return conversation_id
+        # Ownership conflict -> create a fresh conversation for this user.
+        return self.create_conversation(user_id, title="New chat")["id"]
+
     def add_message(self, role: str, content: str, tool_used: str = None,
                     user_id: str = "guest", conversation_id: str = "default"):
-        """Add a message to a conversation (auto-creates the conversation)."""
-        self._ensure(user_id, conversation_id)
+        """Add a message to a conversation (auto-creates the conversation).
+
+        Never overwrites the owner of an existing conversation: if the given
+        conversation_id belongs to another user, a fresh conversation is
+        created for this user instead.
+        """
+        conversation_id = self._resolve_conversation_id(user_id, conversation_id)
         conv = self.data["conversations"][conversation_id]
-        conv["user_id"] = user_id
         conv["messages"].append({
             "role": role,
             "content": content,

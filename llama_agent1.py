@@ -297,6 +297,14 @@ tools = [
 
 # ===================== CREATE AGENT =====================
 
+GENERAL_SYSTEM_PROMPT = (
+    "You are Llama Agent, a helpful, concise AI assistant with tools for math, "
+    "text analysis, unit conversion, memory, and document search. "
+    "Always respond in English. Be concise and direct: answer the question, "
+    "show code when asked, and skip verbose introductions, filler, redundant "
+    "headings, and marketing language."
+)
+
 agent = ReActAgent(
     tools=tools,
     llm=llm,
@@ -304,6 +312,7 @@ agent = ReActAgent(
     streaming=False,
     max_iterations=20,
     max_retries=3,
+    system_prompt=GENERAL_SYSTEM_PROMPT,
 )
 
 
@@ -544,23 +553,29 @@ async def run_agent(user_input: str, memory: Optional[Any] = None,
     mem = memory if memory is not None else globals().get("memory")
     fact_store = facts if facts is not None else globals().get("facts")
 
-    # Add context from memory (scoped to this user's conversation)
+    # Session memory: give the agent the last few turns of THIS conversation
+    # so it can answer follow-ups like "and what about my first question?".
     context = mem.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
     fact_context = fact_store.get_context_string()
-    
+
     # Log the interaction
     monitor.track_request()
     start_time = time.time()
+
+    # Build the prompt: user message + recent conversation + known facts.
+    prompt = user_input
+    if context and "No conversation history yet." not in context:
+        prompt = f"Recent conversation context:\n{context}\n\nUser: {user_input}"
+    if fact_context and "No facts stored yet." not in fact_context:
+        prompt = f"{prompt}\n\n{fact_context}"
     
     try:
-        handler = agent.run(user_input)
+        handler = agent.run(prompt)
         output = await asyncio.wait_for(handler, timeout=60)
         result = str(output)
         
-        # Log success
+        # Log success (persistence is handled by the caller)
         elapsed = time.time() - start_time
-        mem.add_message("user", user_input, user_id=user_id, conversation_id=conversation_id)
-        mem.add_message("assistant", result, user_id=user_id, conversation_id=conversation_id)
         logger.log_interaction(user_input, result, [], elapsed)
         
         return result
@@ -591,7 +606,9 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
     system_prompt = (
         "You are Llama Agent, a helpful AI assistant with tools for math, "
         "text analysis, unit conversion, memory, and document search. "
-        "Always respond in English. Be concise and helpful."
+        "Always respond in English. Be concise and direct: answer the question, "
+        "show code when asked, and skip verbose introductions, filler, "
+        "redundant headings, and marketing language."
     )
 
     messages = [
@@ -659,6 +676,11 @@ def main():
             
             print("\n🤖 Agent: Thinking...")
             result = asyncio.run(run_agent(user_input))
+            # Persist the exchange (run_agent no longer saves to memory itself).
+            mem = globals().get("memory") or ConversationMemory()
+            fact_store = globals().get("facts") or FactMemory()
+            mem.add_message("user", user_input, user_id="guest", conversation_id="default_cli")
+            mem.add_message("assistant", result, user_id="guest", conversation_id="default_cli")
             print(f"\n🤖 Agent: {result}")
             
         except KeyboardInterrupt:

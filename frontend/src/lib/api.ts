@@ -260,6 +260,15 @@ class ApiClient {
     );
   }
 
+  // Ask a question about uploaded documents and get a clean AI-written answer
+  async askDocuments(query: string) {
+    return this.request<{ query: string; answer: string }>(
+      "POST",
+      "/documents/ask",
+      { query }
+    );
+  }
+
   async listDocuments() {
     return this.request<{ documents: string[] }>("GET", "/documents");
   }

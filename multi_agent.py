@@ -94,19 +94,15 @@ class ResearchAgent(BaseAgent):
     def execute(self, task: str) -> str:
         """Research a topic"""
         thinking = self.think(f"I need to research: {task}\n\nWhat do I need to find out?")
-        
-        prompt = f"""Research this topic thoroughly: {task}
 
-Provide:
-1. Key facts and information
-2. Different perspectives
-3. Relevant examples
-4. Sources if possible
+        prompt = f"""Research task: {task}
 
-Be comprehensive and accurate."""
-        
+Give a concise, accurate answer: the key facts, a short comparison where
+relevant, and only the most useful examples. Avoid generic filler, verbose
+introductions, and redundant headings."""
+
         messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}."},
+            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
             {"role": "user", "content": prompt}
         ]
         
@@ -134,16 +130,12 @@ class CoderAgent(BaseAgent):
         """Write or review code"""
         prompt = f"""Programming task: {task}
 
-Provide:
-1. Clean, working code
-2. Comments explaining the code
-3. Example usage
-4. Any warnings or considerations
+Write clean, working code. Put the code first, then at most 2-3 lines of
+explanation. Only include comments that actually help. Skip generic warnings
+and notes unless they are truly needed for this specific code."""
 
-Write production-quality code."""
-        
         messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}."},
+            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
             {"role": "user", "content": prompt}
         ]
         
@@ -171,16 +163,11 @@ class WriterAgent(BaseAgent):
         """Write content"""
         prompt = f"""Writing task: {task}
 
-Write:
-1. Clear, engaging content
-2. Well-structured with headers
-3. Appropriate tone for the audience
-4. Error-free grammar
+Write the content. Keep it clear and direct, well-structured only where it
+helps readability. Match the requested tone. No filler or generic padding."""
 
-Create high-quality content."""
-        
         messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}."},
+            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
             {"role": "user", "content": prompt}
         ]
         
@@ -208,16 +195,11 @@ class AnalyzerAgent(BaseAgent):
         """Analyze data or information"""
         prompt = f"""Analysis task: {task}
 
-Analyze:
-1. Key patterns and trends
-2. Important insights
-3. Potential implications
-4. Recommendations
+Analyze it and give the key insights in a concise, clear answer. Use short
+paragraphs or bullets. No marketing language or filler."""
 
-Provide thorough analysis."""
-        
         messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}."},
+            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
             {"role": "user", "content": prompt}
         ]
         
@@ -245,17 +227,11 @@ class PlannerAgent(BaseAgent):
         """Create a plan"""
         prompt = f"""Planning task: {task}
 
-Create a plan with:
-1. Clear objectives
-2. Step-by-step actions
-3. Timeline/deadlines
-4. Resources needed
-5. Potential risks and mitigation
+Create a concise, actionable plan: clear objectives, step-by-step actions, and
+a timeline if relevant. Keep it short and specific. No filler."""
 
-Make it actionable and specific."""
-        
         messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}."},
+            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
             {"role": "user", "content": prompt}
         ]
         

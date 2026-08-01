@@ -71,15 +71,11 @@ export default function DocumentsPage() {
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
+    setUploadSuccess(null);
     try {
-      const result = await api.searchDocuments(searchQuery);
-      setSearchResult(
-        Array.isArray(result.results)
-          ? result.results.map((r: unknown) => 
-              typeof r === "object" ? JSON.stringify(r, null, 2) : String(r)
-            ).join("\n\n---\n\n")
-          : JSON.stringify(result.results, null, 2)
-      );
+      // Ask the AI for a clean answer based on the uploaded documents
+      const result = await api.askDocuments(searchQuery);
+      setSearchResult(result.answer);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Search failed";
       setSearchResult(`Error: ${message}`);

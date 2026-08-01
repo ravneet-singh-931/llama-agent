@@ -627,6 +627,108 @@ def is_name_question(message: str) -> bool:
     return any(p.search(message) for p in _NAME_QUESTION_PATTERNS)
 
 
+# ---------- shared multi-agent routing keywords (tight, intent-based) ---------
+# Only clearly specialized requests are sent to the multi-agent system. Loose
+# words like "what is", "how does", "python", "api" etc. are NOT enough — those
+# go to the normal agent, which gives clean, concise answers.
+CODE_KEYWORDS = ["write code", "write a function", "write python", "write a script",
+                 "code to ", "code for ", "debug", "fix bug", "code review",
+                 "refactor", "implement", "program to", "create a function",
+                 "write a class", "build a script"]
+WRITER_KEYWORDS = ["write an article", "write a blog", "write content",
+                   "write an essay", "write a story", "creative writing",
+                   "copywriting", "write a report", "write documentation",
+                   "write a post", "write a letter"]
+PLANNER_KEYWORDS = ["create a plan", "make a plan", "project plan", "action plan",
+                    "roadmap", "strategy", "milestones", "timeline"]
+ANALYZER_KEYWORDS = ["analyze", "analysis", "trends", "data analysis",
+                     "evaluate", "assess", "insights"]
+RESEARCH_KEYWORDS = ["research", "compare", "difference between",
+                     "pros and cons", "investigate"]
+
+
+def route_multi_agent(message: str):
+    """Return (use_multi_agent, agent_type) for a message."""
+    task_lower = message.lower()
+    if any(kw in task_lower for kw in CODE_KEYWORDS):
+        return True, "coder"
+    if any(kw in task_lower for kw in WRITER_KEYWORDS):
+        return True, "writer"
+    if any(kw in task_lower for kw in PLANNER_KEYWORDS):
+        return True, "planner"
+    if any(kw in task_lower for kw in ANALYZER_KEYWORDS):
+        return True, "analyzer"
+    if any(kw in task_lower for kw in RESEARCH_KEYWORDS):
+        return True, "research"
+    return False, "research"
+
+
+def _with_context(message: str, memory, user_id: str, conversation_id: str) -> str:
+    """Prepend this conversation's recent history so specialized agents can
+    answer follow-up questions that reference earlier messages."""
+    context = memory.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
+    if not context or "No conversation history yet." in context:
+        return message
+    return f"Recent conversation context:\n{context}\n\nUser's new message: {message}"
+
+
+_DOC_QUESTION_PHRASES = [
+    "summarize the uploaded", "summarize uploaded", "summary of the uploaded",
+    "summarize the file", "summarize the document", "summarize file",
+    "about the uploaded", "about the document", "about the file",
+    "from the document", "from the file", "in the document", "in the file",
+    "from the uploaded", "document says", "file says", "uploaded file",
+    "uploaded document", "what does the file", "what does the document",
+    "tell me about the file", "tell me about the document",
+]
+
+
+def is_document_question(message: str) -> bool:
+    """True if the user is asking about their uploaded documents/files."""
+    m = message.lower()
+    return any(p in m for p in _DOC_QUESTION_PHRASES)
+
+
+def answer_from_documents(query: str, rag) -> str:
+    """Answer a question about uploaded documents with a CLEAN, LLM-written
+    answer (instead of dumping raw chunk JSON / excerpts)."""
+    try:
+        context = rag.get_context(query)
+    except Exception:
+        context = ""
+    if not context or context == "No documents have been uploaded.":
+        return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
+    if "No documents" in context:
+        return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
+
+    from groq import Groq
+    from modules.secrets import get_secret
+    api_key = os.environ.get("GROQ_API_KEY", "") or get_secret("GROQ_API_KEY", default="")
+    if not api_key:
+        return context
+    client = Groq(api_key=api_key)
+    prompt = (
+        "You are answering a question using the user's uploaded documents.\n\n"
+        f"Document excerpts:\n{context}\n\n"
+        f"Question: {query}\n\n"
+        "Answer the question using ONLY the excerpts above. Be concise and "
+        "clear. Use short paragraphs or bullets where helpful. Never dump raw "
+        "excerpts. If the excerpts don't contain the answer, say so plainly."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"),
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that answers questions about uploaded documents."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1024,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        return f"Could not summarize the documents right now: {e}"
+
+
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
@@ -642,7 +744,9 @@ async def chat(
     rag = app.state.rag
     logger = app.state.logger
     user_id = str(user["id"]) if user else "guest"
-    conversation_id = request.conversation_id or "default"
+    # Per-user default conversation: two users must never share "default".
+    # The storage layer also refuses to rebind a conversation to another user.
+    conversation_id = request.conversation_id or f"default_{user_id}"
     
     monitor.track_request()
     query_type = "general"
@@ -723,63 +827,31 @@ async def chat(
             if not fact_answered:
                 # Simple greeting handler - bypass agent for simple messages
                 greetings = ["hi", "hello", "hey", "hola", "good morning", "good afternoon", "good evening", "howdy", "yo", "sup"]
-                if any(g in lower_input for g in greetings):
+                if is_document_question(request.message):
+                    # Clean answers about uploaded documents (RAG retrieval +
+                    # LLM summary) instead of dumping raw chunks.
+                    response = answer_from_documents(request.message, rag)
+                    query_type = "document_question"
+                elif any(g in lower_input for g in greetings):
                     response = "Hello! How can I help you today?"
                 else:
                     # Try routing through multi-agent system for specialized tasks
                     from multi_agent import MultiAgentOrchestrator
-                    
-                    # Keyword patterns for specialized agents
-                    code_keywords = ["write code", "function", "class", "debug", "fix bug",
-                        "programming", "python", "javascript", "code review",
-                        "refactor", "implement", "algorithm", "script", "api",
-                        "database", "sql", "html", "css", "react", "django",
-                        "flask", "fastapi", "code for", "program to"]
-                    writer_keywords = ["write an article", "write a blog", "write content",
-                        "draft", "compose", "write an essay", "write a story",
-                        "creative writing", "copywriting", "write a report",
-                        "write documentation", "write a post", "write a letter"]
-                    planner_keywords = ["plan", "strategy", "roadmap", "steps to",
-                        "how to start", "create a plan", "project plan",
-                        "action plan", "timeline", "milestones", "phases"]
-                    analyzer_keywords = ["analyze", "analysis", "statistics", "trends",
-                        "patterns", "data analysis", "evaluate", "assess",
-                        "break down", "metrics", "insights"]
-                    research_keywords = ["research", "explain", "what is", "how does",
-                        "tell me about", "compare", "difference between",
-                        "pros and cons", "investigate", "explore"]
-                    
-                    task_lower = lower_input
-                    use_multi_agent = False
-                    agent_type = "research"  # default
-                    
-                    if any(kw in task_lower for kw in code_keywords):
-                        use_multi_agent = True
-                        agent_type = "coder"
-                    elif any(kw in task_lower for kw in writer_keywords):
-                        use_multi_agent = True
-                        agent_type = "writer"
-                    elif any(kw in task_lower for kw in planner_keywords):
-                        use_multi_agent = True
-                        agent_type = "planner"
-                    elif any(kw in task_lower for kw in analyzer_keywords):
-                        use_multi_agent = True
-                        agent_type = "analyzer"
-                    elif any(kw in task_lower for kw in research_keywords):
-                        use_multi_agent = True
-                        agent_type = "research"
-                    
+
+                    use_multi_agent, agent_type = route_multi_agent(request.message)
+
                     if use_multi_agent:
                         query_type = f"multi_agent:{agent_type}"
                         orchestrator = MultiAgentOrchestrator()
-                        response = orchestrator.agents[agent_type].execute(request.message)
+                        task = _with_context(request.message, memory, user_id, conversation_id)
+                        response = orchestrator.agents[agent_type].execute(task)
                     else:
-                        # Fall back to general ReAct agent
-                        facts_context = facts.get_context_string()
-                        enhanced_input = f"{request.message}\n\n{facts_context}\n\nIMPORTANT: Always respond in English."
+                        # Fall back to general ReAct agent (it injects this
+                        # conversation's recent history + facts internally, so
+                        # follow-ups about earlier messages work).
                         from llama_agent1 import run_agent
                         response = await run_agent(
-                            enhanced_input,
+                            request.message,
                             memory=memory,
                             facts=facts,
                             user_id=user_id,
@@ -843,7 +915,8 @@ async def chat_stream(
     facts = app.state.facts
     rag = app.state.rag
     user_id = str(user["id"]) if user else "guest"
-    conversation_id = request.conversation_id or "default"
+    # Per-user default conversation (never share the legacy "default" id).
+    conversation_id = request.conversation_id or f"default_{user_id}"
 
     async def event_generator():
         # Helper: record the assistant reply, emit it, then signal stream end.
@@ -927,49 +1000,28 @@ async def chat_stream(
                     yield chunk
                 return
 
+        # Clean answers about uploaded documents (RAG + LLM summary)
+        if is_document_question(request.message):
+            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            result = answer_from_documents(request.message, rag)
+            async for chunk in done(result):
+                yield chunk
+            return
+
         # Check if this is a specialized task for multi-agent
         from multi_agent import MultiAgentOrchestrator
 
-        code_keywords = ["write code", "function", "class", "debug", "fix bug",
-            "programming", "python", "javascript", "code review",
-            "refactor", "implement", "algorithm", "script", "api",
-            "database", "sql", "html", "css", "react", "django",
-            "flask", "fastapi", "code for", "program to"]
-        writer_keywords = ["write an article", "write a blog", "write content",
-            "draft", "compose", "write an essay", "write a story",
-            "creative writing", "copywriting", "write a report",
-            "write documentation", "write a post", "write a letter"]
-        planner_keywords = ["plan", "strategy", "roadmap", "steps to",
-            "how to start", "create a plan", "project plan",
-            "action plan", "timeline", "milestones", "phases"]
-        analyzer_keywords = ["analyze", "analysis", "statistics", "trends",
-            "patterns", "data analysis", "evaluate", "assess",
-            "break down", "metrics", "insights"]
-        research_keywords = ["research", "explain", "what is", "how does",
-            "tell me about", "compare", "difference between",
-            "pros and cons", "investigate", "explore"]
-
-        task_lower = lower_input
-        use_multi_agent = False
-        agent_type = "research"
-
-        if any(kw in task_lower for kw in code_keywords):
-            use_multi_agent = True; agent_type = "coder"
-        elif any(kw in task_lower for kw in writer_keywords):
-            use_multi_agent = True; agent_type = "writer"
-        elif any(kw in task_lower for kw in planner_keywords):
-            use_multi_agent = True; agent_type = "planner"
-        elif any(kw in task_lower for kw in analyzer_keywords):
-            use_multi_agent = True; agent_type = "analyzer"
-        elif any(kw in task_lower for kw in research_keywords):
-            use_multi_agent = True; agent_type = "research"
+        use_multi_agent, agent_type = route_multi_agent(request.message)
 
         if use_multi_agent:
-            # Multi-agent doesn't support streaming — collect and yield as one chunk
+            # Multi-agent doesn't support streaming — collect and yield as one chunk.
+            # Inject recent conversation context so follow-ups about earlier
+            # messages work.
             memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             orchestrator = MultiAgentOrchestrator()
+            task = _with_context(request.message, memory, user_id, conversation_id)
             try:
-                result = orchestrator.agents[agent_type].execute(request.message)
+                result = orchestrator.agents[agent_type].execute(task)
             except Exception as e:
                 result = f"⚠️ Error from {agent_type} agent: {e}"
             memory.add_message("assistant", result, user_id=user_id, conversation_id=conversation_id)
@@ -1145,11 +1197,23 @@ async def upload_document(file: UploadFile = File(...), user: Optional[Dict] = D
 
 @app.post("/documents/search")
 async def search_documents(request: SearchRequest):
-    """Search documents"""
+    """Search documents (raw retrieval, for power users)"""
     try:
         rag = app.state.rag
         results = rag.search(request.query, top_k=request.top_k)
         return {"query": request.query, "results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/documents/ask")
+async def ask_documents(request: SearchRequest):
+    """Ask a question about uploaded documents and get a clean, LLM-written
+    answer (instead of raw chunk JSON)."""
+    try:
+        rag = app.state.rag
+        answer = answer_from_documents(request.query, rag)
+        return {"query": request.query, "answer": answer}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -139,6 +139,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const res = await api.getConversations();
       set({ conversations: res.conversations });
+      // If no conversation is selected, auto-load the most recent one so the
+      // chat window isn't empty after a reload (conversations persist per user).
+      const state = get();
+      if (!state.currentConversationId && res.conversations.length > 0) {
+        const mostRecent = res.conversations[0];
+        await get().loadConversation(mostRecent.id);
+      }
     } catch (err) {
       set({ error: (err as Error).message });
     }
