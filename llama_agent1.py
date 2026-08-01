@@ -538,10 +538,15 @@ async def analyze_context_relevance(self, query: str, context: Any) -> float:
         # Simple relevance analysis
         return 0.5
 
-async def run_agent(user_input: str) -> str:
-    # Add context from memory
-    context = memory.get_context_string(n=5)
-    fact_context = facts.get_context_string()
+async def run_agent(user_input: str, memory: Optional[Any] = None,
+                    facts: Optional[Any] = None,
+                    user_id: str = "guest", conversation_id: str = "default") -> str:
+    mem = memory if memory is not None else globals().get("memory")
+    fact_store = facts if facts is not None else globals().get("facts")
+
+    # Add context from memory (scoped to this user's conversation)
+    context = mem.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
+    fact_context = fact_store.get_context_string()
     
     # Log the interaction
     monitor.track_request()
@@ -554,8 +559,8 @@ async def run_agent(user_input: str) -> str:
         
         # Log success
         elapsed = time.time() - start_time
-        memory.add_message("user", user_input)
-        memory.add_message("assistant", result)
+        mem.add_message("user", user_input, user_id=user_id, conversation_id=conversation_id)
+        mem.add_message("assistant", result, user_id=user_id, conversation_id=conversation_id)
         logger.log_interaction(user_input, result, [], elapsed)
         
         return result
@@ -569,16 +574,20 @@ async def run_agent(user_input: str) -> str:
 
 # ===================== STREAMING AGENT =====================
 
-def run_agent_stream(user_input: str):
+def run_agent_stream(user_input: str, memory: Optional[Any] = None,
+                     facts: Optional[Any] = None,
+                     user_id: str = "guest", conversation_id: str = "default"):
     """
     Stream agent response token by token.
     Yields text chunks for st.write_stream() in Streamlit.
     """
+    mem = memory if memory is not None else globals().get("memory")
+    fact_store = facts if facts is not None else globals().get("facts")
     client = Groq(api_key=GROQ_API_KEY)
 
-    # Build messages with context
-    context = memory.get_context_string(n=5)
-    fact_context = facts.get_context_string()
+    # Build messages with context (scoped to this user's conversation)
+    context = mem.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
+    fact_context = fact_store.get_context_string()
     system_prompt = (
         "You are Llama Agent, a helpful AI assistant with tools for math, "
         "text analysis, unit conversion, memory, and document search. "
@@ -619,8 +628,8 @@ def run_agent_stream(user_input: str):
         yield f"\n\n⚠️ Error while generating response: {e}"
 
     # Save to memory after streaming is done
-    memory.add_message("user", user_input)
-    memory.add_message("assistant", full_response)
+    mem.add_message("user", user_input, user_id=user_id, conversation_id=conversation_id)
+    mem.add_message("assistant", full_response, user_id=user_id, conversation_id=conversation_id)
     monitor.track_request()
 
 

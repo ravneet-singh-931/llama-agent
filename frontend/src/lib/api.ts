@@ -91,7 +91,8 @@ class ApiClient {
     message: string,
     onToken: (token: string) => void,
     onDone: () => void,
-    onError: (err: Error) => void
+    onError: (err: Error) => void,
+    conversationId?: string | null
   ): AbortController {
     const controller = new AbortController();
     const url = `${API_BASE}/chat/stream`;
@@ -102,7 +103,9 @@ class ApiClient {
         "Content-Type": "application/json",
         ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
       },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify(
+        conversationId ? { message, conversation_id: conversationId } : { message }
+      ),
       signal: controller.signal,
     })
       .then(async (response) => {
@@ -177,6 +180,58 @@ class ApiClient {
       stats: Record<string, number>;
       recent_messages: unknown[];
     }>("GET", "/memory");
+  }
+
+  // Conversations (per-user chat history, used by the sidebar)
+  async getConversations() {
+    return this.request<{
+      conversations: {
+        id: string;
+        user_id: string;
+        title: string;
+        created_at: string;
+        updated_at: string;
+        message_count: number;
+        last_message: string;
+      }[];
+    }>("GET", "/conversations");
+  }
+
+  async getConversation(id: string) {
+    return this.request<{
+      id: string;
+      user_id: string;
+      title: string;
+      created_at: string;
+      updated_at: string;
+      message_count: number;
+      last_message: string;
+      messages: {
+        role: "user" | "assistant";
+        content: string;
+        timestamp: string;
+        tool_used?: string | null;
+      }[];
+    }>("GET", `/conversations/${id}`);
+  }
+
+  async createConversation(title?: string) {
+    return this.request<{
+      id: string;
+      user_id: string;
+      title: string;
+      created_at: string;
+      updated_at: string;
+      message_count: number;
+      last_message: string;
+    }>("POST", "/conversations", title ? { title } : {});
+  }
+
+  async deleteConversation(id: string) {
+    return this.request<{ status: string; conversation_id: string }>(
+      "DELETE",
+      `/conversations/${id}`
+    );
   }
 
   // Documents

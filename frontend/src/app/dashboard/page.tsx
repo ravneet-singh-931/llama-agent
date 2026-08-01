@@ -1,23 +1,25 @@
 "use client";
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/layout/app-shell";
 import { EnhancedChatInterface } from "@/components/chat/EnhancedChatInterface";
-import { useAuthStore } from "@/store/auth-store";
+import { useChatStore } from "@/store/chat-store";
 
 export default function DashboardPage() {
-  const router = useRouter();
-  const { isLoggedIn, user } = useAuthStore();
-
-  useEffect(() => {
-    // Remove the redirect - allow guest access
-    // The AppShell will show login prompt if needed
-  }, []);
+  const { messages, currentConversationId } = useChatStore();
 
   return (
     <AppShell>
-      <EnhancedChatInterface />
+      {/* key forces a fresh chat component when switching conversations */}
+      <EnhancedChatInterface
+        key={currentConversationId || "new"}
+        conversationId={currentConversationId}
+        initialMessages={messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          timestamp: new Date(m.timestamp),
+        }))}
+      />
     </AppShell>
   );
 }

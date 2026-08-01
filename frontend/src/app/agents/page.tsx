@@ -19,11 +19,14 @@ import {
   Zap,
   Users,
   BarChart3,
+  RefreshCw,
+  Terminal,
 } from "lucide-react";
 import { AppShell } from "@/components/layout/app-shell";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { AgentCollaborationDashboard } from "@/components/chat/AgentCollaborationDashboard";
@@ -106,8 +109,12 @@ export default function AgentsPage() {
   } | null>(null);
   const [mcpError, setMcpError] = useState<string | null>(null);
   const [mcpLoading, setMcpLoading] = useState(true);
+  const [connectLoading, setConnectLoading] = useState(false);
   const [teamStatus, setTeamStatus] = useState<string | null>(null);
   const [teamStatusLoading, setTeamStatusLoading] = useState(false);
+  const [toolLoading, setToolLoading] = useState<string | null>(null);
+  const [toolInputs, setToolInputs] = useState<Record<string, string>>({});
+  const [toolResults, setToolResults] = useState<Record<string, string>>({});
 
   useEffect(() => {
     api
@@ -116,6 +123,55 @@ export default function AgentsPage() {
       .catch((err: Error) => setMcpError(err.message))
       .finally(() => setMcpLoading(false));
   }, []);
+
+  // "Connect MCP": run the MCP handshake + tools/list again and unlock the
+  // multi-agent tools. The MCP client opens a session per call, so "connect"
+  // re-establishes the session and refreshes the exposed tools.
+  const connectMcp = async () => {
+    setConnectLoading(true);
+    setMcpError(null);
+    try {
+      const status = await api.mcpStatus();
+      setMcpStatus(status);
+    } catch (err) {
+      setMcpStatus(null);
+      setMcpError((err as Error).message);
+    } finally {
+      setConnectLoading(false);
+    }
+  };
+
+  // Tools that take a free-form "task" argument (all except team_status)
+  const taskTools = new Set([
+    "research_agent",
+    "coder_agent",
+    "writer_agent",
+    "analyzer_agent",
+    "planner_agent",
+    "collaborate",
+  ]);
+
+  const runMcpTool = async (name: string) => {
+    const task = (toolInputs[name] || "").trim();
+    const args: Record<string, string> = taskTools.has(name)
+      ? { task: task || "Analyze this topic and give a detailed, well-structured answer." }
+      : {};
+    setToolLoading(name);
+    try {
+      const res = await api.mcpToolCall(name, args);
+      setToolResults((prev) => ({
+        ...prev,
+        [name]: res.isError ? `Error: ${res.result}` : res.result,
+      }));
+    } catch (err) {
+      setToolResults((prev) => ({
+        ...prev,
+        [name]: `Error: ${(err as Error).message}`,
+      }));
+    } finally {
+      setToolLoading(null);
+    }
+  };
 
   const runTeamStatus = async () => {
     setTeamStatusLoading(true);
@@ -228,17 +284,55 @@ export default function AgentsPage() {
                     </div>
                     <div>
                       <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                        Exposed Tools ({mcpStatus.tools.length})
+                        Exposed Tools ({mcpStatus.tools.length}) — click Run to
+                        call them via MCP
                       </p>
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="space-y-2">
                         {mcpStatus.tools.map((tool) => (
-                          <Badge
+                          <div
                             key={tool.name}
-                            variant="secondary"
-                            className="text-[10px] font-normal"
+                            className="rounded-lg border border-border bg-secondary/20 p-2"
                           >
-                            {tool.name.replace(/_/g, " ")}
-                          </Badge>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-medium capitalize">
+                                {tool.name.replace(/_/g, " ")}
+                              </span>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-xs"
+                                onClick={() => runMcpTool(tool.name)}
+                                disabled={toolLoading !== null}
+                              >
+                                {toolLoading === tool.name ? (
+                                  <Loader2 className="mr-1 size-3 animate-spin" />
+                                ) : (
+                                  <Terminal className="mr-1 size-3" />
+                                )}
+                                Run
+                              </Button>
+                            </div>
+                            {taskTools.has(tool.name) && (
+                              <Input
+                                value={toolInputs[tool.name] || ""}
+                                onChange={(e) =>
+                                  setToolInputs((prev) => ({
+                                    ...prev,
+                                    [tool.name]: e.target.value,
+                                  }))
+                                }
+                                placeholder={`Task for ${tool.name
+                                  .replace(/_/g, " ")
+                                  .toLowerCase()}…`}
+                                className="mt-1.5 h-7 text-xs"
+                              />
+                            )}
+                            {toolResults[tool.name] && (
+                              <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px] leading-relaxed text-muted-foreground">
+                                {toolResults[tool.name]}
+                              </pre>
+                            )}
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -246,6 +340,22 @@ export default function AgentsPage() {
                 ) : null}
 
                 <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <Button
+                    size="sm"
+                    onClick={connectMcp}
+                    disabled={connectLoading}
+                  >
+                    {connectLoading ? (
+                      <Loader2 className="mr-2 size-3.5 animate-spin" />
+                    ) : mcpStatus?.connected ? (
+                      <RefreshCw className="mr-2 size-3.5" />
+                    ) : (
+                      <Plug className="mr-2 size-3.5" />
+                    )}
+                    {mcpStatus?.connected
+                      ? "Refresh MCP Connection"
+                      : "Connect MCP"}
+                  </Button>
                   <Button
                     size="sm"
                     variant="outline"

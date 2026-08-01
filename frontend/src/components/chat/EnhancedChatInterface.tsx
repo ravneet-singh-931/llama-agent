@@ -33,15 +33,27 @@ interface AgentSuggestion {
   confidence: number;
 }
 
-export function EnhancedChatInterface() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "1",
-      role: "assistant",
-      content: "Hello! I'm your enhanced AI assistant with multi-agent collaboration capabilities. I can help you with research, coding, writing, planning, and analysis tasks. How can I assist you today?",
-      timestamp: new Date(),
-    }
-  ]);
+interface EnhancedChatInterfaceProps {
+  conversationId?: string | null;
+  initialMessages?: Message[];
+}
+
+export function EnhancedChatInterface({
+  conversationId = null,
+  initialMessages = [],
+}: EnhancedChatInterfaceProps) {
+  const [messages, setMessages] = useState<Message[]>(
+    initialMessages.length > 0
+      ? initialMessages
+      : [
+          {
+            id: "1",
+            role: "assistant",
+            content: "Hello! I'm your enhanced AI assistant with multi-agent collaboration capabilities. I can help you with research, coding, writing, planning, and analysis tasks. How can I assist you today?",
+            timestamp: new Date(),
+          },
+        ]
+  );
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [agentSuggestions, setAgentSuggestions] = useState<AgentSuggestion[]>([]);
@@ -133,7 +145,8 @@ export function EnhancedChatInterface() {
               : m
           )
         );
-      }
+      },
+      conversationId
     );
   };
 
@@ -159,6 +172,12 @@ export function EnhancedChatInterface() {
               Enhanced Chat Interface
             </CardTitle>
             <div className="flex items-center gap-2">
+              {conversationId && (
+                <Badge variant="outline" className="gap-1 text-xs">
+                  <Check className="h-3 w-3 text-emerald-500" />
+                  Conversation saved
+                </Badge>
+              )}
               {selectedAgent && (
                 <Badge className="bg-primary/10 text-primary border-primary/20 gap-1">
                   <Zap className="h-3 w-3" />

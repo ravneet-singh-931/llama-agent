@@ -91,6 +91,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=10000, description="Chat message")
     user_id: Optional[str] = "default"
     context: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -568,6 +569,8 @@ async def chat(
     facts = app.state.facts
     rag = app.state.rag
     logger = app.state.logger
+    user_id = str(user["id"]) if user else "guest"
+    conversation_id = request.conversation_id or "default"
     
     monitor.track_request()
     query_type = "general"
@@ -682,14 +685,20 @@ async def chat(
                         facts_context = facts.get_context_string()
                         enhanced_input = f"{request.message}\n\n{facts_context}\n\nIMPORTANT: Always respond in English."
                         from llama_agent1 import run_agent
-                        response = await run_agent(enhanced_input)
+                        response = await run_agent(
+                            enhanced_input,
+                            memory=memory,
+                            facts=facts,
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                        )
         
         # Calculate response time
         elapsed = (datetime.now() - start_time).total_seconds()
         
-        # Log interaction
-        memory.add_message("user", request.message)
-        memory.add_message("assistant", str(response))
+        # Log interaction (scoped to this user's conversation)
+        memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+        memory.add_message("assistant", str(response), user_id=user_id, conversation_id=conversation_id)
         logger.log_interaction(request.message, str(response), [], elapsed)
         
         # Enterprise monitoring: business metrics + SLA + alert sweep
@@ -733,48 +742,59 @@ async def chat_stream(
 ):
     """Chat with streaming response (Server-Sent Events)."""
     from llama_agent1 import run_agent_stream
-    from modules.memory import ConversationMemory, FactMemory
-    from modules.rag import SimpleRAG
 
-    memory = ConversationMemory()
-    facts = FactMemory()
-    rag = SimpleRAG()
+    # Single unified memory/facts instances (shared with /chat and /memory),
+    # so EVERY response - general agent, multi-agent, and special commands -
+    # is saved to the same conversation history.
+    memory = app.state.memory
+    facts = app.state.facts
+    rag = app.state.rag
+    user_id = str(user["id"]) if user else "guest"
+    conversation_id = request.conversation_id or "default"
 
     async def event_generator():
+        # Helper: record the assistant reply, emit it, then signal stream end.
+        async def done(text: str):
+            memory.add_message("assistant", text, user_id=user_id, conversation_id=conversation_id)
+            yield f"data: {escape_sse(text)}\n\n"
+            yield "data: [DONE]\n\n"
+
         # Handle special commands first
         if request.message.lower().startswith("remember "):
             content = request.message[9:].strip()
+            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             if "=" in content:
                 key, value = content.split("=", 1)
                 facts.remember(key.strip(), value.strip())
-                yield f"data: {escape_sse(f'✅ Remembered: {key.strip()} = {value.strip()}')}\n\n"
+                reply = f"✅ Remembered: {key.strip()} = {value.strip()}"
             else:
-                yield "data: Usage: remember key = value\n\n"
-            yield "data: [DONE]\n\n"
+                reply = "Usage: remember key = value"
+            async for chunk in done(reply):
+                yield chunk
             return
 
         elif request.message.lower().startswith("recall "):
             key = request.message[7:].strip()
+            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             result = facts.recall(key)
-            yield f"data: {escape_sse(result)}\n\n"
-            yield "data: [DONE]\n\n"
+            async for chunk in done(result):
+                yield chunk
             return
 
         elif request.message.lower() == "show facts":
+            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             all_facts = facts.get_all_facts()
-            if all_facts:
-                result = "\n".join(f"- {k}: {v}" for k, v in all_facts.items())
-            else:
-                result = "No facts stored."
-            yield f"data: {escape_sse(result)}\n\n"
-            yield "data: [DONE]\n\n"
+            result = "\n".join(f"- {k}: {v}" for k, v in all_facts.items()) if all_facts else "No facts stored."
+            async for chunk in done(result):
+                yield chunk
             return
 
         elif request.message.lower().startswith("search "):
             query = request.message[7:].strip()
+            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             result = rag.get_context(query)
-            yield f"data: {escape_sse(result)}\n\n"
-            yield "data: [DONE]\n\n"
+            async for chunk in done(result):
+                yield chunk
             return
 
         # Check facts
@@ -784,8 +804,10 @@ async def chat_stream(
             key_lower = key.lower()
             if (key_lower in lower_input and
                 any(phrase in lower_input for phrase in ["what", "know", "recall", "tell", "remind"])):
-                yield f"data: {escape_sse(f'Your {key} is **{value}**.')}\n\n"
-                yield "data: [DONE]\n\n"
+                memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+                reply = f"Your {key} is **{value}**."
+                async for chunk in done(reply):
+                    yield chunk
                 return
 
         # Check if this is a specialized task for multi-agent
@@ -827,21 +849,27 @@ async def chat_stream(
 
         if use_multi_agent:
             # Multi-agent doesn't support streaming — collect and yield as one chunk
+            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             orchestrator = MultiAgentOrchestrator()
             try:
                 result = orchestrator.agents[agent_type].execute(request.message)
             except Exception as e:
                 result = f"⚠️ Error from {agent_type} agent: {e}"
+            memory.add_message("assistant", result, user_id=user_id, conversation_id=conversation_id)
             yield f"data: {escape_sse(result)}\n\n"
+            yield "data: [DONE]\n\n"
         else:
-            # Stream from general ReAct agent
-            facts_context = facts.get_context_string()
-            enhanced_input = f"{request.message}\n\n{facts_context}\n\nIMPORTANT: Always respond in English."
-
-            for token in run_agent_stream(enhanced_input):
+            # Stream from general ReAct agent (it reads + writes the SAME memory
+            # instances, so the response is saved to this user's conversation).
+            for token in run_agent_stream(
+                request.message,
+                memory=memory,
+                facts=facts,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            ):
                 yield f"data: {escape_sse(token)}\n\n"
-
-        yield "data: [DONE]\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -1024,26 +1052,102 @@ async def list_documents():
 
 
 @app.get("/memory")
-async def get_memory():
-    """Get conversation memory"""
+async def get_memory(user = Depends(optional_auth)):
+    """Get conversation memory (scoped to the current user)"""
     try:
         memory = app.state.memory
-        recent = memory.get_recent(20)
+        user_id = str(user["id"]) if user else "guest"
+        recent = memory.get_recent(20, user_id=user_id)
         stats = memory.get_stats()
-        return {"stats": stats, "recent_messages": recent}
+        conversations = memory.get_conversations(user_id)
+        return {
+            "stats": stats,
+            "recent_messages": recent,
+            "conversations": conversations,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/memory")
-async def clear_memory():
-    """Clear all memory"""
+async def clear_memory(user = Depends(optional_auth)):
+    """Clear memory for the current user (conversations + facts)"""
     try:
         memory = app.state.memory
         facts = app.state.facts
-        memory.clear()
+        user_id = str(user["id"]) if user else "guest"
+        memory.clear(user_id=user_id)
         facts.clear()
-        return {"status": "success", "message": "Memory cleared"}
+        return {"status": "success", "message": f"Memory cleared for {user_id}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ CONVERSATION ENDPOINTS ============
+# Per-user conversation history used by the Next.js chat-history sidebar.
+# Chats are created/resumed by conversation_id, so each conversation in the
+# sidebar maps 1:1 to a persisted conversation in the memory store.
+
+
+@app.get("/conversations")
+async def list_conversations(user = Depends(optional_auth)):
+    """List the current user's conversations (newest first)"""
+    try:
+        memory = app.state.memory
+        user_id = str(user["id"]) if user else "guest"
+        return {"conversations": memory.get_conversations(user_id)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str, user = Depends(optional_auth)):
+    """Get one conversation including its full message history"""
+    try:
+        memory = app.state.memory
+        user_id = str(user["id"]) if user else "guest"
+        summary = memory.get_conversation(user_id, conversation_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        summary["messages"] = memory.get_messages(user_id, conversation_id)
+        return summary
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CreateConversationRequest(BaseModel):
+    """Create conversation request"""
+    title: Optional[str] = Field(default="New chat", max_length=200)
+
+
+@app.post("/conversations")
+async def create_conversation(request: CreateConversationRequest = None,
+                              user = Depends(optional_auth)):
+    """Create a new empty conversation and return its id"""
+    try:
+        memory = app.state.memory
+        user_id = str(user["id"]) if user else "guest"
+        title = request.title if request is not None and request.title else "New chat"
+        conv = memory.create_conversation(user_id, title=title)
+        return conv
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str, user = Depends(optional_auth)):
+    """Delete a conversation (only the owner may delete it)"""
+    try:
+        memory = app.state.memory
+        user_id = str(user["id"]) if user else "guest"
+        deleted = memory.delete_conversation(user_id, conversation_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return {"status": "success", "conversation_id": conversation_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -16,14 +16,24 @@ interface ChatState {
   cancelStream: () => void;
   clearMessages: () => void;
   setConversations: (convs: Conversation[]) => void;
-  loadConversation: (id: string) => void;
-  deleteConversation: (id: string) => void;
-  newConversation: () => void;
+  fetchConversations: () => Promise<void>;
+  loadConversation: (id: string) => Promise<void>;
+  deleteConversation: (id: string) => Promise<void>;
+  newConversation: () => Promise<void>;
   appendMessage: (msg: ChatMessage) => void;
 
   // Internal
   _abortController: AbortController | null;
   _setStreaming: (streaming: boolean) => void;
+}
+
+function toChatMessage(role: "user" | "assistant", content: string, timestamp: string): ChatMessage {
+  return {
+    id: generateId(),
+    role,
+    content,
+    timestamp: timestamp || new Date().toISOString(),
+  };
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -105,7 +115,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               : m
           ),
         }));
-      }
+      },
+      state.currentConversationId
     );
 
     set({ _abortController: controller });
@@ -124,19 +135,55 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setConversations: (conversations) => set({ conversations }),
 
-  loadConversation: (id) => {
-    // In a full implementation, this would fetch messages from API
-    set({ currentConversationId: id });
+  fetchConversations: async () => {
+    try {
+      const res = await api.getConversations();
+      set({ conversations: res.conversations });
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
   },
 
-  deleteConversation: (id) => {
-    set((s) => ({
-      conversations: s.conversations.filter((c) => c.id !== id),
-      currentConversationId:
-        s.currentConversationId === id ? null : s.currentConversationId,
-    }));
+  loadConversation: async (id) => {
+    try {
+      const conv = await api.getConversation(id);
+      const messages = conv.messages.map((m) =>
+        toChatMessage(m.role, m.content, m.timestamp)
+      );
+      set({ currentConversationId: id, messages, error: null });
+      // Refresh the list so ordering/titles stay current
+      get().fetchConversations();
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
   },
 
-  newConversation: () =>
-    set({ messages: [], currentConversationId: null }),
+  deleteConversation: async (id) => {
+    try {
+      await api.deleteConversation(id);
+      set((s) => ({
+        conversations: s.conversations.filter((c) => c.id !== id),
+        currentConversationId:
+          s.currentConversationId === id ? null : s.currentConversationId,
+        messages: s.currentConversationId === id ? [] : s.messages,
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  newConversation: async () => {
+    try {
+      const conv = await api.createConversation();
+      set({
+        messages: [],
+        currentConversationId: conv.id,
+        streamingContent: "",
+        error: null,
+      });
+      get().fetchConversations();
+    } catch (err) {
+      set({ error: (err as Error).message, messages: [], currentConversationId: null });
+    }
+  },
 }));
