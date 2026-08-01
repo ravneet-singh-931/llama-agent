@@ -12,6 +12,7 @@ Features:
 
 import asyncio
 import os
+import re
 import sys
 from datetime import datetime
 from typing import Optional, List, Dict
@@ -555,6 +556,77 @@ async def websocket_status():
 
 # ============ CHAT ENDPOINTS ============
 
+# Name memory: users can tell the agent their name in plain chat
+# ("my name is X" / "call me X" / "i am X") and later ask it back
+# ("what is my name?"). The name is stored as a fact under the key
+# "user's name" - deliberately NOT a short key like "name", so the
+# generic substring fact check below cannot false-positive on questions
+# like "what is the name of the capital of France?".
+
+_NAME_TOKEN = r"[a-z][a-z0-9'.-]*"
+_NAME_EXTRACT_PATTERNS = [
+    # Strong signals - accept whatever name-like phrase follows.
+    re.compile(r"my name is\s+(" + _NAME_TOKEN + r"(?:\s+" + _NAME_TOKEN + r"){0,3})", re.IGNORECASE),
+    re.compile(r"call me\s+(" + _NAME_TOKEN + r"(?:\s+" + _NAME_TOKEN + r"){0,3})", re.IGNORECASE),
+    re.compile(r"i am called\s+(" + _NAME_TOKEN + r"(?:\s+" + _NAME_TOKEN + r"){0,3})", re.IGNORECASE),
+    # Weak signals - "i am X" / "i'm X" can catch verbs ("i am happy"),
+    # so these are vetoed against the stopword set below.
+    re.compile(r"\bi am\s+(" + _NAME_TOKEN + r"(?:\s+" + _NAME_TOKEN + r")?)", re.IGNORECASE),
+    re.compile(r"\bi'm\s+(" + _NAME_TOKEN + r"(?:\s+" + _NAME_TOKEN + r")?)", re.IGNORECASE),
+]
+
+_NAME_STOPWORDS = {
+    "asking", "wondering", "trying", "hoping", "planning", "working",
+    "using", "building", "testing", "running", "starting", "checking",
+    "looking", "interested", "learning", "going", "gonna", "wanting",
+    "willing", "ready", "here", "back", "sorry", "happy", "fine", "good",
+    "great", "new", "not", "just", "a", "an", "the", "my", "your", "his",
+    "her", "this", "that", "these", "those", "in", "on", "at", "from",
+    "with", "for", "to", "of", "and", "or", "but", "me", "we", "you",
+    "they", "it", "am", "is", "are", "was", "were", "be", "have", "has",
+    "had", "do", "does", "did", "very", "really", "actually", "also",
+    "too", "now", "today", "ok", "okay", "sure", "please", "thanks",
+    "need", "wish", "want", "know", "someone", "something",
+}
+
+_NAME_QUESTION_PATTERNS = [
+    re.compile(r"what.{0,8}(?:is|'s)\s+my name", re.IGNORECASE),
+    re.compile(r"what'?s\s+my name", re.IGNORECASE),
+    re.compile(r"do you (?:know|remember) my name", re.IGNORECASE),
+    re.compile(r"what do you call me", re.IGNORECASE),
+    re.compile(r"(?:tell|remind).{0,12}my name", re.IGNORECASE),
+    re.compile(r"who am i", re.IGNORECASE),
+]
+
+
+def extract_name_from_message(message: str) -> Optional[str]:
+    """Return a name if the message introduces one, otherwise None."""
+    for i, pattern in enumerate(_NAME_EXTRACT_PATTERNS):
+        match = pattern.search(message)
+        if not match:
+            continue
+        tokens = [t for t in match.group(1).split()]
+        # Trim trailing stopwords: "call me Mary Jane please" -> "Mary Jane"
+        while tokens and tokens[-1].lower() in _NAME_STOPWORDS:
+            tokens.pop()
+        if not tokens:
+            continue
+        # First token must not be a stopword: "my name is the best" -> reject
+        if tokens[0].lower() in _NAME_STOPWORDS:
+            continue
+        if i >= 3:  # weak "i am X" / "i'm X" patterns - veto any stopword
+            if any(t.lower() in _NAME_STOPWORDS for t in tokens):
+                continue
+        name = " ".join(tokens).strip(".,!?;:()").strip()
+        return name[:50]
+    return None
+
+
+def is_name_question(message: str) -> bool:
+    """True if the message asks the agent what the user's name is."""
+    return any(p.search(message) for p in _NAME_QUESTION_PATTERNS)
+
+
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
@@ -574,6 +646,8 @@ async def chat(
     
     monitor.track_request()
     query_type = "general"
+    # Name introduced in plain chat? ("my name is X" / "call me X" / "i am X")
+    detected_name = extract_name_from_message(request.message)
     
     # Enterprise security: detect dangerous input patterns (sanitize + audit).
     # The sanitizer is used as a detection layer - if it alters the message,
@@ -612,6 +686,25 @@ async def chat(
         elif request.message.lower().startswith("search "):
             query = request.message[7:].strip()
             response = rag.get_context(query)
+        
+        elif detected_name:
+            # Name memory: "my name is X" stores the user's name as a fact so
+            # it survives across conversations and can be recalled later.
+            facts.remember("user's name", detected_name)
+            response = f"Nice to meet you, **{detected_name}**! I've remembered your name."
+            query_type = "name_introduction"
+        
+        elif is_name_question(request.message):
+            # "what is my name?" recalls the stored name. MUST run before the
+            # multi-agent routing in the else-branch below, which would
+            # otherwise treat "what is my name?" (matches "what is") as a
+            # research task and answer with a generic essay instead.
+            stored_name = facts.recall("user's name")
+            if "don't remember" in stored_name.lower():
+                response = "I don't know your name yet. Tell me by saying something like \"My name is ...\""
+            else:
+                response = f"Your name is **{stored_name}**!"
+            query_type = "name_question"
         
         else:
             # Check if user is asking about a stored fact
@@ -794,6 +887,30 @@ async def chat_stream(
             memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             result = rag.get_context(query)
             async for chunk in done(result):
+                yield chunk
+            return
+
+        # Name memory (BEFORE multi-agent routing): "my name is X" stores the
+        # user's name as a fact; "what is my name?" recalls it. Without this,
+        # "what is my name?" (matches "what is") routes to the Research Agent
+        # and gets a generic essay instead of the stored name.
+        detected_name = extract_name_from_message(request.message)
+        if detected_name:
+            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            facts.remember("user's name", detected_name)
+            reply = f"Nice to meet you, **{detected_name}**! I've remembered your name."
+            async for chunk in done(reply):
+                yield chunk
+            return
+
+        if is_name_question(request.message):
+            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            stored_name = facts.recall("user's name")
+            if "don't remember" in stored_name.lower():
+                reply = "I don't know your name yet. Tell me by saying something like \"My name is ...\""
+            else:
+                reply = f"Your name is **{stored_name}**!"
+            async for chunk in done(reply):
                 yield chunk
             return
 
