@@ -16,6 +16,13 @@ import {
   Clock,
   TrendingUp,
   Zap,
+  ExternalLink,
+  Cpu,
+  HardDrive,
+  Wifi,
+  Globe,
+  Terminal,
+  Monitor,
 } from "lucide-react";
 import { AppShell } from "@/components/layout/app-shell";
 import { Card } from "@/components/ui/card";
@@ -202,9 +209,47 @@ export default function MonitoringPage() {
                   </div>
                 )}
               </Card>
-            </motion.div>
+             </motion.div>
 
-            {/* Business Metrics + Performance */}
+             {/* Infrastructure Services */}
+             <motion.div
+               initial={{ opacity: 0, y: 10 }}
+               animate={{ opacity: 1, y: 0 }}
+               transition={{ delay: 0.15 }}
+             >
+               <Card className="p-5">
+                 <div className="flex items-center gap-3 mb-4">
+                   <Globe className="size-5 text-primary" />
+                   <h3 className="font-semibold">Infrastructure Services</h3>
+                 </div>
+                 <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3 md:grid-cols-4">
+                   {[
+                     { name: "Grafana", href: "/grafana/", icon: Monitor, color: "text-emerald-400" },
+                     { name: "Prometheus", href: "/prometheus/", icon: Cpu, color: "text-red-400" },
+                     { name: "Loki", href: "/loki/", icon: HardDrive, color: "text-blue-400" },
+                     { name: "Phoenix", href: "/phoenix/", icon: Terminal, color: "text-purple-400" },
+                     { name: "MCP Server", href: "/mcp/", icon: Terminal, color: "text-amber-400" },
+                     { name: "Node Exporter", href: "/node-exporter/", icon: Cpu, color: "text-cyan-400" },
+                     { name: "Postgres", href: "https://localhost:5432", icon: Database, color: "text-emerald-400" },
+                     { name: "Redis", href: "https://localhost:6379", icon: Database, color: "text-red-400" },
+                   ].map((svc) => (
+                     <a
+                       key={svc.name}
+                       href={svc.href}
+                       target="_blank"
+                       rel="noopener noreferrer"
+                       className="flex items-center gap-2 rounded-lg bg-secondary/30 px-3 py-2 text-muted-foreground hover:bg-secondary/50 hover:text-foreground transition-colors"
+                     >
+                       <svc.icon className={`size-4 ${svc.color}`} />
+                       <span>{svc.name}</span>
+                       <ExternalLink className="size-3 ml-auto opacity-50" />
+                     </a>
+                   ))}
+                 </div>
+               </Card>
+             </motion.div>
+
+             {/* Business Metrics + Performance */}
             <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
               <StatCard
                 icon={Activity}
