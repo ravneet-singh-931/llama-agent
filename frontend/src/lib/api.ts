@@ -308,6 +308,25 @@ class ApiClient {
     }>("GET", "/health");
   }
 
+  async getMonitoringDashboard() {
+    return this.request<{
+      timestamp: string;
+      business: Record<string, any>;
+      costs: Record<string, any>;
+      sla: Record<string, any>;
+      alerts: any[];
+      feature_flags: Record<string, any>;
+      db_health: Record<string, any>;
+    }>("GET", "/monitoring/dashboard");
+  }
+
+  async getMetrics() {
+    return this.request<{
+      health: Record<string, any>;
+      metrics: Record<string, any>;
+    }>("GET", "/metrics/json");
+  }
+
   async metrics() {
     return this.request("GET", "/metrics/json");
   }

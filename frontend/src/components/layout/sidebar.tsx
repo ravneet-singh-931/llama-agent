@@ -13,6 +13,7 @@ import {
   History,
   Brain,
   Trash2,
+  BarChart3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -24,6 +25,7 @@ const navItems = [
   { href: "/dashboard", label: "Chat", icon: MessageSquare },
   { href: "/agents", label: "Agent Team", icon: Bot },
   { href: "/documents", label: "Documents", icon: FileText },
+  { href: "/monitoring", label: "Monitoring", icon: BarChart3 },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
