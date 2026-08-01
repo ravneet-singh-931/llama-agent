@@ -25,7 +25,6 @@ const navItems = [
   { href: "/dashboard", label: "Chat", icon: MessageSquare },
   { href: "/agents", label: "Agent Team", icon: Bot },
   { href: "/documents", label: "Documents", icon: FileText },
-  { href: "/monitoring", label: "Monitoring", icon: BarChart3 },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
