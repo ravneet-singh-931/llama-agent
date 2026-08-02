@@ -298,6 +298,31 @@ class ApiClient {
     );
   }
 
+  // Real Agent Team statistics (tasks handled per agent + live API health)
+  async getAgentStats() {
+    return this.request<{
+      agents: {
+        key: string;
+        name: string;
+        tasks_handled: number;
+        last_used: string | null;
+      }[];
+      health: {
+        status: string;
+        uptime_seconds: number;
+        uptime_human: string;
+        total_requests: number;
+        total_errors: number;
+        error_rate: string;
+      };
+      metrics: {
+        total_agents: number;
+        tasks_handled_total: number;
+      };
+      generated_at: string;
+    }>("GET", "/agents/stats");
+  }
+
   // Health & Metrics
   async health() {
     return this.request<{

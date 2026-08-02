@@ -1,90 +1,150 @@
 "use client";
 
-import { useState, useEffect } from "react";
+// Agent Team dashboard backed by REAL data only.
+// - Per-agent tasks handled / last used: counted by the API from actual
+//   dispatches (chat multi-agent routing + MCP tool calls), served by
+//   GET /agents/stats.
+// - Health cards (requests, error rate, uptime): live PerformanceMonitor.
+// - "Trigger Team Coordination" actually runs the MCP `collaborate` tool.
+// No simulated values, no random mutations.
+
+import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Loader2, Bot, Zap, Brain, Search, FileText, Users, Activity } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import {
+  Loader2,
+  Bot,
+  Zap,
+  Brain,
+  Search,
+  FileText,
+  Code,
+  Workflow,
+  Users,
+  Activity,
+  RefreshCw,
+  AlertCircle,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 
-interface AgentStatus {
+// Static team definitions (names match multi_agent.py / the agents page).
+// Runtime stats below come from the API.
+const AGENT_DEFS = [
+  { key: "research", name: "Research Agent", role: "Gathers and summarizes information", icon: Search },
+  { key: "coder", name: "Coder Agent", role: "Writes, debugs, and explains code", icon: Code },
+  { key: "writer", name: "Writer Agent", role: "Creates articles, docs, and content", icon: FileText },
+  { key: "analyzer", name: "Analyzer Agent", role: "Finds patterns and insights in data", icon: Workflow },
+  { key: "planner", name: "Planner Agent", role: "Builds plans, roadmaps, and strategies", icon: Brain },
+] as const;
+
+interface AgentStat {
+  key: string;
   name: string;
-  status: "active" | "idle" | "busy";
-  currentTask?: string;
-  lastActive: Date;
-  tasksCompleted: number;
-  avgResponseTime: number;
+  tasks_handled: number;
+  last_used: string | null;
+}
+interface TeamStats {
+  agents: AgentStat[];
+  health: {
+    status: string;
+    uptime_human: string;
+    total_requests: number;
+    total_errors: number;
+    error_rate: string;
+  };
+  metrics: { total_agents: number; tasks_handled_total: number };
+  generated_at: string;
 }
 
-interface CollaborationMetrics {
-  totalAgents: number;
-  activeAgents: number;
-  tasksInProgress: number;
-  tasksCompleted: number;
-  avgCollaborationTime: number;
+type DerivedStatus = "active" | "idle" | "ready";
+
+const ACTIVE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+function deriveStatus(lastUsed: string | null): DerivedStatus {
+  if (!lastUsed) return "ready";
+  return Date.now() - new Date(lastUsed).getTime() < ACTIVE_WINDOW_MS
+    ? "active"
+    : "idle";
 }
+
+function formatLastUsed(lastUsed: string | null): string {
+  if (!lastUsed) return "Never";
+  const minutes = Math.max(
+    0,
+    Math.floor((Date.now() - new Date(lastUsed).getTime()) / 60000)
+  );
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m ago`;
+}
+
+const statusStyles: Record<
+  DerivedStatus,
+  { dot: string; badge: string; label: string }
+> = {
+  active: { dot: "bg-emerald-500", badge: "bg-emerald-100 text-emerald-700", label: "Active" },
+  idle: { dot: "bg-amber-500", badge: "bg-amber-100 text-amber-700", label: "Idle" },
+  ready: { dot: "bg-gray-400", badge: "bg-gray-100 text-gray-700", label: "Ready" },
+};
 
 export function AgentCollaborationDashboard() {
-  const [agents, setAgents] = useState<AgentStatus[]>([
-    { name: "Research Agent", status: "active", currentTask: "Analyzing market trends", lastActive: new Date(), tasksCompleted: 42, avgResponseTime: 2.3 },
-    { name: "Coder Agent", status: "busy", currentTask: "Writing React components", lastActive: new Date(), tasksCompleted: 38, avgResponseTime: 1.8 },
-    { name: "Writer Agent", status: "idle", currentTask: "Waiting for task", lastActive: new Date(Date.now() - 300000), tasksCompleted: 25, avgResponseTime: 3.1 },
-    { name: "Planner Agent", status: "active", currentTask: "Creating project roadmap", lastActive: new Date(), tasksCompleted: 18, avgResponseTime: 4.2 },
-    { name: "Analyzer Agent", status: "idle", currentTask: "Waiting for data", lastActive: new Date(Date.now() - 600000), tasksCompleted: 15, avgResponseTime: 2.7 },
-  ]);
+  const [stats, setStats] = useState<TeamStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const [metrics, setMetrics] = useState<CollaborationMetrics>({
-    totalAgents: 5,
-    activeAgents: 2,
-    tasksInProgress: 3,
-    tasksCompleted: 138,
-    avgCollaborationTime: 2.8,
-  });
+  const [collabTask, setCollabTask] = useState("");
+  const [collabLoading, setCollabLoading] = useState(false);
+  const [collabResult, setCollabResult] = useState<string | null>(null);
 
-  const [isLoading, setIsLoading] = useState(false);
-
-  useEffect(() => {
-    // Simulate real-time updates
-    const interval = setInterval(() => {
-      setAgents(prev => prev.map(agent => ({
-        ...agent,
-        lastActive: Math.random() > 0.7 ? new Date() : agent.lastActive,
-        status: Math.random() > 0.8 ? (agent.status === "idle" ? "active" : "idle") : agent.status,
-        tasksCompleted: agent.tasksCompleted + (Math.random() > 0.95 ? 1 : 0),
-      })));
-      
-      setMetrics(prev => ({
-        ...prev,
-        tasksCompleted: prev.tasksCompleted + (Math.random() > 0.9 ? 1 : 0),
-        activeAgents: Math.floor(Math.random() * 3) + 2,
-        tasksInProgress: Math.floor(Math.random() * 4) + 1,
-      }));
-    }, 5000);
-
-    return () => clearInterval(interval);
+  // Promise-callback style (matches agents/page.tsx) so no setState runs
+  // synchronously from the polling effect below.
+  const refresh = useCallback(() => {
+    api
+      .getAgentStats()
+      .then((data) => {
+        setStats(data);
+        setError(null);
+      })
+      .catch((err) => setError((err as Error).message))
+      .finally(() => setLoading(false));
   }, []);
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "active": return "bg-emerald-500";
-      case "busy": return "bg-amber-500";
-      case "idle": return "bg-gray-400";
-      default: return "bg-gray-400";
+  // Load immediately, then poll every 10s so the dashboard stays live.
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 10000);
+    return () => clearInterval(interval);
+  }, [refresh]);
+
+  const runCollaborate = async () => {
+    const task =
+      collabTask.trim() ||
+      "Plan, research, and summarize the best approach to improve this product's user onboarding.";
+    setCollabLoading(true);
+    setCollabResult(null);
+    try {
+      const res = await api.mcpToolCall("collaborate", { task });
+      setCollabResult(res.isError ? `Error: ${res.result}` : res.result);
+      // A collaborate run used every agent — refresh stats right away.
+      refresh();
+    } catch (err) {
+      setCollabResult(`Error: ${(err as Error).message}`);
+    } finally {
+      setCollabLoading(false);
     }
   };
 
-  const getStatusText = (status: string) => {
-    switch (status) {
-      case "active": return "Active";
-      case "busy": return "Busy";
-      case "idle": return "Idle";
-      default: return "Unknown";
-    }
-  };
+  const totalHandled = stats?.metrics.tasks_handled_total ?? 0;
+  const totalRequests = stats?.health.total_requests ?? 0;
+  const errorRate = stats?.health.error_rate ?? "0.00%";
+  const healthStatus = stats?.health.status ?? "unknown";
 
   return (
     <div className="space-y-6">
-      {/* Metrics Overview */}
+      {/* Metrics Overview (real data from the API) */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -92,82 +152,143 @@ export function AgentCollaborationDashboard() {
             <Users className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{metrics.totalAgents}</div>
+            <div className="text-2xl font-bold">
+              {loading ? "—" : stats?.metrics.total_agents ?? "—"}
+            </div>
             <p className="text-xs text-muted-foreground">Registered agents</p>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Active Agents</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-emerald-600">{metrics.activeAgents}</div>
-            <p className="text-xs text-muted-foreground">Currently active</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Tasks in Progress</CardTitle>
-            <Loader2 className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-amber-600">{metrics.tasksInProgress}</div>
-            <p className="text-xs text-muted-foreground">Currently processing</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Tasks Completed</CardTitle>
+            <CardTitle className="text-sm font-medium">Tasks Handled</CardTitle>
             <Zap className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{metrics.tasksCompleted}</div>
-            <p className="text-xs text-muted-foreground">All time total</p>
+            <div className="text-2xl font-bold text-emerald-600">
+              {loading ? "—" : totalHandled}
+            </div>
+            <p className="text-xs text-muted-foreground">Real dispatches since API start</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">API Requests</CardTitle>
+            <Activity className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-amber-600">
+              {loading ? "—" : totalRequests}
+            </div>
+            <p className="text-xs text-muted-foreground">Since API start</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Error Rate</CardTitle>
+            <Bot className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div
+              className={cn(
+                "text-2xl font-bold",
+                healthStatus === "healthy"
+                  ? "text-emerald-600"
+                  : "text-red-600"
+              )}
+            >
+              {loading ? "—" : errorRate}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {stats ? `Status: ${healthStatus}` : "Live monitor"}
+            </p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Agent Status Grid */}
+      {error && (
+        <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-red-500">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span>Could not load agent stats: {error}</span>
+          <Button size="sm" variant="outline" className="ml-auto" onClick={refresh}>
+            <RefreshCw className="mr-1 h-3 w-3" /> Retry
+          </Button>
+        </div>
+      )}
+
+      {/* Agent Status Grid (real tasks handled / last used) */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Bot className="h-5 w-5" />
             Agent Status & Collaboration
           </CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Active = handled a task in the last 5 minutes. Tasks and timestamps
+            are counted from real dispatches by the API.
+          </p>
         </CardHeader>
         <CardContent>
-          <div className="space-y-4">
-            {agents.map((agent) => (
-              <div key={agent.name} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-4 bg-muted/50 rounded-lg border">
-                <div className="flex items-center gap-4">
-                  <div className={cn("w-3 h-3 rounded-full", getStatusColor(agent.status))} />
-                  <div>
-                    <div className="font-medium">{agent.name}</div>
-                    <div className="text-sm text-muted-foreground">
-                      {agent.currentTask ? `Current: ${agent.currentTask}` : "Waiting for task"}
+          {loading && !stats ? (
+            <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading real agent stats…
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {AGENT_DEFS.map((def) => {
+                const stat = stats?.agents.find((a) => a.key === def.key);
+                const status = deriveStatus(stat?.last_used ?? null);
+                const style = statusStyles[status];
+                const Icon = def.icon;
+                return (
+                  <div
+                    key={def.key}
+                    className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-4 bg-muted/50 rounded-lg border"
+                  >
+                    <div className="flex items-center gap-4">
+                      <div
+                        className={cn(
+                          "w-3 h-3 rounded-full",
+                          style.dot
+                        )}
+                      />
+                      <div className="flex size-8 items-center justify-center rounded-lg bg-secondary">
+                        <Icon className="size-4 text-muted-foreground" />
+                      </div>
+                      <div>
+                        <div className="font-medium">{def.name}</div>
+                        <div className="text-sm text-muted-foreground">
+                          {def.role}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4 text-sm text-muted-foreground">
+                      <span
+                        className={cn(
+                          "flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium",
+                          style.badge
+                        )}
+                      >
+                        {style.label}
+                      </span>
+                      <span>Tasks: {stat?.tasks_handled ?? 0}</span>
+                      <span>Last: {formatLastUsed(stat?.last_used ?? null)}</span>
                     </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                  <span className={cn("flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium", 
-                    agent.status === "active" && "bg-emerald-100 text-emerald-700",
-                    agent.status === "busy" && "bg-amber-100 text-amber-700",
-                    agent.status === "idle" && "bg-gray-100 text-gray-700"
-                  )}>
-                    {getStatusText(agent.status)}
-                  </span>
-                  <span>Tasks: {agent.tasksCompleted}</span>
-                  <span>Avg: {agent.avgResponseTime}s</span>
-                  <span>Last: {Math.floor((Date.now() - agent.lastActive.getTime()) / 60000)}m ago</span>
-                </div>
-              </div>
-            ))}
-          </div>
+                );
+              })}
+            </div>
+          )}
+          {stats && (
+            <p className="mt-4 text-right text-xs text-muted-foreground">
+              Updated {formatLastUsed(stats.generated_at)} · Uptime{" "}
+              {stats.health.uptime_human}
+            </p>
+          )}
         </CardContent>
       </Card>
 
-      {/* Collaboration Controls */}
+      {/* Collaboration Controls (real MCP actions only) */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -176,27 +297,33 @@ export function AgentCollaborationDashboard() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-wrap gap-4">
-            <Button 
-              onClick={() => setIsLoading(true)}
-              disabled={isLoading}
-              className="gap-2"
-            >
-              <Loader2 className={cn("h-4 w-4", isLoading && "animate-spin")} />
-              {isLoading ? "Coordinating..." : "Trigger Team Coordination"}
-            </Button>
-            <Button variant="outline" className="gap-2">
-              <Search className="h-4 w-4" />
-              Analyze Team Performance
-            </Button>
-            <Button variant="outline" className="gap-2">
-              <Brain className="h-4 w-4" />
-              Optimize Agent Allocation
-            </Button>
-            <Button variant="outline" className="gap-2">
-              <FileText className="h-4 w-4" />
-              Generate Collaboration Report
-            </Button>
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <Input
+                value={collabTask}
+                onChange={(e) => setCollabTask(e.target.value)}
+                placeholder="Task for the team (optional)…"
+                className="max-w-md text-sm"
+                disabled={collabLoading}
+              />
+              <Button onClick={runCollaborate} disabled={collabLoading} className="gap-2">
+                {collabLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Zap className="h-4 w-4" />
+                )}
+                {collabLoading ? "Coordinating…" : "Trigger Team Coordination"}
+              </Button>
+              <Button variant="outline" onClick={refresh} disabled={loading} className="gap-2">
+                <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+                Refresh Statistics
+              </Button>
+            </div>
+            {collabResult && (
+              <pre className="max-h-48 overflow-auto rounded-lg border border-border bg-secondary/30 p-3 text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
+                {collabResult}
+              </pre>
+            )}
           </div>
         </CardContent>
       </Card>

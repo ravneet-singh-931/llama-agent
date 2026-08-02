@@ -14,7 +14,7 @@ import asyncio
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
 
@@ -211,6 +211,9 @@ async def lifespan(app: FastAPI):
     app.state.logger = AgentLogger()
     app.state.monitor = PerformanceMonitor()
     app.state.config = config
+    # Real agent-team usage tracking (populated by chat dispatches and MCP
+    # tool calls below). Reset on restart, like the other in-memory stats.
+    app.state.agent_stats = {"handled": {}, "last_used": {}}
     
     # Re-index previously uploaded files so RAG knowledge survives restarts
     # (SimpleRAG keeps its index in memory, but files persist on disk)
@@ -663,6 +666,35 @@ def route_multi_agent(message: str):
     return False, "research"
 
 
+# Agent team (static definitions - names match multi_agent.py + the frontend)
+AGENT_KEYS = ["research", "coder", "writer", "analyzer", "planner"]
+# MCP tool name -> agent key(s) it drives. "collaborate" runs every agent.
+_MCP_TOOL_TO_AGENT = {
+    "research_agent": ["research"],
+    "coder_agent": ["coder"],
+    "writer_agent": ["writer"],
+    "analyzer_agent": ["analyzer"],
+    "planner_agent": ["planner"],
+    "collaborate": AGENT_KEYS,
+}
+
+
+def _record_agent_usage(agent_keys) -> None:
+    """Increment real task counters + last-used timestamps for agent keys."""
+    stats = getattr(app.state, "agent_stats", None)
+    if stats is None:
+        return
+    handled = stats.setdefault("handled", {})
+    last_used = stats.setdefault("last_used", {})
+    # UTC-aware so the frontend can compute relative times correctly
+    now = datetime.now(timezone.utc).isoformat()
+    for key in agent_keys:
+        if key not in AGENT_KEYS:
+            continue
+        handled[key] = handled.get(key, 0) + 1
+        last_used[key] = now
+
+
 def _with_context(message: str, memory, user_id: str, conversation_id: str) -> str:
     """Prepend this conversation's recent history so specialized agents can
     answer follow-up questions that reference earlier messages."""
@@ -708,12 +740,18 @@ def answer_from_documents(query: str, rag) -> str:
         return context
     client = Groq(api_key=api_key)
     prompt = (
-        "You are answering a question using the user's uploaded documents.\n\n"
+        "You are answering a question about the user's uploaded documents.\n\n"
         f"Document excerpts:\n{context}\n\n"
         f"Question: {query}\n\n"
-        "Answer the question using ONLY the excerpts above. Be concise and "
-        "clear. Use short paragraphs or bullets where helpful. Never dump raw "
-        "excerpts. If the excerpts don't contain the answer, say so plainly."
+        "First, in one short line, state exactly what this document IS: its "
+        "type (e.g. Python application, CSV dataset, Word/Markdown/PDF "
+        "document), its purpose, and the main technology or content it "
+        "involves. Use the file names and excerpt content shown above - do "
+        "not guess beyond what the excerpts show.\n"
+        "Then answer the question using ONLY the excerpts above. Be concise "
+        "and clear. Use short paragraphs or bullets where helpful. Never "
+        "dump raw excerpts. If the excerpts don't contain the answer, say "
+        "so plainly."
     )
     try:
         resp = client.chat.completions.create(
@@ -845,6 +883,7 @@ async def chat(
                         orchestrator = MultiAgentOrchestrator()
                         task = _with_context(request.message, memory, user_id, conversation_id)
                         response = orchestrator.agents[agent_type].execute(task)
+                        _record_agent_usage([agent_type])
                     else:
                         # Fall back to general ReAct agent (it injects this
                         # conversation's recent history + facts internally, so
@@ -1380,6 +1419,41 @@ async def monitoring_dashboard():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/agents/stats")
+async def agent_team_stats(user = Depends(optional_auth)):
+    """Real-time Agent Team statistics for the dashboard.
+
+    Per-agent tasks handled / last-used are counted from real dispatches
+    (chat multi-agent routing + MCP tool calls). Health numbers come from the
+    live performance monitor. Nothing is simulated.
+    """
+    try:
+        stats = getattr(app.state, "agent_stats", {})
+        handled = stats.get("handled", {})
+        last_used = stats.get("last_used", {})
+        health = app.state.monitor.get_health()
+        agents = [
+            {
+                "key": key,
+                "name": f"{key.capitalize()} Agent",
+                "tasks_handled": handled.get(key, 0),
+                "last_used": last_used.get(key),
+            }
+            for key in AGENT_KEYS
+        ]
+        return {
+            "agents": agents,
+            "health": health,
+            "metrics": {
+                "total_agents": len(AGENT_KEYS),
+                "tasks_handled_total": sum(handled.values()),
+            },
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/tools")
 async def list_tools():
     """List all available tools"""
@@ -1438,9 +1512,15 @@ async def mcp_tool_call(request: MCPToolRequest, user = Depends(optional_auth)):
     if not feature_flags.is_enabled("enable_mcp_agents"):
         raise HTTPException(status_code=404, detail="MCP agents disabled (feature flag)")
     business_metrics.record_feature_usage("mcp_tool_call")
+    # Track real usage for the Agent Team dashboard (team_status runs no agent)
+    agent_keys = _MCP_TOOL_TO_AGENT.get(request.name)
+    if agent_keys:
+        _record_agent_usage(agent_keys)
+    app.state.monitor.track_request()
     try:
         return await call_mcp_tool(request.name, request.arguments)
     except HTTPException:
         raise
     except Exception as e:
+        app.state.monitor.track_error()
         raise HTTPException(status_code=502, detail=f"MCP tool call failed: {e}")
