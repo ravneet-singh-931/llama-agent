@@ -6,7 +6,7 @@ Multiple agents working together like a TEAM!
 import asyncio
 import os
 import sys
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterator
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -27,6 +27,16 @@ load_dotenv()
 _groq_key = get_secret("GROQ_API_KEY", default=os.getenv("GROQ_API_KEY", ""))
 if _groq_key:
     os.environ["GROQ_API_KEY"] = _groq_key
+
+# Bind an (initially empty) document store so agent document tools work even
+# when multi_agent is used standalone (CLI / MCP). The API rebinds this to
+# the real RAG store (app.state.rag) at startup.
+try:
+    from modules.rag import SimpleRAG
+    from modules.agent_tools import set_document_store
+    set_document_store(SimpleRAG())
+except Exception:
+    pass
 
 
 # ============ BASE AGENT ============
@@ -68,6 +78,98 @@ class BaseAgent:
                     max_tokens=max_tokens
                 )
             raise
+
+    def _run_tools(self, messages, max_tokens: int = 2048):
+        """Run the real tool loop (web search + document tools) on this
+        agent's model; if the strong tier is rate-limited or unavailable,
+        retry once on the fast tier."""
+        from modules.agent_tools import run_tool_loop, AGENT_TOOL_SCHEMAS
+        try:
+            return run_tool_loop(
+                self.client, self.model, messages, AGENT_TOOL_SCHEMAS,
+                max_tokens=max_tokens
+            )
+        except Exception as e:
+            if should_fallback(e, "strong"):
+                return run_tool_loop(
+                    self.client, resolve_model("fast"), messages,
+                    AGENT_TOOL_SCHEMAS, max_tokens=max_tokens
+                )
+            raise
+
+    @staticmethod
+    def _last_assistant_content(messages) -> str:
+        """The text of the most recent assistant message, or ''."""
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and m.get("content"):
+                return m["content"]
+        return ""
+
+    def _execute_with_tools(self, task: str) -> str:
+        """Run a task through the real tool loop and return the final answer."""
+        messages = [
+            {"role": "system", "content": self._system},
+            {"role": "user", "content": self._task_prompt.format(task=task)},
+        ]
+        final_messages, _events = self._run_tools(messages)
+        result = self._last_assistant_content(final_messages)
+        self.remember(task, result)
+        return result
+
+    def _stream_with_tools(self, task: str) -> Iterator[Dict]:
+        """Run a task through the real tool loop with streaming.
+
+        Yields dicts: {"type": "tool", "content": ...} for each tool call as
+        it happens, then {"type": "token", "content": ...} for answer tokens.
+        """
+        from modules.agent_tools import run_tool_rounds, AGENT_TOOL_SCHEMAS
+
+        def _initial_messages():
+            return [
+                {"role": "system", "content": self._system},
+                {"role": "user", "content": self._task_prompt.format(task=task)},
+            ]
+
+        model = self.model
+        try:
+            messages, events, final_content = run_tool_rounds(
+                self.client, model, _initial_messages(), AGENT_TOOL_SCHEMAS,
+                max_tokens=2048
+            )
+        except Exception as e:
+            if should_fallback(e, "strong"):
+                model = resolve_model("fast")
+                messages, events, final_content = run_tool_rounds(
+                    self.client, model, _initial_messages(), AGENT_TOOL_SCHEMAS,
+                    max_tokens=2048
+                )
+            else:
+                raise
+
+        for ev in events:
+            yield {"type": "tool", "content": ev}
+
+        # Stream the final answer fresh. When the model already answered
+        # (non-streamed), drop that answer and regenerate from the same
+        # prompt/tool context so the user sees the tokens arrive.
+        if final_content is not None and messages and messages[-1].get("role") == "assistant":
+            stream_messages = messages[:-1]
+        else:
+            stream_messages = messages + [
+                {"role": "user", "content": (
+                    "You have used all your tool calls. Give your best answer "
+                    "now based on what you have."
+                )}
+            ]
+        stream = self.client.chat.completions.create(
+            model=model, messages=stream_messages, stream=True, max_tokens=2048
+        )
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            delta = getattr(choices[0], "delta", None) if choices else None
+            text = getattr(delta, "content", None) if delta else None
+            if text:
+                yield {"type": "token", "content": text}
     
     def think(self, task: str) -> str:
         """Think about a task"""
@@ -100,147 +202,154 @@ class BaseAgent:
 
 class ResearchAgent(BaseAgent):
     """Agent specialized in research and information gathering"""
-    
+
+    _system = (
+        "You are Research Agent. research specialist who gathers and analyzes "
+        "information. Be concise and direct."
+    )
+    _task_prompt = (
+        "Research task: {task}\n\n"
+        "Answer the question directly and concisely. Give the key facts and "
+        "the most useful examples. Use the web_search tool for recent events "
+        "or anything outside the uploaded documents, and the "
+        "read_uploaded_document tool when the task refers to an uploaded "
+        "file (call list_uploaded_documents first to see the file names). "
+        "Do NOT analyze the user's intent, add meta-commentary, or use "
+        "verbose numbered sections. Be accurate and to the point."
+    )
+
     def __init__(self):
         super().__init__(
             name="Research Agent",
             role="research specialist who gathers and analyzes information"
         )
-    
+
     def execute(self, task: str) -> str:
-        """Research a topic"""
-        thinking = self.think(f"I need to research: {task}\n\nWhat do I need to find out?")
+        """Research a topic with real tool calling (web search + document reads)."""
+        return self._execute_with_tools(task)
 
-        prompt = f"""Research task: {task}
-
-Answer the question directly and concisely. Give the key facts and the most
-useful examples. Do NOT analyze the user's intent, add meta-commentary, or
-use verbose numbered sections. Be accurate and to the point."""
-
-        messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        response = self._chat(messages, max_tokens=2048)
-        
-        result = response.choices[0].message.content
-        self.remember(task, result)
-        return result
+    def execute_stream(self, task: str) -> Iterator[Dict]:
+        """Research a topic with streaming (tool activity, then answer tokens)."""
+        yield from self._stream_with_tools(task)
 
 
 class CoderAgent(BaseAgent):
     """Agent specialized in writing and reviewing code"""
-    
+
+    _system = (
+        "You are Coder Agent. programming expert who writes, reviews, and "
+        "debugs code. Be concise and direct."
+    )
+    _task_prompt = (
+        "Programming task: {task}\n\n"
+        "Write clean, working code. Put the code first, then at most 2-3 "
+        "lines of explanation. Only include comments that actually help. "
+        "Skip generic warnings and notes unless they are truly needed for "
+        "this specific code. You may read uploaded documents when the task "
+        "references them."
+    )
+
     def __init__(self):
         super().__init__(
             name="Coder Agent",
             role="programming expert who writes, reviews, and debugs code"
         )
-    
+
     def execute(self, task: str) -> str:
         """Write or review code"""
-        prompt = f"""Programming task: {task}
+        return self._execute_with_tools(task)
 
-Write clean, working code. Put the code first, then at most 2-3 lines of
-explanation. Only include comments that actually help. Skip generic warnings
-and notes unless they are truly needed for this specific code."""
-
-        messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        response = self._chat(messages, max_tokens=2048)
-        
-        result = response.choices[0].message.content
-        self.remember(task, result)
-        return result
+    def execute_stream(self, task: str) -> Iterator[Dict]:
+        """Write/review code with streaming (tool activity, then tokens)."""
+        yield from self._stream_with_tools(task)
 
 
 class WriterAgent(BaseAgent):
     """Agent specialized in writing content"""
-    
+
+    _system = (
+        "You are Writer Agent. content writer who creates clear, engaging "
+        "text. Be concise and direct."
+    )
+    _task_prompt = (
+        "Writing task: {task}\n\n"
+        "Write the content. Keep it clear and direct, well-structured only "
+        "where it helps readability. Match the requested tone. No filler or "
+        "generic padding."
+    )
+
     def __init__(self):
         super().__init__(
             name="Writer Agent",
             role="content writer who creates clear, engaging text"
         )
-    
+
     def execute(self, task: str) -> str:
         """Write content"""
-        prompt = f"""Writing task: {task}
+        return self._execute_with_tools(task)
 
-Write the content. Keep it clear and direct, well-structured only where it
-helps readability. Match the requested tone. No filler or generic padding."""
-
-        messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        response = self._chat(messages, max_tokens=2048)
-        
-        result = response.choices[0].message.content
-        self.remember(task, result)
-        return result
+    def execute_stream(self, task: str) -> Iterator[Dict]:
+        """Write content with streaming (tool activity, then tokens)."""
+        yield from self._stream_with_tools(task)
 
 
 class AnalyzerAgent(BaseAgent):
     """Agent specialized in data analysis"""
-    
+
+    _system = (
+        "You are Analyzer Agent. data analyst who interprets and analyzes "
+        "information. Be concise and direct."
+    )
+    _task_prompt = (
+        "Analysis task: {task}\n\n"
+        "Analyze the topic directly and give the key insights as concise "
+        "bullets or a short paragraph. Do NOT analyze the user's intent or "
+        "add meta-commentary. Be clear and to the point. You may read "
+        "uploaded documents when the task references them."
+    )
+
     def __init__(self):
         super().__init__(
             name="Analyzer Agent",
             role="data analyst who interprets and analyzes information"
         )
-    
+
     def execute(self, task: str) -> str:
         """Analyze data or information"""
-        prompt = f"""Analysis task: {task}
+        return self._execute_with_tools(task)
 
-Analyze the topic directly and give the key insights as concise bullets or a
-short paragraph. Do NOT analyze the user's intent or add meta-commentary.
-Be clear and to the point."""
-
-        messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        response = self._chat(messages, max_tokens=2048)
-        
-        result = response.choices[0].message.content
-        self.remember(task, result)
-        return result
+    def execute_stream(self, task: str) -> Iterator[Dict]:
+        """Analyze with streaming (tool activity, then tokens)."""
+        yield from self._stream_with_tools(task)
 
 
 class PlannerAgent(BaseAgent):
     """Agent specialized in planning and strategy"""
-    
+
+    _system = (
+        "You are Planner Agent. strategic planner who creates actionable "
+        "plans. Be concise and direct."
+    )
+    _task_prompt = (
+        "Planning task: {task}\n\n"
+        "Create a concise, actionable plan: clear objectives, step-by-step "
+        "actions, and a timeline if relevant. Keep it short and specific. "
+        "No filler."
+    )
+
     def __init__(self):
         super().__init__(
             name="Planner Agent",
             role="strategic planner who creates actionable plans"
         )
-    
+
     def execute(self, task: str) -> str:
         """Create a plan"""
-        prompt = f"""Planning task: {task}
+        return self._execute_with_tools(task)
 
-Create a concise, actionable plan: clear objectives, step-by-step actions, and
-a timeline if relevant. Keep it short and specific. No filler."""
-
-        messages = [
-            {"role": "system", "content": f"You are {self.name}. {self.role}. Be concise and direct."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        response = self._chat(messages, max_tokens=2048)
-        
-        result = response.choices[0].message.content
-        self.remember(task, result)
-        return result
+    def execute_stream(self, task: str) -> Iterator[Dict]:
+        """Create a plan with streaming (tool activity, then tokens)."""
+        yield from self._stream_with_tools(task)
 
 
 # ============ MULTI-AGENT ORCHESTRATOR ============
