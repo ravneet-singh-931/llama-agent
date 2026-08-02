@@ -100,6 +100,24 @@ jobs:
           path: bandit-report.json
 
   # ============================================================
+  # JOB 2.5: SECRET LEAK SCAN (SAST - Gitleaks)
+  # ============================================================
+  security-sast:
+    name: "\U0001F511 Secret Leak Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "\U0001F4E5 Checkout code"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "\U0001F50D Run Gitleaks secret leak detector"
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ============================================================
   # JOB 3: CODE QUALITY
   # ============================================================
   lint:
@@ -190,7 +208,7 @@ jobs:
   # ============================================================
   docker:
     name: "\U0001F433 Build & Push Docker"
-    needs: [test, security, lint, integration]
+    needs: [test, security, security-sast, lint, integration]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
@@ -277,7 +295,7 @@ jobs:
   # ============================================================
   notify:
     name: "\U0001F4E2 Notifications"
-    needs: [test, security, lint, integration, docker, deploy-staging, deploy-production]
+    needs: [test, security, security-sast, lint, integration, docker, deploy-staging, deploy-production]
     runs-on: ubuntu-latest
     if: always()
 
