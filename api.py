@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 # Import new modules
 from modules.config import get_config, AppConfig
 from modules.database import get_db_manager
+from modules.model_tiers import resolve_model, should_fallback
 from modules.auth import (
     get_current_user,
     optional_auth,
@@ -214,6 +215,11 @@ async def lifespan(app: FastAPI):
     # Real agent-team usage tracking (populated by chat dispatches and MCP
     # tool calls below). Reset on restart, like the other in-memory stats.
     app.state.agent_stats = {"handled": {}, "last_used": {}}
+    # Per-conversation anchor for document follow-ups: conversation_id ->
+    # the last message that asked about an uploaded document. Used to route
+    # "what about X?" / "and the Y column?" follow-ups back to the RAG
+    # answerer instead of general chat. In-memory like agent_stats.
+    app.state.doc_followup = {}
     
     # Re-index previously uploaded files so RAG knowledge survives restarts
     # (SimpleRAG keeps its index in memory, but files persist on disk)
@@ -718,27 +724,164 @@ _DOC_QUESTION_PHRASES = [
 def is_document_question(message: str) -> bool:
     """True if the user is asking about their uploaded documents/files."""
     m = message.lower()
-    return any(p in m for p in _DOC_QUESTION_PHRASES)
+    if any(p in m for p in _DOC_QUESTION_PHRASES):
+        return True
+    # Generic pattern: a document-intent phrase + a reference to a file.
+    # Catches forms the exact phrase list misses, e.g. "summarize the CRM
+    # file" or "what is the Captainassistant.py file?".
+    return (
+        any(w in m for w in _DOC_QUESTION_REF_WORDS)
+        and any(i in m for i in _DOC_QUESTION_INTENTS)
+    )
 
 
-def answer_from_documents(query: str, rag) -> str:
-    """Answer a question about uploaded documents with a CLEAN, LLM-written
-    answer (instead of dumping raw chunk JSON / excerpts)."""
+# Words that point at an uploaded file/document.
+_DOC_QUESTION_REF_WORDS = (
+    "file", "document", "uploaded", "upload",
+    ".txt", ".csv", ".docx", ".pdf", ".py", ".md", ".json",
+)
+
+# Phrases that signal the user wants information ABOUT that file.
+_DOC_QUESTION_INTENTS = (
+    "summarize", "summary", "summarise", "describe", "what is", "what's",
+    "what does", "what are", "tell me", "explain", "show me", "read ",
+    "about the", "about this", "about my",
+)
+
+
+# Phrases that indicate a message continues a previous document conversation
+# (e.g. "what about the pricing column?" right after "summarize the CRM
+# file"). The check additionally requires that a document question was asked
+# before in THIS conversation, otherwise nothing routes here.
+_DOC_FOLLOWUP_PHRASES = [
+    "what about", "how about", "and the", "and what", "tell me more",
+    "more about", "what else", "anything else", "explain", "regarding",
+    "about that", "that file", "this document", "the document", "the file",
+    "does it", "what does it", "it says", "in it", "in the doc",
+    "from the doc", "in that document", "show me", "can you show",
+    "any details",
+]
+
+
+def is_doc_follow_up(message: str, last_doc_query: str) -> bool:
+    """True if `message` continues a previous document conversation.
+
+    Pure helper (testable offline): `last_doc_query` is the last message in
+    this conversation that asked about an uploaded document ("" if none).
+    """
+    if not message or not last_doc_query:
+        return False
+    m = message.lower()
+    return any(p in m for p in _DOC_FOLLOWUP_PHRASES)
+
+
+def _get_doc_followup() -> Dict[str, str]:
+    """Lazily-created per-conversation doc-follow-up anchors."""
+    anchors = getattr(app.state, "doc_followup", None)
+    if anchors is None:
+        anchors = {}
+        app.state.doc_followup = anchors
+    return anchors
+
+
+def _set_doc_followup(conversation_id: str, message: str) -> None:
+    """Remember that this conversation last asked a document question."""
+    _get_doc_followup()[conversation_id] = message
+
+
+def _doc_followup_query(conversation_id: str, message: str) -> str:
+    """RAG query for a follow-up message, or "" if it is not a follow-up.
+
+    Combines the original document question with the new message so the
+    retriever still finds the right chunks ("summarize the CRM file
+    what about the pricing column?").
+    """
+    last = _get_doc_followup().get(conversation_id, "")
+    if is_doc_follow_up(message, last):
+        return f"{last} {message}".strip()
+    return ""
+
+
+# Answer shapes that mean "the retrieval did not actually answer the
+# question". When a first-pass document answer looks like one of these, the
+# question is reformulated and the documents are queried once more.
+_THIN_ANSWER_PHRASES = (
+    "doesn't contain", "does not contain", "doesn't mention", "does not mention",
+    "doesn't include", "does not include", "don't have", "do not have",
+    "not found", "no information", "cannot find", "can't find", "could not find",
+    "couldn't find", "not available in", "not in the document", "not in the excerpts",
+    "not covered", "doesn't say", "does not say", "no mention", "no details",
+    "no such", "unable to find", "not included in",
+)
+
+
+def is_thin_answer(text: str, min_chars: int = 60) -> bool:
+    """True if a document answer is too thin to trust (no real content).
+
+    Pure helper (testable offline). An answer is thin when it is missing,
+    extremely short, or explicitly says the documents don't contain the
+    information.
+    """
+    if not text:
+        return True
+    lowered = text.lower()
+    if len(lowered.strip()) < min_chars:
+        return True
+    return any(p in lowered for p in _THIN_ANSWER_PHRASES)
+
+
+def _complete_with_fallback(client, messages, max_tokens):
+    """Run a chat completion on the STRONG tier; on rate-limit/availability
+    errors retry once on the FAST tier so strong-model quota limits never
+    break one-shot answers."""
+    model = resolve_model("strong")
     try:
-        context = rag.get_context(query)
-    except Exception:
-        context = ""
-    if not context or context == "No documents have been uploaded.":
-        return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
-    if "No documents" in context:
-        return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
+        return client.chat.completions.create(
+            model=model, messages=messages, max_tokens=max_tokens
+        )
+    except Exception as e:
+        if should_fallback(e, "strong"):
+            return client.chat.completions.create(
+                model=resolve_model("fast"), messages=messages, max_tokens=max_tokens
+            )
+        raise
 
-    from groq import Groq
-    from modules.secrets import get_secret
-    api_key = os.environ.get("GROQ_API_KEY", "") or get_secret("GROQ_API_KEY", default="")
-    if not api_key:
-        return context
-    client = Groq(api_key=api_key)
+
+def _reformulate_doc_query(query: str, context: str, client) -> str:
+    """Ask the fast model to rephrase a document question into a more
+    specific search query for the second retrieval pass. Returns "" if no
+    usable reformulation is produced (then the second pass is skipped)."""
+    prompt = (
+        "You are helping search the user's uploaded documents.\n\n"
+        f"Document excerpts:\n{context[:3000]}\n\n"
+        f"The user asked: {query}\n\n"
+        "The first retrieval did not answer this well. Rephrase the user's "
+        "question into ONE more specific search query that would match the "
+        "details they are after (include the exact topic terms from the "
+        "question). Reply with only the query text, nothing else."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=resolve_model("fast"),
+            messages=[
+                {"role": "system", "content": "You reformulate search queries. Reply with one query only."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=120,
+        )
+        q = (resp.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
+    # Keep only plausible queries (a bare "the" is useless).
+    if len(q) < 6:
+        return ""
+    # Strip a leading bullet/number/dash/quote if the model added one.
+    q = q.lstrip("-*•0123456789).\"'").strip()
+    return q
+
+
+def _ask_doc_question(client, query: str, context: str) -> str:
+    """One LLM answer about uploaded documents from the retrieved context."""
     prompt = (
         "You are answering a question about the user's uploaded documents.\n\n"
         f"Document excerpts:\n{context}\n\n"
@@ -754,9 +897,9 @@ def answer_from_documents(query: str, rag) -> str:
         "so plainly."
     )
     try:
-        resp = client.chat.completions.create(
-            model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"),
-            messages=[
+        resp = _complete_with_fallback(
+            client,
+            [
                 {"role": "system", "content": "You are a helpful assistant that answers questions about uploaded documents."},
                 {"role": "user", "content": prompt},
             ],
@@ -765,6 +908,50 @@ def answer_from_documents(query: str, rag) -> str:
         return resp.choices[0].message.content
     except Exception as e:
         return f"Could not summarize the documents right now: {e}"
+
+
+def answer_from_documents(query: str, rag) -> str:
+    """Answer a question about uploaded documents with a CLEAN, LLM-written
+    answer (instead of dumping raw chunk JSON / excerpts).
+
+    Two-pass retrieval: if the first answer is "thin" (too short, or the
+    model says the documents don't contain the information), the question is
+    reformulated into a more specific query and the documents are searched
+    once more before giving up.
+    """
+    try:
+        context = rag.get_context(query)
+    except Exception:
+        context = ""
+    if not context or context == "No documents have been uploaded.":
+        return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
+    if "No documents" in context:
+        return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
+
+    from groq import Groq
+    from modules.secrets import get_secret
+    api_key = os.environ.get("GROQ_API_KEY", "") or get_secret("GROQ_API_KEY", default="")
+    if not api_key:
+        return context
+    client = Groq(api_key=api_key)
+
+    first = _ask_doc_question(client, query, context)
+
+    # Two-pass RAG: only retry when the first answer is actually thin.
+    if is_thin_answer(first):
+        reformulated = _reformulate_doc_query(query, context, client)
+        if reformulated and reformulated.lower() != query.strip().lower():
+            try:
+                context2 = rag.get_context(reformulated)
+            except Exception:
+                context2 = ""
+            if context2 and context2 != context and "No documents" not in context2:
+                # Combine both retrievals (skip if the second is just a
+                # substring of the first - i.e. nothing new was found).
+                combined = context if context2 in context else context + "\n\n" + context2
+                return _ask_doc_question(client, reformulated, combined)
+
+    return first
 
 
 
@@ -870,32 +1057,42 @@ async def chat(
                     # LLM summary) instead of dumping raw chunks.
                     response = answer_from_documents(request.message, rag)
                     query_type = "document_question"
-                elif any(g in lower_input for g in greetings):
-                    response = "Hello! How can I help you today?"
+                    # Anchor this conversation so later messages like
+                    # "what about the pricing column?" route back here.
+                    _set_doc_followup(conversation_id, request.message)
                 else:
-                    # Try routing through multi-agent system for specialized tasks
-                    from multi_agent import MultiAgentOrchestrator
-
-                    use_multi_agent, agent_type = route_multi_agent(request.message)
-
-                    if use_multi_agent:
-                        query_type = f"multi_agent:{agent_type}"
-                        orchestrator = MultiAgentOrchestrator()
-                        task = _with_context(request.message, memory, user_id, conversation_id)
-                        response = orchestrator.agents[agent_type].execute(task)
-                        _record_agent_usage([agent_type])
+                    # Doc-aware follow-up: message continues an earlier
+                    # document question in this conversation.
+                    followup_query = _doc_followup_query(conversation_id, request.message)
+                    if followup_query:
+                        response = answer_from_documents(followup_query, rag)
+                        query_type = "document_question"
+                    elif any(g in lower_input for g in greetings):
+                        response = "Hello! How can I help you today?"
                     else:
-                        # Fall back to general ReAct agent (it injects this
-                        # conversation's recent history + facts internally, so
-                        # follow-ups about earlier messages work).
-                        from llama_agent1 import run_agent
-                        response = await run_agent(
-                            request.message,
-                            memory=memory,
-                            facts=facts,
-                            user_id=user_id,
-                            conversation_id=conversation_id,
-                        )
+                        # Try routing through multi-agent system for specialized tasks
+                        from multi_agent import MultiAgentOrchestrator
+
+                        use_multi_agent, agent_type = route_multi_agent(request.message)
+
+                        if use_multi_agent:
+                            query_type = f"multi_agent:{agent_type}"
+                            orchestrator = MultiAgentOrchestrator()
+                            task = _with_context(request.message, memory, user_id, conversation_id)
+                            response = orchestrator.agents[agent_type].execute(task)
+                            _record_agent_usage([agent_type])
+                        else:
+                            # Fall back to general ReAct agent (it injects this
+                            # conversation's recent history + facts internally, so
+                            # follow-ups about earlier messages work).
+                            from llama_agent1 import run_agent
+                            response = await run_agent(
+                                request.message,
+                                memory=memory,
+                                facts=facts,
+                                user_id=user_id,
+                                conversation_id=conversation_id,
+                            )
         
         # Calculate response time
         elapsed = (datetime.now() - start_time).total_seconds()
@@ -1043,6 +1240,19 @@ async def chat_stream(
         if is_document_question(request.message):
             memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             result = answer_from_documents(request.message, rag)
+            # Anchor this conversation so later messages like
+            # "what about the pricing column?" route back here.
+            _set_doc_followup(conversation_id, request.message)
+            async for chunk in done(result):
+                yield chunk
+            return
+
+        # Doc-aware follow-up: message continues an earlier document
+        # question in this conversation (e.g. "and the pricing column?").
+        followup_query = _doc_followup_query(conversation_id, request.message)
+        if followup_query:
+            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            result = answer_from_documents(followup_query, rag)
             async for chunk in done(result):
                 yield chunk
             return

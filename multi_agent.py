@@ -19,6 +19,7 @@ except ImportError:
 
 from groq import Groq
 from modules.secrets import get_secret
+from modules.model_tiers import resolve_model, should_fallback
 
 load_dotenv()
 
@@ -36,8 +37,9 @@ class BaseAgent:
     def __init__(self, name: str, role: str, model: str = ""):
         self.name = name
         self.role = role
-        # Model is configurable via LLM_MODEL env var (falls back to the default)
-        self.model = model or os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+        # Agents produce one-shot answers -> strong model tier (configurable
+        # via LLM_MODEL_STRONG / LLM_MODEL / defaults in modules.model_tiers).
+        self.model = model or resolve_model("strong")
         # Use env var (already set by module-level code or docker-compose)
         api_key = os.environ.get("GROQ_API_KEY", "")
         if not api_key:
@@ -48,6 +50,24 @@ class BaseAgent:
                 os.environ["GROQ_API_KEY"] = api_key
         self.client = Groq(api_key=api_key)
         self.memory: List[Dict] = []
+
+    def _chat(self, messages, max_tokens: int = 2048):
+        """Run a chat completion on this agent's model; if the strong tier is
+        rate-limited or unavailable, retry once on the fast tier."""
+        try:
+            return self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=max_tokens
+            )
+        except Exception as e:
+            if should_fallback(e, "strong"):
+                return self.client.chat.completions.create(
+                    model=resolve_model("fast"),
+                    messages=messages,
+                    max_tokens=max_tokens
+                )
+            raise
     
     def think(self, task: str) -> str:
         """Think about a task"""
@@ -56,11 +76,7 @@ class BaseAgent:
             {"role": "user", "content": task}
         ]
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=1024
-        )
+        response = self._chat(messages)
         
         return response.choices[0].message.content
     
@@ -106,11 +122,7 @@ use verbose numbered sections. Be accurate and to the point."""
             {"role": "user", "content": prompt}
         ]
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=2048
-        )
+        response = self._chat(messages, max_tokens=2048)
         
         result = response.choices[0].message.content
         self.remember(task, result)
@@ -139,11 +151,7 @@ and notes unless they are truly needed for this specific code."""
             {"role": "user", "content": prompt}
         ]
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=2048
-        )
+        response = self._chat(messages, max_tokens=2048)
         
         result = response.choices[0].message.content
         self.remember(task, result)
@@ -171,11 +179,7 @@ helps readability. Match the requested tone. No filler or generic padding."""
             {"role": "user", "content": prompt}
         ]
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=2048
-        )
+        response = self._chat(messages, max_tokens=2048)
         
         result = response.choices[0].message.content
         self.remember(task, result)
@@ -204,11 +208,7 @@ Be clear and to the point."""
             {"role": "user", "content": prompt}
         ]
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=2048
-        )
+        response = self._chat(messages, max_tokens=2048)
         
         result = response.choices[0].message.content
         self.remember(task, result)
@@ -236,11 +236,7 @@ a timeline if relevant. Keep it short and specific. No filler."""
             {"role": "user", "content": prompt}
         ]
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=2048
-        )
+        response = self._chat(messages, max_tokens=2048)
         
         result = response.choices[0].message.content
         self.remember(task, result)
@@ -282,10 +278,10 @@ Which agent should handle it?
 
 Respond with ONLY the agent name (research/coder/writer/analyzer/planner)."""
         
-        # Use Groq to determine routing
+        # Use Groq to determine routing (cheap helper call -> fast tier)
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         response = client.chat.completions.create(
-            model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"),
+            model=resolve_model("fast"),
             messages=[
                 {"role": "system", "content": "You are a task router."},
                 {"role": "user", "content": routing_prompt}

@@ -37,6 +37,7 @@ from modules.rag import SimpleRAG, DocumentReader
 from modules.monitoring import AgentLogger, PerformanceMonitor
 from modules.secrets import get_secret
 from modules.security import safe_math_eval
+from modules.model_tiers import resolve_model
 
 # ===================== SETUP =====================
 load_dotenv()
@@ -144,7 +145,9 @@ class GroqLLM(LLM):
         return await asyncio.to_thread(self.stream_complete, prompt, formatted=formatted, **kwargs)
 
 
-llm = GroqLLM(model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"), api_key=GROQ_API_KEY)
+# One-shot (non-streaming) agent runs use the strong model tier; the
+# streaming path below uses the fast tier for low latency.
+llm = GroqLLM(model=resolve_model("strong"), api_key=GROQ_API_KEY)
 
 # ===================== ENHANCED TOOLS =====================
 
@@ -625,10 +628,10 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
 
     messages.append({"role": "user", "content": user_input})
 
-    # Stream from Groq API
+    # Stream from Groq API (fast tier: streaming chat favors low latency)
     try:
         stream = client.chat.completions.create(
-            model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"),
+            model=resolve_model("fast"),
             messages=messages,
             stream=True,
             max_tokens=2048,

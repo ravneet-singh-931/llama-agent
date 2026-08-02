@@ -86,9 +86,12 @@ services:
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
       - ENVIRONMENT=production
       # TEMPORARY: llama-3.3-70b-versatile free-tier daily limit still 429s
-      # (verified live 2026-07-31 with current key). Remove once quota resets
-      # or Groq tier is upgraded; default is the 70b model.
-      - LLM_MODEL=llama-3.1-8b-instant
+      # (verified live 2026-07-31 with current key). Tiered defaults are
+      # strong=llama-3.3-70b-versatile (one-shot answers/agents) and
+      # fast=llama-3.1-8b-instant (streaming chat). Delete BOTH lines below
+      # once quota resets or the Groq tier is upgraded.
+      - LLM_MODEL_STRONG=llama-3.1-8b-instant
+      - LLM_MODEL_FAST=llama-3.1-8b-instant
     secrets:
       - groq_api_key
       - jwt_secret_key
@@ -129,8 +132,9 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
-      # TEMPORARY override - see LLM_MODEL comment under api service
-      - LLM_MODEL=llama-3.1-8b-instant
+      # TEMPORARY override - see LLM_MODEL_STRONG/LLM_MODEL_FAST comment under api service
+      - LLM_MODEL_STRONG=llama-3.1-8b-instant
+      - LLM_MODEL_FAST=llama-3.1-8b-instant
     secrets:
       - groq_api_key
       - postgres_password
@@ -160,8 +164,9 @@ services:
     restart: unless-stopped
     environment:
       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
-      # TEMPORARY override - see LLM_MODEL comment under api service
-      - LLM_MODEL=llama-3.1-8b-instant
+      # TEMPORARY override - see LLM_MODEL_STRONG/LLM_MODEL_FAST comment under api service
+      - LLM_MODEL_STRONG=llama-3.1-8b-instant
+      - LLM_MODEL_FAST=llama-3.1-8b-instant
     secrets:
       - groq_api_key
     # Also inject the key directly so Python code can access it
