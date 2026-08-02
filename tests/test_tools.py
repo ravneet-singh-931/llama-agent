@@ -184,6 +184,33 @@ def test_rag_search():
     assert len(results) > 0
 
 
+def test_rag_search_matches_filename():
+    """A file can be found by its NAME even if the content never mentions it
+    (e.g. asking about the Captainassistant file must retrieve that file)."""
+    from modules.rag import SimpleRAG
+    rag = SimpleRAG()
+    rag.add_text(
+        "Setup script that installs llama-index and tesseract for a Colab assistant.",
+        source="uploads/Captainassistant.py",
+    )
+    rag.add_text(
+        "Investment concepts and valuation logic for stock market analysis.",
+        source="uploads/CRM-3.docx",
+    )
+    results = rag.search("What is the Captainassistant file and what does it do?")
+    assert results, "expected at least one match"
+    assert results[0]["file"] == "uploads/Captainassistant.py"
+    assert results[0]["relevance_score"] > 0
+
+
+def test_rag_search_stopwords_alone_returns_nothing():
+    """Queries made only of stopwords must not match every chunk."""
+    from modules.rag import SimpleRAG
+    rag = SimpleRAG()
+    rag.add_text("Python is a programming language used for AI.")
+    assert rag.search("what is the and of it") == []
+
+
 def test_rag_list_documents():
     from modules.rag import SimpleRAG
     rag = SimpleRAG()

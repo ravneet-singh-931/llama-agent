@@ -5,8 +5,22 @@ This lets your agent READ files and ANSWER questions about them!
 """
 
 import os
+import re
 from typing import List, Dict
 from pathlib import Path
+
+
+# Common English stopwords - these carry no retrieval signal and otherwise
+# let irrelevant chunks win on generic words like "what" or "the".
+STOPWORDS = frozenset(
+    """
+    a an and are as at be by do does for from has have how i in is it of on
+    that the this to what when where which who why with you your its can will
+    not or but if about into over under then so too very just was were been
+    we they them their there here than also more most our out up down any all
+    some such only own same get got make made use used ask tell
+    """.split()
+)
 
 
 class DocumentReader:
@@ -169,23 +183,37 @@ class SimpleRAG:
                 chunks.append(chunk)
         return chunks
     
+    def _query_tokens(self, text: str) -> set:
+        """Lowercase alphanumeric tokens, minus stopwords and single chars."""
+        tokens = re.findall(r"[a-z0-9]+", text.lower())
+        return {t for t in tokens if t not in STOPWORDS and len(t) > 1}
+
     def search(self, query: str, top_k: int = 3) -> List[Dict]:
-        """Search for relevant chunks (simple keyword matching)"""
-        query_words = set(query.lower().split())
-        
+        """Search for relevant chunks (keyword matching).
+
+        Scoring: each query token found in the chunk content scores 1; a
+        token matching the document FILE NAME (exact token) scores 2, so a
+        user asking about a specific file (e.g. "the Captainassistant file")
+        retrieves that file even when its content never mentions the name.
+        """
+        query_words = self._query_tokens(query)
+
         results = []
         for doc in self.documents:
             content_lower = doc["content"].lower()
-            # Simple scoring: count matching words
-            score = sum(1 for word in query_words if word in content_lower)
+            # Tokens in the file path (exact match, e.g. "captainassistant").
+            filename_tokens = self._query_tokens(doc["file"])
+            content_score = sum(1 for word in query_words if word in content_lower)
+            filename_score = sum(1 for word in query_words if word in filename_tokens)
+            score = content_score + 2 * filename_score
             if score > 0:
                 results.append({
                     **doc,
                     "relevance_score": score
                 })
-        
-        # Sort by relevance
-        results.sort(key=lambda x: x["relevance_score"], reverse=True)
+
+        # Deterministic: best score first, then insertion order.
+        results.sort(key=lambda x: (-x["relevance_score"], x["chunk_index"]))
         return results[:top_k]
     
     def get_context(self, query: str, top_k: int = 3) -> str:
