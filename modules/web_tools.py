@@ -28,13 +28,29 @@ _USER_AGENT = (
 _MAX_RESULTS = 5
 
 
+def _assert_http(url: str) -> None:
+    """Refuse anything but plain http/https URLs.
+
+    Defense-in-depth for the urlopen calls below: user input never reaches
+    the URL itself (it is only ever query-encoded), and this guard makes it
+    impossible for a file:/ or custom scheme to be opened by mistake.
+    """
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"Refusing to open non-http(s) URL: {scheme!r}://")
+
+
 def _http_get(url: str, timeout: int = 15) -> str:
+    _assert_http(url)
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # B310: urlopen only runs against the fixed https search-API endpoints
+    # (scheme enforced by _assert_http); input is query-encoded only.
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
         return resp.read().decode("utf-8", errors="replace")
 
 
 def _http_post_json(url: str, payload: dict, timeout: int = 20) -> dict:
+    _assert_http(url)
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         url,
@@ -42,7 +58,8 @@ def _http_post_json(url: str, payload: dict, timeout: int = 20) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # B310: see _http_get - fixed https API endpoint only.
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
 
