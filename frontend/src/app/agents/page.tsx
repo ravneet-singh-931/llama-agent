@@ -30,6 +30,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { AgentCollaborationDashboard } from "@/components/chat/AgentCollaborationDashboard";
+import { Markdown } from "@/components/markdown/markdown";
 
 const agents = [
   {
@@ -328,9 +329,11 @@ export default function AgentsPage() {
                               />
                             )}
                             {toolResults[tool.name] && (
-                              <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px] leading-relaxed text-muted-foreground">
-                                {toolResults[tool.name]}
-                              </pre>
+                              <div className="mt-1.5 max-h-40 overflow-auto rounded bg-background p-2 text-xs leading-relaxed text-muted-foreground">
+                                <Markdown className="text-xs">
+                                  {toolResults[tool.name]}
+                                </Markdown>
+                              </div>
                             )}
                           </div>
                         ))}

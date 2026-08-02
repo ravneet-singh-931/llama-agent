@@ -5,6 +5,7 @@ import { User, Bot, Code, FileText, Search, Workflow } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/types";
 import { formatTime } from "@/lib/utils";
+import { Markdown } from "@/components/markdown/markdown";
 
 const agentIcons: Record<string, typeof Bot> = {
   research: Search,
@@ -101,15 +102,17 @@ export function ChatMessageBubble({ message, isStreaming }: ChatMessageProps) {
             {formatTime(message.timestamp)}
           </span>
         </div>
-        <div className="prose prose-sm dark:prose-invert max-w-none">
-          <div
-            className={cn(
-              "rounded-lg border-l-2 p-3 text-sm leading-relaxed",
-              agentColor
-            )}
-          >
-            {message.content || (isStreaming ? <span className="typing-cursor" /> : "")}
-          </div>
+        <div
+          className={cn(
+            "rounded-lg border-l-2 p-3 text-sm leading-relaxed",
+            agentColor
+          )}
+        >
+          {message.content ? (
+            <Markdown>{message.content}</Markdown>
+          ) : isStreaming ? (
+            <span className="typing-cursor" />
+          ) : null}
         </div>
       </div>
     </motion.div>
