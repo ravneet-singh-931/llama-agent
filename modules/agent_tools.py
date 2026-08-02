@@ -171,7 +171,10 @@ def run_tool_rounds(client, model: str, messages: List[dict],
             # Model answered without calling a tool.
             if message.content:
                 messages.append({"role": "assistant", "content": message.content})
-            return messages, events, message.content
+                return messages, events, message.content
+            # Empty response (some small models do this) — keep going
+            # until the round cap, then callers force a wrap-up answer.
+            continue
 
         messages.append({
             "role": "assistant",

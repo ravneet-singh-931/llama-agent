@@ -5,6 +5,7 @@ Multiple agents working together like a TEAM!
 
 import asyncio
 import os
+import re
 import sys
 from typing import List, Dict, Any, Optional, Iterator
 from datetime import datetime
@@ -99,22 +100,72 @@ class BaseAgent:
 
     @staticmethod
     def _last_assistant_content(messages) -> str:
-        """The text of the most recent assistant message, or ''."""
+        """The text of the most recent REAL assistant answer, or ''.
+
+        Tool-call assistant messages (which carry the '<name>{args}</name>'
+        marker as content) are skipped — they are not the final answer.
+        """
         for m in reversed(messages):
-            if m.get("role") == "assistant" and m.get("content"):
-                return m["content"]
+            if m.get("role") != "assistant":
+                continue
+            if m.get("tool_calls"):
+                continue
+            return m.get("content") or ""
         return ""
 
+    # Matches a string that consists ONLY of tool-call markers like
+    # "<list_uploaded_documents>{}</list_uploaded_documents>" — not a real
+    # answer. Used to detect when a small model echoes the tool transcript
+    # back instead of producing a genuine response.
+    _TOOL_TRANSCRIPT_RE = re.compile(
+        r"^(?:\s*<\w+>[^<]*</\w+>\s*)+$", re.DOTALL
+    )
+
     def _execute_with_tools(self, task: str) -> str:
-        """Run a task through the real tool loop and return the final answer."""
+        """Run a task through the real tool loop and return the final answer.
+
+        If the model ends on a tool call or echoes the tool markers back
+        (common with small models), a clean wrap-up answer is forced.
+        If the tool loop itself raises (API error, rate limit), the
+        exception is caught and a plain non-tool answer is attempted as
+        a graceful fallback so the chat never 500s.
+        """
         messages = [
             {"role": "system", "content": self._system},
             {"role": "user", "content": self._task_prompt.format(task=task)},
         ]
-        final_messages, _events = self._run_tools(messages)
+        try:
+            final_messages, _events = self._run_tools(messages)
+        except Exception:
+            # Tool loop failed (API error, rate limit, malformed response).
+            # Fall back to a plain non-tool answer instead of crashing the
+            # whole chat with a 500.
+            try:
+                resp = self._chat(messages, max_tokens=2048)
+                result = resp.choices[0].message.content or ""
+            except Exception:
+                result = ""
+            self.remember(task, result)
+            return result or "I couldn't complete that task right now. Please try again."
+
         result = self._last_assistant_content(final_messages)
+        if (not result.strip()
+                or self._TOOL_TRANSCRIPT_RE.match(result.strip())):
+            # The model ended on a tool call or echoed the tool markers
+            # back instead of answering — force a clean final answer.
+            wrap = final_messages + [
+                {"role": "user", "content": (
+                    "You have the information you need. Give your final "
+                    "answer now, directly and concisely."
+                )}
+            ]
+            try:
+                resp = self._chat(wrap, max_tokens=2048)
+                result = resp.choices[0].message.content or ""
+            except Exception:
+                result = result
         self.remember(task, result)
-        return result
+        return result or "I couldn't complete that task right now. Please try again."
 
     def _stream_with_tools(self, task: str) -> Iterator[Dict]:
         """Run a task through the real tool loop with streaming.

@@ -658,6 +658,16 @@ ANALYZER_KEYWORDS = ["analyze", "analysis", "trends", "data analysis",
                      "evaluate", "assess", "insights"]
 RESEARCH_KEYWORDS = ["research", "compare", "difference between",
                      "pros and cons", "investigate"]
+# Requests about CURRENT/FRESH information. These must reach the research
+# agent (which can call the web_search tool) instead of the general ReAct
+# agent, which answers from static knowledge and would return stale data.
+# Intent-based only - no message text is hardcoded.
+RECENCY_KEYWORDS = [
+    "latest", "recent", "breaking", "news", "headline", "headlines",
+    "current events", "what's new", "what is new", "update on",
+    "this week", "this month", "this year", "today's", "today's news",
+    "news today", "just happened", "announced", "released today",
+]
 
 
 def route_multi_agent(message: str):
@@ -672,6 +682,8 @@ def route_multi_agent(message: str):
     if any(kw in task_lower for kw in ANALYZER_KEYWORDS):
         return True, "analyzer"
     if any(kw in task_lower for kw in RESEARCH_KEYWORDS):
+        return True, "research"
+    if any(kw in task_lower for kw in RECENCY_KEYWORDS):
         return True, "research"
     return False, "research"
 
@@ -977,11 +989,59 @@ def _detect_compare_documents(query: str, rag) -> tuple:
     return True, [p for p, _s in scored[:2]]
 
 
+# Words inside a comparison request that carry no retrieval signal. The
+# file names being compared are stripped separately in _distill_compare_query;
+# this set covers the comparison framing words themselves (stopwords are
+# handled by the RAG store's own tokenizer).
+_COMPARE_NOISE_WORDS = frozenset(
+    "compare comparison contrast versus vs differences difference between "
+    "doc docs document documents file files both each says say tell what "
+    "about and the of in for on with their they".split()
+)
+
+
+def _distill_compare_query(query: str, files) -> str:
+    """Extract the retrieval TOPIC from a comparison request.
+
+    Drops the file names being compared and the comparison framing words, so
+    per-document retrieval targets the actual subject instead of matching
+    generic words:
+
+    'Compare what the CRM doc and sample.txt say about pricing'
+        -> 'pricing'
+    'differences between the budget and the sales forecast' (files
+    financials.xlsx / other.xlsx) -> 'budget sales forecast'
+
+    Pure helper (testable offline).
+    """
+    m = (query or "").lower()
+    drop = set()
+    for p in files or []:
+        base = os.path.basename(p).lower()
+        stem = os.path.splitext(base)[0]
+        drop.add(base)
+        drop.add(stem)
+        # Each alphanumeric piece of the stem too (e.g. "crm-3" -> "crm").
+        drop.update(re.findall(r"[a-z0-9]+", stem))
+        # The file extension token (txt/csv/pdf/docx) is a generic type tag.
+        ext = os.path.splitext(base)[1].lstrip(".")
+        if ext:
+            drop.add(ext)
+    toks = [
+        t for t in re.findall(r"[a-z0-9]+", m)
+        if t not in drop and t not in _COMPARE_NOISE_WORDS
+    ]
+    return " ".join(toks)
+
+
 def _compare_documents(query: str, files, rag, client) -> str:
     """Answer a multi-document comparison using per-document labeled context."""
     parts = []
+    # Retrieve each document on the TOPIC (file names + comparison framing
+    # stripped) so retrieval is not diluted by the request's own words.
+    topic = _distill_compare_query(query, files)
     for f in files:
-        ctx = rag.get_context_for_document(query, f, top_k=4)
+        ctx = rag.get_context_for_document(topic or query, f, top_k=4)
         if ctx:
             parts.append(ctx)
     if not parts:
@@ -989,15 +1049,24 @@ def _compare_documents(query: str, files, rag, client) -> str:
     combined = "\n\n".join(parts)
     prompt = (
         "You are comparing two uploaded documents.\n\n"
-        f"Document excerpts (each labeled with its source file):\n{combined}\n\n"
+        f"Document excerpts (each labeled with its exact source file and "
+        f"chunk number):\n{combined}\n\n"
         f"Comparison request: {query}\n\n"
         "Answer in this structure:\n"
-        "1. One line about what each document IS (type, purpose).\n"
-        "2. What each document says about the topic, citing the source file "
-        "in parentheses after every claim (e.g. (CRM-3.docx, chunk 2)).\n"
-        "3. Key similarities and differences.\n"
-        "Use ONLY the excerpts above - do not invent facts. If a document "
-        "does not discuss the topic, say so plainly."
+        "1. One line about what each document IS (type, purpose) - label "
+        "each with its exact file name from the 'Source:' labels.\n"
+        "2. For EACH document, a short subsection headed by its exact file "
+        "name, stating what THAT document says about the topic. Quote the "
+        "relevant text word-for-word from the excerpt, then cite the exact "
+        "chunk number in parentheses, e.g. (CRM-3.docx, chunk 2).\n"
+        "3. Key similarities and differences, each cited the same way.\n"
+        "CRITICAL: a (file, chunk) citation may ONLY be attached to a claim "
+        "taken word-for-word from that exact labeled excerpt. Never attach "
+        "one document's chunk to a claim about the other document - if a "
+        "document does not discuss the topic, say so plainly instead of "
+        "guessing. Never invent facts, file names, or chunk numbers.\n"
+        "Use ONLY the excerpts above, and never dump raw excerpts into the "
+        "answer."
     )
     try:
         resp = _complete_with_fallback(

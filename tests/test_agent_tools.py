@@ -294,3 +294,216 @@ def test_doc_answer_prompt_requires_citations():
     src = inspect.getsource(_ask_doc_question)
     assert "citation" in src.lower()
     assert "Source:" in src
+
+
+# ============ BUG FIX: CURRENT-INFO QUESTIONS MUST REACH WEB-SEARCH TOOLS ============
+# "what is the latest AI news?" used to fall through to the tool-less ReAct
+# agent and answer from stale static knowledge. Recency queries must route to
+# the research agent, which owns the web_search tool.
+
+def test_route_multi_agent_recency_to_research():
+    from api import route_multi_agent
+    assert route_multi_agent("what is the latest AI news?") == (True, "research")
+    assert route_multi_agent("any recent announcements from OpenAI?") == (True, "research")
+    assert route_multi_agent("what happened with the stock market this week?") == (True, "research")
+    assert route_multi_agent("breaking news about the election") == (True, "research")
+
+
+def test_route_multi_agent_general_question_stays_react():
+    from api import route_multi_agent
+    # Static-knowledge questions must NOT hit the multi-agent path.
+    assert route_multi_agent("what is a quasar?") == (False, "research")
+    assert route_multi_agent("how does recursion work in python?") == (False, "research")
+    assert route_multi_agent("explain the water cycle") == (False, "research")
+
+
+# ============ BUG FIX: COMPARE TOPIC DISTILLATION ============
+# Retrieval used to run on the FULL comparison request, so file-name and
+# framing words ("compare", "doc", "txt") diluted the per-document search.
+
+def test_distill_compare_query_keeps_topic_only():
+    from api import _distill_compare_query
+    q = _distill_compare_query(
+        "Compare what the CRM doc and sample.txt say about pricing",
+        ["uploads/CRM-3.docx", "uploads/sample.txt"],
+    )
+    assert q == "pricing"
+    q2 = _distill_compare_query(
+        "differences between the budget and the sales forecast",
+        ["uploads/financials.xlsx", "uploads/other.xlsx"],
+    )
+    assert q2 == "budget sales forecast"
+    # No topic words left -> empty topic (callers fall back to the raw query).
+    assert _distill_compare_query("compare the files", ["uploads/a.pdf", "uploads/b.pdf"]) == ""
+
+
+# ============ BUG FIX: PER-DOC RETRIEVAL PICKS THE TOPIC SECTION ============
+# Presence-only scoring let incidental single mentions beat the real topic
+# chunk on tie-breaks. Frequency scoring must pick the dense chunk and pull
+# in its neighbors while dropping distant incidental mentions.
+
+def _pad(text: str, width: int) -> str:
+    return text.ljust(width, ".")
+
+
+def test_get_context_for_document_picks_topic_run_not_incidental():
+    rag = SimpleRAG()
+    chunk0 = _pad(
+        "The proposal mentioned pricing once in the appendix about vendor "
+        "costs and contract renewal terms for the fiscal year.",
+        500,
+    )
+    chunk1 = _pad(
+        "This middle section covers operations only: onboarding, support "
+        "tiers, escalation paths and internal tooling.",
+        500,
+    )
+    chunk2 = _pad(
+        "The core pricing discussion: pricing tiers, annual pricing "
+        "discounts, volume pricing, and how pricing affects renewals.",
+        300,
+    )
+    chunk3 = _pad(
+        "Closing paragraph: pricing was reviewed and the decision deferred.",
+        300,
+    )
+    rag.add_text(
+        chunk0 + chunk1 + chunk2 + chunk3, source="uploads/CRM-3.docx"
+    )
+    ctx = rag.get_context_for_document("pricing", "CRM-3.docx", top_k=1)
+    # The topic run (chunks 1-3, around the dense chunk 2) is retrieved...
+    assert "chunk 2" in ctx
+    assert "chunk 1" in ctx
+    assert "chunk 3" in ctx
+    # ...while distant single-mention chunks are NOT.
+    assert "chunk 0" not in ctx
+
+
+def test_get_context_for_document_dense_chunk_beats_single_mention():
+    rag = SimpleRAG()
+    chunk0 = _pad(
+        "The proposal mentioned pricing once in the appendix about vendor "
+        "costs and contract renewal terms for the fiscal year.",
+        500,
+    )
+    filler = _pad(
+        "no topic words here at all, just filler prose.", 500
+    )
+    dense = _pad(
+        "The core pricing discussion: pricing tiers, annual pricing "
+        "discounts, volume pricing, and how pricing affects renewals.",
+        200,
+    )
+    # 500 + 500 + 200 chars -> chunk 0 = incidental mention, chunk 1 =
+    # filler, chunk 2 = the dense topic section.
+    rag.add_text(chunk0 + filler + dense, source="uploads/CRM-3.docx")
+    ctx = rag.get_context_for_document("pricing", "CRM-3.docx", top_k=1)
+    # The dense topic chunk is always retrieved, and the bulk of the
+    # retrieved context comes from it, not the incidental mention.
+    assert "chunk 2" in ctx
+    assert ctx.count("pricing") >= 4
+
+
+# ============ ROBUSTNESS: TOOL-LOOP ANSWER EXTRACTION ============
+
+def test_last_assistant_content_skips_tool_call_messages():
+    from multi_agent import BaseAgent
+    # A tool-call message followed by an empty assistant message
+    # should return '' (not the tool marker).
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "<web_search>{}</web_search>",
+         "tool_calls": [{"id": "1", "type": "function",
+                         "function": {"name": "web_search",
+                                      "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "1", "content": "results"},
+        {"role": "assistant", "content": ""},
+    ]
+    assert BaseAgent._last_assistant_content(msgs) == ""
+    # A real answer after the tool round is returned correctly.
+    msgs.append({"role": "assistant", "content": "the real answer"})
+    assert BaseAgent._last_assistant_content(msgs) == "the real answer"
+
+
+def test_tool_rounds_continues_on_empty_content():
+    """Empty-content no-tool-call responses must not prematurely end
+    the loop; the model gets another chance to answer."""
+    set_document_store(SimpleRAG())
+    client = _FakeClient([
+        (None, None),  # empty content, no tool_calls -> skip, continue
+        ("the answer", None),  # real answer -> return
+    ])
+    msgs = [{"role": "user", "content": "hi"}]
+    out_msgs, events, final = run_tool_rounds(
+        client, "m", msgs, tools=AGENT_TOOL_SCHEMAS, max_tokens=10,
+    )
+    assert final == "the answer"
+    assert len(out_msgs) == 2  # only the real answer appended
+
+
+def test_execute_with_tools_forces_wrap_up_on_transcript():
+    """When the model ends on a tool-call message (echoing the
+    transcript), _execute_with_tools must force a clean wrap-up
+    answer instead of returning the markers."""
+    os.environ["GROQ_API_KEY"] = "test-key"
+    from multi_agent import ResearchAgent
+    agent = ResearchAgent()
+
+    # _run_tools returns messages ending with a tool-call assistant
+    # message (no final answer). The tool-call content contains
+    # spaces (realistic Groq/Llama output).
+    fake_final = [
+        {"role": "system", "content": agent._system},
+        {"role": "user", "content": agent._task_prompt.format(task="t")},
+        {"role": "assistant",
+         "content": '<list_uploaded_documents>{}</list_uploaded_documents>',
+         "tool_calls": [{"id": "c0", "type": "function",
+                          "function": {"name": "list_uploaded_documents",
+                                       "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c0", "content": "uploads/CRM-3.docx"},
+        {"role": "assistant",
+         "content": '{"query": "latest AI news 2024-2026"}',
+         "tool_calls": [{"id": "c1", "type": "function",
+                          "function": {"name": "web_search",
+                                       "arguments": '{"query": "latest AI news 2024-2026"}'}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "results"},
+    ]
+    agent._run_tools = lambda msgs: (fake_final, ["⚙️ list_uploaded_documents", "⚙️ web_search"])
+    agent._chat = lambda msgs, max_tokens=2048: _FakeResponse(
+        [_FakeChoice(_FakeMessage("clean final answer"))]
+    )
+    result = agent._execute_with_tools("t")
+    assert result == "clean final answer"
+
+
+def test_execute_with_tools_falls_back_when_tool_loop_raises():
+    """If the tool loop raises (API error, rate limit), execute()
+    must fall back to a plain non-tool answer instead of crashing."""
+    os.environ["GROQ_API_KEY"] = "test-key"
+    from multi_agent import ResearchAgent
+    agent = ResearchAgent()
+    agent._run_tools = lambda msgs: (_ for _ in ()).throw(
+        RuntimeError("api down")
+    )
+    agent._chat = lambda msgs, max_tokens=2048: _FakeResponse(
+        [_FakeChoice(_FakeMessage("plain fallback answer"))]
+    )
+    result = agent._execute_with_tools("t")
+    assert result == "plain fallback answer"
+
+
+def test_execute_with_tools_returns_fallback_message_when_all_fail():
+    """When both the tool loop and the plain fallback fail, a
+    friendly message is returned instead of an empty string."""
+    os.environ["GROQ_API_KEY"] = "test-key"
+    from multi_agent import ResearchAgent
+    agent = ResearchAgent()
+    agent._run_tools = lambda msgs: (_ for _ in ()).throw(
+        RuntimeError("api down")
+    )
+    agent._chat = lambda msgs, max_tokens=2048: _FakeResponse(
+        [_FakeChoice(_FakeMessage(""))]
+    )
+    result = agent._execute_with_tools("t")
+    assert result != ""
+    assert "try again" in result.lower()

@@ -249,6 +249,12 @@ class SimpleRAG:
         Filename resolution is lenient (exact path, basename, or basename
         without extension). Returns labeled excerpts the LLM can cite, or ''
         when the document is not in the store.
+
+        Scoring is frequency-based (not just presence): a chunk that mentions
+        the topic several times beats chunks that mention it once, so the
+        section that REALLY discusses the topic wins over incidental mentions.
+        Chunks adjacent to a match are also included, because a topic usually
+        spans a run of chunks and the surrounding context improves citations.
         """
         target = None
         for path in self.list_documents():
@@ -263,16 +269,43 @@ class SimpleRAG:
             return ""
 
         query_words = self._query_tokens(query)
-        scored = []
-        for doc in docs:
-            content_lower = doc["content"].lower()
-            score = sum(1 for w in query_words if w in content_lower)
-            scored.append((score, doc))
-        # Deterministic: best match first, then insertion (chunk) order.
-        scored.sort(key=lambda x: (-x[0], x[1]["chunk_index"]))
-        picked = [d for s, d in scored if s > 0][:top_k]
-        if not picked:
+        if not query_words:
             picked = docs[:top_k]
+        else:
+            scored = []
+            for doc in docs:
+                content_lower = doc["content"].lower()
+                freq = 0
+                matched = 0
+                for w in query_words:
+                    c = content_lower.count(w)
+                    if c:
+                        freq += c
+                        matched += 1
+                # Frequency dominates (topic density); matched count breaks
+                # ties between chunks covering several query aspects.
+                scored.append((freq + matched, doc))
+            # Deterministic: best score first, then insertion (chunk) order.
+            scored.sort(key=lambda x: (-x[0], x[1]["chunk_index"]))
+            best = [d for s, d in scored if s > 0][:top_k]
+            if not best:
+                picked = docs[:top_k]
+            else:
+                picked = list(best)
+                picked_idx = {d["chunk_index"] for d in picked}
+                # Context window: pull in the neighbors of matched chunks so
+                # the section around the topic is available for citing.
+                for _s, d in scored:
+                    if len(picked) >= top_k + 2:
+                        break
+                    if d["chunk_index"] in picked_idx:
+                        continue
+                    if (d["chunk_index"] - 1 in picked_idx
+                            or d["chunk_index"] + 1 in picked_idx):
+                        picked.append(d)
+                        picked_idx.add(d["chunk_index"])
+                # Deterministic output: document order, not score order.
+                picked.sort(key=lambda x: x["chunk_index"])
 
         lines = []
         for d in picked:
