@@ -212,6 +212,10 @@ async def lifespan(app: FastAPI):
     app.state.logger = AgentLogger()
     app.state.monitor = PerformanceMonitor()
     app.state.config = config
+    # Real agent-team tools (web search + document reads) read the SAME RAG
+    # store, so any user can ask the agents to read their uploaded files.
+    from modules.agent_tools import set_document_store
+    set_document_store(app.state.rag)
     # Real agent-team usage tracking (populated by chat dispatches and MCP
     # tool calls below). Reset on restart, like the other in-memory stats.
     app.state.agent_stats = {"handled": {}, "last_used": {}}
@@ -721,18 +725,27 @@ _DOC_QUESTION_PHRASES = [
 ]
 
 
-def is_document_question(message: str) -> bool:
-    """True if the user is asking about their uploaded documents/files."""
+def is_document_question(message: str, rag=None) -> bool:
+    """True if the user is asking about their uploaded documents/files.
+
+    When a RAG store is supplied, a multi-document comparison ("compare X
+    and Y", both uploaded files) also counts as a document question so it
+    routes to the RAG answerer instead of a generic agent.
+    """
     m = message.lower()
     if any(p in m for p in _DOC_QUESTION_PHRASES):
         return True
     # Generic pattern: a document-intent phrase + a reference to a file.
     # Catches forms the exact phrase list misses, e.g. "summarize the CRM
     # file" or "what is the Captainassistant.py file?".
-    return (
+    if (
         any(w in m for w in _DOC_QUESTION_REF_WORDS)
         and any(i in m for i in _DOC_QUESTION_INTENTS)
-    )
+    ):
+        return True
+    if rag is not None and _detect_compare_documents(message, rag)[0]:
+        return True
+    return False
 
 
 # Words that point at an uploaded file/document.
@@ -891,8 +904,13 @@ def _ask_doc_question(client, query: str, context: str) -> str:
         "document), its purpose, and the main technology or content it "
         "involves. Use the file names and excerpt content shown above - do "
         "not guess beyond what the excerpts show.\n"
-        "Then answer the question using ONLY the excerpts above. Be concise "
-        "and clear. Use short paragraphs or bullets where helpful. Never "
+        "Then answer the question using ONLY the excerpts above. Cite the "
+        "source for EVERY claim by appending the exact file name and chunk "
+        "from the 'Source:' labels in parentheses, e.g. (CRM-3.docx, chunk "
+        "2) - every sentence that makes a factual statement must end with "
+        "such a citation. Never cite a file that is not in the excerpts, "
+        "and never invent claims the excerpts do not support. Be concise "
+        "and clear, using short paragraphs or bullets where helpful. Never "
         "dump raw excerpts. If the excerpts don't contain the answer, say "
         "so plainly."
     )
@@ -910,14 +928,100 @@ def _ask_doc_question(client, query: str, context: str) -> str:
         return f"Could not summarize the documents right now: {e}"
 
 
+def _doc_match_score(query_lower: str, path: str) -> int:
+    """How strongly a query references an uploaded document path.
+
+    Direct references (the full path or its file name appears in the query)
+    score 10; additionally, each query token that appears in the file name's
+    stem scores 1 (e.g. "crm" matches "CRM-3.docx", "sample" matches
+    "sample.txt"). Pure helper (testable offline).
+    """
+    base = os.path.basename(path).lower()
+    stem = os.path.splitext(base)[0]
+    score = 0
+    if path.lower() in query_lower or base in query_lower:
+        score += 10
+    stem_tokens = set(re.findall(r"[a-z0-9]+", stem))
+    query_tokens = set(re.findall(r"[a-z0-9]+", query_lower))
+    score += len(stem_tokens & query_tokens)
+    return score
+
+
+# Explicit comparison signals for multi-document questions.
+_COMPARE_SIGNALS = (
+    "compare", "comparison", "versus", " vs ", "vs.", "contrast",
+    "difference between", "differences between",
+)
+
+
+def _detect_compare_documents(query: str, rag) -> tuple:
+    """Detect a request to compare two uploaded documents.
+
+    Returns (True, [doc1, doc2]) with resolved store paths, or (False, []).
+
+    Works for ANY pair of uploaded files (nothing is hardcoded): it only
+    inspects the query text and the store's document list. Pure helper
+    (testable offline).
+    """
+    m = (query or "").lower()
+    if not any(sig in m for sig in _COMPARE_SIGNALS):
+        return False, []
+    available = rag.list_documents()
+    if len(available) < 2:
+        return False, []
+    scored = [(path, _doc_match_score(m, path)) for path in available]
+    scored = [(p, s) for p, s in scored if s > 0]
+    scored.sort(key=lambda x: -x[1])
+    if len(scored) < 2:
+        return False, []
+    return True, [p for p, _s in scored[:2]]
+
+
+def _compare_documents(query: str, files, rag, client) -> str:
+    """Answer a multi-document comparison using per-document labeled context."""
+    parts = []
+    for f in files:
+        ctx = rag.get_context_for_document(query, f, top_k=4)
+        if ctx:
+            parts.append(ctx)
+    if not parts:
+        return "I could not find the documents to compare. Upload them on the Documents page first."
+    combined = "\n\n".join(parts)
+    prompt = (
+        "You are comparing two uploaded documents.\n\n"
+        f"Document excerpts (each labeled with its source file):\n{combined}\n\n"
+        f"Comparison request: {query}\n\n"
+        "Answer in this structure:\n"
+        "1. One line about what each document IS (type, purpose).\n"
+        "2. What each document says about the topic, citing the source file "
+        "in parentheses after every claim (e.g. (CRM-3.docx, chunk 2)).\n"
+        "3. Key similarities and differences.\n"
+        "Use ONLY the excerpts above - do not invent facts. If a document "
+        "does not discuss the topic, say so plainly."
+    )
+    try:
+        resp = _complete_with_fallback(
+            client,
+            [
+                {"role": "system", "content": "You are a careful document analyst."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1200,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        return f"Could not compare the documents right now: {e}"
+
+
 def answer_from_documents(query: str, rag) -> str:
     """Answer a question about uploaded documents with a CLEAN, LLM-written
     answer (instead of dumping raw chunk JSON / excerpts).
 
-    Two-pass retrieval: if the first answer is "thin" (too short, or the
-    model says the documents don't contain the information), the question is
-    reformulated into a more specific query and the documents are searched
-    once more before giving up.
+    Handles multi-document comparisons ("compare X and Y") with per-document
+    retrieval, then a two-pass retrieval for regular questions: if the first
+    answer is "thin" (too short, or the model says the documents don't
+    contain the information), the question is reformulated into a more
+    specific query and the documents are searched once more before giving up.
     """
     try:
         context = rag.get_context(query)
@@ -934,6 +1038,12 @@ def answer_from_documents(query: str, rag) -> str:
     if not api_key:
         return context
     client = Groq(api_key=api_key)
+
+    # Multi-document comparison: retrieve per document and answer with a
+    # comparison instead of a single mixed context.
+    is_compare, compare_files = _detect_compare_documents(query, rag)
+    if is_compare:
+        return _compare_documents(query, compare_files, rag, client)
 
     first = _ask_doc_question(client, query, context)
 
@@ -1052,7 +1162,7 @@ async def chat(
             if not fact_answered:
                 # Simple greeting handler - bypass agent for simple messages
                 greetings = ["hi", "hello", "hey", "hola", "good morning", "good afternoon", "good evening", "howdy", "yo", "sup"]
-                if is_document_question(request.message):
+                if is_document_question(request.message, rag):
                     # Clean answers about uploaded documents (RAG retrieval +
                     # LLM summary) instead of dumping raw chunks.
                     response = answer_from_documents(request.message, rag)
@@ -1237,7 +1347,7 @@ async def chat_stream(
                 return
 
         # Clean answers about uploaded documents (RAG + LLM summary)
-        if is_document_question(request.message):
+        if is_document_question(request.message, rag):
             memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             result = answer_from_documents(request.message, rag)
             # Anchor this conversation so later messages like
@@ -1263,18 +1373,26 @@ async def chat_stream(
         use_multi_agent, agent_type = route_multi_agent(request.message)
 
         if use_multi_agent:
-            # Multi-agent doesn't support streaming — collect and yield as one chunk.
-            # Inject recent conversation context so follow-ups about earlier
-            # messages work.
+            # Stream the agent-team run: tool activity first, then answer
+            # tokens - the same experience as general chat, no blocking
+            # spinner. Inject recent conversation context so follow-ups about
+            # earlier messages work.
             memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             orchestrator = MultiAgentOrchestrator()
             task = _with_context(request.message, memory, user_id, conversation_id)
+            agent = orchestrator.agents[agent_type]
+            full = ""
             try:
-                result = orchestrator.agents[agent_type].execute(task)
+                for event in agent.execute_stream(task):
+                    if event.get("type") == "tool":
+                        yield f"data: {escape_sse(event['content'])}\n\n"
+                    else:
+                        full += event["content"]
+                        yield f"data: {escape_sse(event['content'])}\n\n"
             except Exception as e:
-                result = f"⚠️ Error from {agent_type} agent: {e}"
-            memory.add_message("assistant", result, user_id=user_id, conversation_id=conversation_id)
-            yield f"data: {escape_sse(result)}\n\n"
+                full = f"⚠️ Error from {agent_type} agent: {e}"
+                yield f"data: {escape_sse(full)}\n\n"
+            memory.add_message("assistant", full, user_id=user_id, conversation_id=conversation_id)
             yield "data: [DONE]\n\n"
         else:
             # Stream from general ReAct agent (it reads + writes the SAME memory

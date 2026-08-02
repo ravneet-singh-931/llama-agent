@@ -225,7 +225,7 @@ class SimpleRAG:
         if not results and self.documents:
             context = "Uploaded documents (full content):\n\n"
             for doc in self.documents:
-                context += f"--- File: {doc['file']} ---\n"
+                context += f"--- Source: {doc['file']} (chunk {doc['chunk_index']}) ---\n"
                 context += f"{doc['content']}\n\n"
             # Truncate if too long (stay under ~8000 chars for LLM context)
             if len(context) > 8000:
@@ -242,6 +242,45 @@ class SimpleRAG:
         
         return context
     
+    def get_context_for_document(self, query: str, filename: str, top_k: int = 4) -> str:
+        """Retrieve context from a SINGLE uploaded document (used for
+        multi-document comparison).
+
+        Filename resolution is lenient (exact path, basename, or basename
+        without extension). Returns labeled excerpts the LLM can cite, or ''
+        when the document is not in the store.
+        """
+        target = None
+        for path in self.list_documents():
+            base = os.path.basename(path)
+            if filename == path or filename == base or filename == os.path.splitext(base)[0]:
+                target = path
+                break
+        if target is None:
+            return ""
+        docs = [d for d in self.documents if d["file"] == target]
+        if not docs:
+            return ""
+
+        query_words = self._query_tokens(query)
+        scored = []
+        for doc in docs:
+            content_lower = doc["content"].lower()
+            score = sum(1 for w in query_words if w in content_lower)
+            scored.append((score, doc))
+        # Deterministic: best match first, then insertion (chunk) order.
+        scored.sort(key=lambda x: (-x[0], x[1]["chunk_index"]))
+        picked = [d for s, d in scored if s > 0][:top_k]
+        if not picked:
+            picked = docs[:top_k]
+
+        lines = []
+        for d in picked:
+            lines.append(
+                f"--- Source: {d['file']} (chunk {d['chunk_index']}) ---\n{d['content']}"
+            )
+        return "\n\n".join(lines)
+
     def list_documents(self) -> List[str]:
         """List all loaded documents"""
         files = set(doc["file"] for doc in self.documents)
