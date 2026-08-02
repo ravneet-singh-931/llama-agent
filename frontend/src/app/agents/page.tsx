@@ -17,8 +17,6 @@ import {
   Server,
   XCircle,
   Zap,
-  Users,
-  BarChart3,
   RefreshCw,
   Terminal,
 } from "lucide-react";

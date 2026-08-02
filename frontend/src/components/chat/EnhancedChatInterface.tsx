@@ -57,7 +57,7 @@ export function EnhancedChatInterface({
   );
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [agentSuggestions, setAgentSuggestions] = useState<AgentSuggestion[]>([]);
+  const [agentSuggestions] = useState<AgentSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
