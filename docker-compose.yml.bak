@@ -1,0 +1,387 @@
+# ============================================
+# Docker Compose - Full Stack with DevOps
+# ============================================
+# Usage:
+#   docker-compose up -d                    (start everything)
+#   docker-compose up -d api web            (start API + UI only)
+#   docker-compose up -d --scale api=3      (load balance with 3 replicas)
+#   docker-compose logs -f grafana          (watch Grafana logs)
+#   docker-compose down                     (stop everything)
+#
+# Services: 13 total
+#   - postgres       (database)
+#   - redis          (caching)
+#   - api            (FastAPI REST + WebSocket)
+#   - web            (Streamlit UI)
+#   - mcp-server     (Model Context Protocol agent server)
+#   - frontend       (Next.js UI)
+#   - nginx          (SSL + Load Balancer + CDN headers)
+#   - prometheus      (metrics collection)
+#   - grafana         (monitoring dashboards)
+#   - loki            (log aggregation)
+#   - promtail        (log shipping)
+#   - node-exporter   (system metrics)
+#   - phoenix         (LLM observability by Arize AI)
+# ============================================
+
+services:
+  # =============================================
+  # 1. PostgreSQL Database
+  # =============================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: llama-agent-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: llama_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Initialize schema, extensions (pgvector, pg_trgm, uuid-ossp) and grants
+      # on first start of an empty data volume
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # =============================================
+  # 2. Redis (Caching + WebSocket pub/sub)
+  # =============================================
+  redis:
+    image: redis:7-alpine
+    container_name: llama-agent-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # =============================================
+  # 3. REST API (FastAPI + Swagger UI + Metrics)
+  # =============================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llama-agent-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
+      - REDIS_URL=redis://redis:6379
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
+      - ENVIRONMENT=production
+      # TEMPORARY: llama-3.3-70b-versatile free-tier daily limit still 429s
+      # (verified live 2026-07-31 with current key). Remove once quota resets
+      # or Groq tier is upgraded; default is the 70b model.
+      - LLM_MODEL=llama-3.1-8b-instant
+    secrets:
+      - groq_api_key
+      - jwt_secret_key
+      - postgres_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      - ./data:/app/data
+      # Persist per-user conversation history + facts across container
+      # re-creates and deployments (memory files live in /app/memory)
+      - ./data/memory:/app/memory
+      - chroma_model_cache:/root/.cache/chroma
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - backend
+      - monitoring
+
+  # =============================================
+  # 4. Streamlit Web UI (includes MCP client)
+  # =============================================
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llama-agent-web
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      # TEMPORARY override - see LLM_MODEL comment under api service
+      - LLM_MODEL=llama-3.1-8b-instant
+    secrets:
+      - groq_api_key
+      - postgres_password
+    depends_on:
+      - api
+    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+    volumes:
+      - ./data:/app/data
+      # Same shared memory dir as the api service so both write to the
+      # same persisted history files
+      - ./data/memory:/app/memory
+      - chroma_model_cache:/root/.cache/chroma
+    networks:
+      - backend
+      - monitoring
+
+  # =============================================
+  # 5. MCP Agent Server (Model Context Protocol)
+  #    Exposes 5 specialized agents as MCP tools
+  #    Protocol: SSE (Server-Sent Events) via HTTP
+  # =============================================
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llama-agent-mcp
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      # TEMPORARY override - see LLM_MODEL comment under api service
+      - LLM_MODEL=llama-3.1-8b-instant
+    secrets:
+      - groq_api_key
+    # Also inject the key directly so Python code can access it
+    # This works because docker-compose reads the file and sets the env var
+    command: python mcp_agents_server.py --transport sse --port 8001 --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost', 8001), timeout=5); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - backend
+      - monitoring
+
+  # =============================================
+  # 6. Next.js Frontend (auto-scales to Vercel later)
+  # =============================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=/api
+    container_name: llama-agent-frontend
+    restart: unless-stopped
+    environment:
+      # Backend upstream used by Next.js rewrites so the standalone server on
+      # port 3001 can proxy /api/* to FastAPI without going through Nginx.
+      - API_PROXY_URL=http://api:8000
+    ports:
+      - "3001:3000"
+    depends_on:
+      - api
+    networks:
+      - backend
+
+  # =============================================
+  # 7. Nginx - SSL + Load Balancer + CDN Headers
+  # =============================================
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    container_name: llama-agent-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+      - web
+      - frontend
+      - mcp-server
+      - grafana
+    networks:
+      - backend
+      - monitoring
+
+  # =============================================
+  # 8. Prometheus (Metrics Collection)
+  # =============================================
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: llama-agent-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    networks:
+      - monitoring
+
+  # =============================================
+  # 9. Grafana (Monitoring Dashboards)
+  # =============================================
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: llama-agent-grafana
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SERVER_HTTP_PORT=3000
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD_FILE=/run/secrets/grafana_admin_password
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+    secrets:
+      - grafana_admin_password
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - monitoring
+
+  # =============================================
+  # 10. Loki (Log Aggregation - like Elasticsearch)
+  # =============================================
+  loki:
+    image: grafana/loki:2.9.6
+    container_name: llama-agent-loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./config/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - monitoring
+
+  # =============================================
+  # 11. Promtail (Log Shipping to Loki)
+  # =============================================
+  promtail:
+    image: grafana/promtail:2.9.6
+    container_name: llama-agent-promtail
+    restart: unless-stopped
+    volumes:
+      - ./config/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - promtail_positions:/tmp
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - monitoring
+
+  # =============================================
+  # 12. Node Exporter (System Metrics for Prometheus)
+  # =============================================
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: llama-agent-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+    networks:
+      - monitoring
+
+  # =============================================
+  # 13. Phoenix (LLM Observability by Arize AI)
+  # =============================================
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: llama-agent-phoenix
+    restart: unless-stopped
+    ports:
+      - "6006:6006"
+    environment:
+      - PHOENIX_PORT=6006
+      - PHOENIX_HOST=0.0.0.0
+    volumes:
+      - phoenix_data:/root/.phoenix
+    networks:
+      - monitoring
+
+
+# ============================================
+# Docker Secrets (encrypted files)
+# ============================================
+secrets:
+  groq_api_key:
+    file: ./secrets/groq_api_key.txt
+  jwt_secret_key:
+    file: ./secrets/jwt_secret_key.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt
+
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  backend:
+    driver: bridge
+  monitoring:
+    driver: bridge
+
+
+# ============================================
+# Volumes (persistent data)
+# ============================================
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  promtail_positions:
+  phoenix_data:
+  chroma_model_cache:
