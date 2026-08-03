@@ -114,11 +114,12 @@ class BaseAgent:
         return ""
 
     # Matches a string that consists ONLY of tool-call markers like
-    # "<list_uploaded_documents>{}</list_uploaded_documents>" — not a real
+    # "<list_uploaded_documents>{}</list_uploaded_documents>" or
+    # "<function=web_search>{\"query\": \"...\"}</function>" — not a real
     # answer. Used to detect when a small model echoes the tool transcript
     # back instead of producing a genuine response.
     _TOOL_TRANSCRIPT_RE = re.compile(
-        r"^(?:\s*<\w+>[^<]*</\w+>\s*)+$", re.DOTALL
+        r"^(?:\s*<[^>]+>[^<]*</[^>]+>\s*)+$", re.DOTALL
     )
 
     def _execute_with_tools(self, task: str) -> str:
@@ -187,15 +188,26 @@ class BaseAgent:
                 self.client, model, _initial_messages(), AGENT_TOOL_SCHEMAS,
                 max_tokens=2048
             )
-        except Exception as e:
-            if should_fallback(e, "strong"):
-                model = resolve_model("fast")
-                messages, events, final_content = run_tool_rounds(
-                    self.client, model, _initial_messages(), AGENT_TOOL_SCHEMAS,
-                    max_tokens=2048
+        except Exception:
+            # Tool loop failed (API error, rate limit, malformed response).
+            # Fall back to a plain non-tool stream instead of crashing.
+            try:
+                stream = self.client.chat.completions.create(
+                    model=self.model, messages=_initial_messages(),
+                    stream=True, max_tokens=2048
                 )
-            else:
-                raise
+                for chunk in stream:
+                    choices = getattr(chunk, "choices", None) or []
+                    delta = getattr(choices[0], "delta", None) if choices else None
+                    text = getattr(delta, "content", None) if delta else None
+                    if text:
+                        yield {"type": "token", "content": text}
+                yield {"type": "token", "content": ""}
+                return
+            except Exception:
+                yield {"type": "token", "content":
+                    "I couldn't complete that task right now. Please try again."}
+                return
 
         for ev in events:
             yield {"type": "tool", "content": ev}
@@ -256,15 +268,22 @@ class ResearchAgent(BaseAgent):
 
     _system = (
         "You are Research Agent. research specialist who gathers and analyzes "
-        "information. Be concise and direct."
+        "information. Be concise and direct.\n"
+        "IMPORTANT RULE: For questions about current events, latest news, "
+        "recent developments, breaking news, or anything time-sensitive, "
+        "ALWAYS use the web_search tool FIRST. Do not try to answer from "
+        "memory or document content for time-sensitive questions."
     )
     _task_prompt = (
         "Research task: {task}\n\n"
         "Answer the question directly and concisely. Give the key facts and "
-        "the most useful examples. Use the web_search tool for recent events "
-        "or anything outside the uploaded documents, and the "
-        "read_uploaded_document tool when the task refers to an uploaded "
-        "file (call list_uploaded_documents first to see the file names). "
+        "the most useful examples.\n"
+        "RULE: For questions about current events, latest news, recent "
+        "developments, breaking news, today's date, or anything time-sensitive, "
+        "you MUST use the web_search tool FIRST. Do not use document tools "
+        "for time-sensitive questions.\n"
+        "For questions about uploaded files, use list_uploaded_documents first, "
+        "then read_uploaded_document as needed.\n"
         "Do NOT analyze the user's intent, add meta-commentary, or use "
         "verbose numbered sections. Be accurate and to the point."
     )

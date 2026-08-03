@@ -611,6 +611,10 @@ _NAME_QUESTION_PATTERNS = [
     re.compile(r"who am i", re.IGNORECASE),
 ]
 
+# Patterns for the remember command: "my name is X" and "X is Y"
+_NAME_PATTERN = re.compile(r"my name is\s+(" + _NAME_TOKEN + r"(?:\s+" + _NAME_TOKEN + r"){0,3})", re.IGNORECASE)
+_IS_PATTERN = re.compile(r"(.{5,}?)\s+is\s+(.+)", re.IGNORECASE)
+
 
 def extract_name_from_message(message: str) -> Optional[str]:
     """Return a name if the message introduces one, otherwise None."""
@@ -762,7 +766,7 @@ def is_document_question(message: str, rag=None) -> bool:
 
 # Words that point at an uploaded file/document.
 _DOC_QUESTION_REF_WORDS = (
-    "file", "document", "uploaded", "upload",
+    "file", "document", "uploaded", "upload", "doc", "docs",
     ".txt", ".csv", ".docx", ".pdf", ".py", ".md", ".json",
 )
 
@@ -1173,16 +1177,34 @@ async def chat(
         # Check for special commands
         if request.message.lower().startswith("remember "):
             content = request.message[9:].strip()
-            if "=" in content:
+            # Support "my name is X" format
+            name_match = _NAME_PATTERN.search(content)
+            if name_match:
+                facts.remember("user's name", name_match.group(1))
+                response = f"✅ Remembered: your name is {name_match.group(1)}"
+            elif "=" in content:
                 key, value = content.split("=", 1)
                 facts.remember(key.strip(), value.strip())
                 response = f"✅ Remembered: {key.strip()} = {value.strip()}"
             else:
-                response = "Usage: remember key = value"
+                # Support "X is Y" format (e.g. "favorite color is blue")
+                is_match = _IS_PATTERN.search(content)
+                if is_match:
+                    facts.remember(is_match.group(1).strip(), is_match.group(2).strip())
+                    response = f"✅ Remembered: {is_match.group(1).strip()} = {is_match.group(2).strip()}"
+                else:
+                    response = "Usage: remember key = value, or say 'my name is X', or 'X is Y'."
         
         elif request.message.lower().startswith("recall "):
             key = request.message[7:].strip()
-            response = facts.recall(key)
+            # "recall my name" → look up "user's name"
+            if _NAME_PATTERN.search(key) or key.lower() in ("my name", "my name please"):
+                key = "user's name"
+            value = facts.recall(key)
+            if value:
+                response = f"✅ {key}: {value}"
+            else:
+                response = f"I don't remember anything about '{key}'."
         
         elif request.message.lower() == "show facts":
             all_facts = facts.get_all_facts()
