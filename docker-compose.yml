@@ -82,16 +82,14 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
       - REDIS_URL=redis://redis:6379
-      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
-      - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
-      - ENVIRONMENT=production
-      # TEMPORARY: llama-3.3-70b-versatile free-tier daily limit still 429s
-      # (verified live 2026-07-31 with current key). Tiered defaults are
-      # strong=llama-3.3-70b-versatile (one-shot answers/agents) and
-      # fast=llama-3.1-8b-instant (streaming chat). Delete BOTH lines below
-      # once quota resets or the Groq tier is upgraded.
-      - LLM_MODEL_STRONG=llama-3.1-8b-instant
-      - LLM_MODEL_FAST=llama-3.1-8b-instant
+       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
+       - ENVIRONMENT=production
+       # Tiered defaults: strong=70b for one-shot answers/agents,
+       # fast=8b for streaming chat. Delete these lines once the
+       # free-tier 70b daily quota is upgraded or resets.
+       - LLM_MODEL_STRONG=llama-3.3-70b-versatile
+       - LLM_MODEL_FAST=llama-3.1-8b-instant
     secrets:
       - groq_api_key
       - jwt_secret_key
@@ -130,11 +128,11 @@ services:
     ports:
       - "8501:8501"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
-      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
-      # TEMPORARY override - see LLM_MODEL_STRONG/LLM_MODEL_FAST comment under api service
-      - LLM_MODEL_STRONG=llama-3.1-8b-instant
-      - LLM_MODEL_FAST=llama-3.1-8b-instant
+       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
+       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+       # Override: use 70b for strong model, 8b for fast.
+       - LLM_MODEL_STRONG=llama-3.3-70b-versatile
+       - LLM_MODEL_FAST=llama-3.1-8b-instant
     secrets:
       - groq_api_key
       - postgres_password
@@ -163,10 +161,10 @@ services:
     container_name: llama-agent-mcp
     restart: unless-stopped
     environment:
-      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
-      # TEMPORARY override - see LLM_MODEL_STRONG/LLM_MODEL_FAST comment under api service
-      - LLM_MODEL_STRONG=llama-3.1-8b-instant
-      - LLM_MODEL_FAST=llama-3.1-8b-instant
+       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+       # Override: use 70b for strong model, 8b for fast.
+       - LLM_MODEL_STRONG=llama-3.3-70b-versatile
+       - LLM_MODEL_FAST=llama-3.1-8b-instant
     secrets:
       - groq_api_key
     # Also inject the key directly so Python code can access it
