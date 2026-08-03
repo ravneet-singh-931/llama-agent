@@ -119,6 +119,9 @@ class ConversationMemory:
         Never overwrites the owner of an existing conversation: if the given
         conversation_id belongs to another user, a fresh conversation is
         created for this user instead.
+
+        Returns the conversation_id the message was actually written to
+        (useful when a caller mirrors the message into PostgreSQL).
         """
         conversation_id = self._resolve_conversation_id(user_id, conversation_id)
         conv = self.data["conversations"][conversation_id]
@@ -135,10 +138,15 @@ class ConversationMemory:
             conv["title"] = title[:60] if title else "New chat"
         conv["updated_at"] = datetime.now().isoformat()
         self._save()
+        return conversation_id
 
     def create_conversation(self, user_id: str = "guest", title: str = "New chat") -> Dict:
-        """Create a new empty conversation and return its summary."""
-        conversation_id = uuid.uuid4().hex[:16]
+        """Create a new empty conversation and return its summary.
+
+        Conversation ids are real UUIDs so they map 1:1 to the PostgreSQL
+        conversations table (which stores ids as UUID).
+        """
+        conversation_id = str(uuid.uuid4())
         now = datetime.now().isoformat()
         self.data["conversations"][conversation_id] = {
             "id": conversation_id,

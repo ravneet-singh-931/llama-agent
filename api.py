@@ -11,9 +11,11 @@ Features:
 """
 
 import asyncio
+import logging
 import os
 import re
 import sys
+import uuid
 from datetime import datetime, timezone
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
@@ -83,6 +85,9 @@ from modules.advanced_monitoring import (
 
 # Enterprise operations (feature flags, A/B testing, deployment tracking)
 from modules.cicd_improvements import feature_flags
+
+# Module logger (used by the best-effort Postgres/Redis persistence mirror)
+_log = logging.getLogger("llama_agent.api")
 
 
 # ============ MODELS ============
@@ -280,6 +285,13 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     print("👋 Shutting down...")
+    try:
+        from modules import pg_store, redis_store
+        await pg_store.close_pool()
+        await redis_store.close()
+        print("✅ Persistence layer closed")
+    except Exception as e:
+        print(f"⚠️  Persistence close error: {e}")
 
 
 # ============ CREATE APP ============
@@ -760,10 +772,79 @@ def _record_agent_usage(agent_keys) -> None:
         last_used[key] = now
 
 
-def _with_context(message: str, memory, user_id: str, conversation_id: str) -> str:
+def _default_conversation_id(user_id: str) -> str:
+    """Stable per-user UUID conversation id.
+
+    A real UUID (valid for the Postgres conversations.id column) that is
+    deterministic per user, so messages sent without an explicit
+    conversation_id all land in the same per-user conversation.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"llama-agent-default:{user_id}"))
+
+
+async def _mirror_message(user_id: str, conversation_id: str, role: str, content: str) -> str:
+    """Mirror one chat message to PostgreSQL + invalidate the Redis caches.
+
+    Used when the message was ALREADY written to the JSON memory store by
+    another component (the general ReAct agent writes to memory itself), so we
+    only add the durable Postgres copy the sidebar reads. Never raises:
+    Postgres/Redis are best-effort mirrors.
+    """
+    from modules import pg_store, redis_store
+    try:
+        await pg_store.add_message(user_id, conversation_id, role, content)
+        norm = pg_store.normalize_conversation_id(conversation_id)
+        await redis_store.invalidate_user(user_id)
+        await redis_store.invalidate_conversation(norm)
+    except Exception as e:
+        _log.warning("persist mirror failed (chat continues on memory store): %s", e)
+    return conversation_id
+
+
+async def _persist_message(user_id: str, conversation_id: str, role: str, content: str) -> str:
+    """Write one chat message to the live JSON memory store (agent context) and
+    mirror it to PostgreSQL (durable history the sidebar reads) + invalidate the
+    Redis caches. Never raises: Postgres/Redis are best-effort mirrors.
+
+    Returns the conversation_id the message was actually written to.
+    """
+    memory = app.state.memory
+    resolved = memory.add_message(role, content, user_id=user_id,
+                                  conversation_id=conversation_id) or conversation_id
+    return await _mirror_message(user_id, resolved, role, content)
+
+
+async def _with_context(message: str, memory, user_id: str, conversation_id: str) -> str:
     """Prepend this conversation's recent history so specialized agents can
-    answer follow-up questions that reference earlier messages."""
-    context = memory.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
+    answer follow-up questions that reference earlier messages.
+
+    History comes from PostgreSQL (through the Redis cache) when available -
+    the durable store the sidebar reads - falling back to the JSON memory
+    store when the databases are unreachable.
+    """
+    from modules import pg_store, redis_store
+    msgs = None
+    try:
+        norm = pg_store.normalize_conversation_id(conversation_id)
+        msgs = await redis_store.get_json(redis_store.messages_key(norm))
+        if msgs is None:
+            msgs = await pg_store.get_messages(user_id, conversation_id)
+            if msgs is not None:
+                await redis_store.set_json(redis_store.messages_key(norm), msgs, ttl=redis_store.MSGS_TTL)
+    except Exception as e:
+        _log.debug("_with_context pg read failed, using memory: %s", e)
+        msgs = None
+    if msgs is None:
+        context = memory.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
+    else:
+        recent = msgs[-5:]
+        if not recent:
+            context = "No conversation history yet."
+        else:
+            context = "Recent conversation history:\n" + "\n".join(
+                f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:200]}"
+                for m in recent
+            )
     if not context or "No conversation history yet." in context:
         return message
     return f"Recent conversation context:\n{context}\n\nUser's new message: {message}"
@@ -1195,7 +1276,7 @@ async def chat(
     user_id = str(user["id"]) if user else "guest"
     # Per-user default conversation: two users must never share "default".
     # The storage layer also refuses to rebind a conversation to another user.
-    conversation_id = request.conversation_id or f"default_{user_id}"
+    conversation_id = request.conversation_id or _default_conversation_id(user_id)
     
     monitor.track_request()
     query_type = "general"
@@ -1323,7 +1404,7 @@ async def chat(
                             # Strip @Agent prefix so the agent sees
                             # the clean task, not the routing directive.
                             _, clean_message = detect_agent_prefix(request.message)
-                            task = _with_context(clean_message, memory, user_id, conversation_id)
+                            task = await _with_context(clean_message, memory, user_id, conversation_id)
                             response = orchestrator.agents[agent_type].execute(task)
                             _record_agent_usage([agent_type])
                         else:
@@ -1343,8 +1424,9 @@ async def chat(
         elapsed = (datetime.now() - start_time).total_seconds()
         
         # Log interaction (scoped to this user's conversation)
-        memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
-        memory.add_message("assistant", str(response), user_id=user_id, conversation_id=conversation_id)
+        # Mirrored to PostgreSQL + Redis cache for the frontend sidebar.
+        await _persist_message(user_id, conversation_id, "user", request.message)
+        await _persist_message(user_id, conversation_id, "assistant", str(response))
         logger.log_interaction(request.message, str(response), [], elapsed)
         
         # Enterprise monitoring: business metrics + SLA + alert sweep
@@ -1397,19 +1479,19 @@ async def chat_stream(
     rag = app.state.rag
     user_id = str(user["id"]) if user else "guest"
     # Per-user default conversation (never share the legacy "default" id).
-    conversation_id = request.conversation_id or f"default_{user_id}"
+    conversation_id = request.conversation_id or _default_conversation_id(user_id)
 
     async def event_generator():
         # Helper: record the assistant reply, emit it, then signal stream end.
         async def done(text: str):
-            memory.add_message("assistant", text, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "assistant", text)
             yield f"data: {escape_sse(text)}\n\n"
             yield "data: [DONE]\n\n"
 
         # Handle special commands first
         if request.message.lower().startswith("remember "):
             content = request.message[9:].strip()
-            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "user", request.message)
             if "=" in content:
                 key, value = content.split("=", 1)
                 facts.remember(key.strip(), value.strip())
@@ -1422,14 +1504,14 @@ async def chat_stream(
 
         elif request.message.lower().startswith("recall "):
             key = request.message[7:].strip()
-            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "user", request.message)
             result = facts.recall(key)
             async for chunk in done(result):
                 yield chunk
             return
 
         elif request.message.lower() == "show facts":
-            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "user", request.message)
             all_facts = facts.get_all_facts()
             result = "\n".join(f"- {k}: {v}" for k, v in all_facts.items()) if all_facts else "No facts stored."
             async for chunk in done(result):
@@ -1438,7 +1520,7 @@ async def chat_stream(
 
         elif request.message.lower().startswith("search "):
             query = request.message[7:].strip()
-            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "user", request.message)
             result = rag.get_context(query)
             async for chunk in done(result):
                 yield chunk
@@ -1450,7 +1532,7 @@ async def chat_stream(
         # and gets a generic essay instead of the stored name.
         detected_name = extract_name_from_message(request.message)
         if detected_name:
-            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "user", request.message)
             facts.remember("user's name", detected_name)
             reply = f"Nice to meet you, **{detected_name}**! I've remembered your name."
             async for chunk in done(reply):
@@ -1458,7 +1540,7 @@ async def chat_stream(
             return
 
         if is_name_question(request.message):
-            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "user", request.message)
             stored_name = facts.recall("user's name")
             if "don't remember" in stored_name.lower():
                 reply = "I don't know your name yet. Tell me by saying something like \"My name is ...\""
@@ -1475,7 +1557,7 @@ async def chat_stream(
             key_lower = key.lower()
             if (key_lower in lower_input and
                 any(phrase in lower_input for phrase in ["what", "know", "recall", "tell", "remind"])):
-                memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+                await _persist_message(user_id, conversation_id, "user", request.message)
                 reply = f"Your {key} is **{value}**."
                 async for chunk in done(reply):
                     yield chunk
@@ -1483,7 +1565,7 @@ async def chat_stream(
 
         # Clean answers about uploaded documents (RAG + LLM summary)
         if is_document_question(request.message, rag):
-            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "user", request.message)
             result = answer_from_documents(request.message, rag)
             # Anchor this conversation so later messages like
             # "what about the pricing column?" route back here.
@@ -1496,7 +1578,7 @@ async def chat_stream(
         # question in this conversation (e.g. "and the pricing column?").
         followup_query = _doc_followup_query(conversation_id, request.message)
         if followup_query:
-            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "user", request.message)
             result = answer_from_documents(followup_query, rag)
             async for chunk in done(result):
                 yield chunk
@@ -1512,11 +1594,11 @@ async def chat_stream(
             # tokens - the same experience as general chat, no blocking
             # spinner. Inject recent conversation context so follow-ups about
             # earlier messages work.
-            memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "user", request.message)
             orchestrator = MultiAgentOrchestrator()
             # Strip @Agent prefix so the agent sees the clean task.
             _, clean_message = detect_agent_prefix(request.message)
-            task = _with_context(clean_message, memory, user_id, conversation_id)
+            task = await _with_context(clean_message, memory, user_id, conversation_id)
             agent = orchestrator.agents[agent_type]
             full = ""
             try:
@@ -1529,11 +1611,12 @@ async def chat_stream(
             except Exception as e:
                 full = f"⚠️ Error from {agent_type} agent: {e}"
                 yield f"data: {escape_sse(full)}\n\n"
-            memory.add_message("assistant", full, user_id=user_id, conversation_id=conversation_id)
+            await _persist_message(user_id, conversation_id, "assistant", full)
             yield "data: [DONE]\n\n"
         else:
             # Stream from general ReAct agent (it reads + writes the SAME memory
             # instances, so the response is saved to this user's conversation).
+            full_response = ""
             for token in run_agent_stream(
                 request.message,
                 memory=memory,
@@ -1541,7 +1624,13 @@ async def chat_stream(
                 user_id=user_id,
                 conversation_id=conversation_id,
             ):
+                full_response += token
                 yield f"data: {escape_sse(token)}\n\n"
+            # The agent already wrote both messages to the JSON memory store;
+            # mirror them to PostgreSQL (durable history the sidebar reads) and
+            # refresh the Redis caches so the sidebar/conversation views agree.
+            await _mirror_message(user_id, conversation_id, "user", request.message)
+            await _mirror_message(user_id, conversation_id, "assistant", full_response)
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -1739,12 +1828,20 @@ async def list_documents():
 @app.get("/memory")
 async def get_memory(user = Depends(optional_auth)):
     """Get conversation memory (scoped to the current user)"""
+    from modules import pg_store, redis_store
     try:
         memory = app.state.memory
         user_id = str(user["id"]) if user else "guest"
         recent = memory.get_recent(20, user_id=user_id)
         stats = memory.get_stats()
-        conversations = memory.get_conversations(user_id)
+        cache_key = redis_store.list_key(user_id)
+        conversations = await redis_store.get_json(cache_key)
+        if conversations is None:
+            conversations = await pg_store.list_conversations(user_id)
+            if conversations is None:
+                conversations = memory.get_conversations(user_id)
+            else:
+                await redis_store.set_json(cache_key, conversations, ttl=redis_store.LIST_TTL)
         return {
             "stats": stats,
             "recent_messages": recent,
@@ -1757,12 +1854,16 @@ async def get_memory(user = Depends(optional_auth)):
 @app.delete("/memory")
 async def clear_memory(user = Depends(optional_auth)):
     """Clear memory for the current user (conversations + facts)"""
+    from modules import pg_store, redis_store
     try:
         memory = app.state.memory
         facts = app.state.facts
         user_id = str(user["id"]) if user else "guest"
         memory.clear(user_id=user_id)
         facts.clear()
+        # Clear the durable store + caches too so the sidebar matches.
+        await pg_store.clear_user(user_id)
+        await redis_store.invalidate_user(user_id)
         return {"status": "success", "message": f"Memory cleared for {user_id}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1776,21 +1877,51 @@ async def clear_memory(user = Depends(optional_auth)):
 
 @app.get("/conversations")
 async def list_conversations(user = Depends(optional_auth)):
-    """List the current user's conversations (newest first)"""
+    """List the current user's conversations (newest first).
+
+    Read path: Redis cache -> PostgreSQL (durable store) -> JSON memory fallback.
+    """
+    from modules import pg_store, redis_store
     try:
         memory = app.state.memory
         user_id = str(user["id"]) if user else "guest"
-        return {"conversations": memory.get_conversations(user_id)}
+        cache_key = redis_store.list_key(user_id)
+        cached = await redis_store.get_json(cache_key)
+        if cached is not None:
+            return {"conversations": cached}
+        convs = await pg_store.list_conversations(user_id)
+        if convs is None:
+            # Database unreachable -> fall back to the JSON memory store
+            convs = memory.get_conversations(user_id)
+        else:
+            await redis_store.set_json(cache_key, convs, ttl=redis_store.LIST_TTL)
+        return {"conversations": convs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str, user = Depends(optional_auth)):
-    """Get one conversation including its full message history"""
+    """Get one conversation including its full message history.
+
+    Read path: Redis cache -> PostgreSQL -> JSON memory fallback (legacy
+    conversations that predate the Postgres mirror).
+    """
+    from modules import pg_store, redis_store
     try:
         memory = app.state.memory
         user_id = str(user["id"]) if user else "guest"
+        norm = pg_store.normalize_conversation_id(conversation_id)
+        msgs = await redis_store.get_json(redis_store.messages_key(norm))
+        if msgs is None:
+            msgs = await pg_store.get_messages(user_id, conversation_id)
+        if msgs is not None:
+            summary = await pg_store.get_conversation(user_id, conversation_id)
+            if summary is not None:
+                await redis_store.set_json(redis_store.messages_key(norm), msgs, ttl=redis_store.MSGS_TTL)
+                summary["messages"] = msgs
+                return summary
+            # Conversation not in Postgres (or not owned) -> try legacy memory
         summary = memory.get_conversation(user_id, conversation_id)
         if summary is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1811,11 +1942,16 @@ class CreateConversationRequest(BaseModel):
 async def create_conversation(request: CreateConversationRequest = None,
                               user = Depends(optional_auth)):
     """Create a new empty conversation and return its id"""
+    from modules import pg_store, redis_store
     try:
         memory = app.state.memory
         user_id = str(user["id"]) if user else "guest"
         title = request.title if request is not None and request.title else "New chat"
         conv = memory.create_conversation(user_id, title=title)
+        # Mirror into PostgreSQL + drop the user's cached list so the sidebar
+        # sees the new conversation immediately.
+        await pg_store.ensure_conversation(user_id, conv["id"], title=title)
+        await redis_store.invalidate_user(user_id)
         return conv
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1824,11 +1960,15 @@ async def create_conversation(request: CreateConversationRequest = None,
 @app.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, user = Depends(optional_auth)):
     """Delete a conversation (only the owner may delete it)"""
+    from modules import pg_store, redis_store
     try:
         memory = app.state.memory
         user_id = str(user["id"]) if user else "guest"
-        deleted = memory.delete_conversation(user_id, conversation_id)
-        if not deleted:
+        deleted_mem = memory.delete_conversation(user_id, conversation_id)
+        deleted_pg = await pg_store.delete_conversation(user_id, conversation_id)
+        await redis_store.invalidate_user(user_id)
+        await redis_store.invalidate_conversation(pg_store.normalize_conversation_id(conversation_id))
+        if not deleted_mem and not deleted_pg:
             raise HTTPException(status_code=404, detail="Conversation not found")
         return {"status": "success", "conversation_id": conversation_id}
     except HTTPException:
