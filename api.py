@@ -644,6 +644,35 @@ def is_name_question(message: str) -> bool:
     return any(p.search(message) for p in _NAME_QUESTION_PATTERNS)
 
 
+# Agent prefix routing: "@AgentType rest of message" explicitly routes
+# to a specific agent. Supported prefixes (case-insensitive):
+#   @Research Agent, @Coder Agent, @Writer Agent, @Planner Agent, @Analyzer Agent
+_AGENT_PREFIX_MAP = {
+    "research": "research",
+    "coder": "coder",
+    "writer": "writer",
+    "planner": "planner",
+    "analyzer": "analyzer",
+}
+_AGENT_PREFIX_RE = re.compile(
+    r"^@\s*(" + "|".join(re.escape(k) for k in _AGENT_PREFIX_MAP) + r")\s+agent\s+(.*)",
+    re.IGNORECASE,
+)
+
+
+def detect_agent_prefix(message: str) -> tuple:
+    """If the message starts with @AgentType Agent, return
+    (agent_type, stripped_message). Otherwise return (None, message).
+
+    '@Research Agent tell me the latest news' → ('research', 'tell me the latest news')
+    '@Coder Agent write a function' → ('coder', 'write a function')
+    """
+    m = _AGENT_PREFIX_RE.match(message.strip())
+    if m:
+        return _AGENT_PREFIX_MAP[m.group(1).lower()], m.group(2)
+    return None, message
+
+
 # ---------- shared multi-agent routing keywords (tight, intent-based) ---------
 # Only clearly specialized requests are sent to the multi-agent system. Loose
 # words like "what is", "how does", "python", "api" etc. are NOT enough — those
@@ -675,8 +704,18 @@ RECENCY_KEYWORDS = [
 
 
 def route_multi_agent(message: str):
-    """Return (use_multi_agent, agent_type) for a message."""
+    """Return (use_multi_agent, agent_type) for a message.
+
+    Checks @Agent prefix first (e.g. '@Research Agent ...'), then
+    keyword-based routing, then falls back to the general ReAct agent.
+    """
     task_lower = message.lower()
+
+    # @Agent prefix: explicit routing
+    agent_type, _ = detect_agent_prefix(message)
+    if agent_type is not None:
+        return True, agent_type
+
     if any(kw in task_lower for kw in CODE_KEYWORDS):
         return True, "coder"
     if any(kw in task_lower for kw in WRITER_KEYWORDS):
@@ -733,6 +772,8 @@ def _with_context(message: str, memory, user_id: str, conversation_id: str) -> s
 _DOC_QUESTION_PHRASES = [
     "summarize the uploaded", "summarize uploaded", "summary of the uploaded",
     "summarize the file", "summarize the document", "summarize file",
+    "sumarize the uploaded", "sumarize uploaded", "sumarize the file",
+    "sumarize the document", "sumarize file",
     "about the uploaded", "about the document", "about the file",
     "from the document", "from the file", "in the document", "in the file",
     "from the uploaded", "document says", "file says", "uploaded file",
@@ -772,9 +813,9 @@ _DOC_QUESTION_REF_WORDS = (
 
 # Phrases that signal the user wants information ABOUT that file.
 _DOC_QUESTION_INTENTS = (
-    "summarize", "summary", "summarise", "describe", "what is", "what's",
-    "what does", "what are", "tell me", "explain", "show me", "read ",
-    "about the", "about this", "about my",
+    "summarize", "summary", "summarise", "sumarize", "describe",
+    "what is", "what's", "tell me about", "explain", "show me",
+    "read", "give me", "info about", "information about",
 )
 
 
@@ -1279,7 +1320,10 @@ async def chat(
                         if use_multi_agent:
                             query_type = f"multi_agent:{agent_type}"
                             orchestrator = MultiAgentOrchestrator()
-                            task = _with_context(request.message, memory, user_id, conversation_id)
+                            # Strip @Agent prefix so the agent sees
+                            # the clean task, not the routing directive.
+                            _, clean_message = detect_agent_prefix(request.message)
+                            task = _with_context(clean_message, memory, user_id, conversation_id)
                             response = orchestrator.agents[agent_type].execute(task)
                             _record_agent_usage([agent_type])
                         else:
@@ -1470,7 +1514,9 @@ async def chat_stream(
             # earlier messages work.
             memory.add_message("user", request.message, user_id=user_id, conversation_id=conversation_id)
             orchestrator = MultiAgentOrchestrator()
-            task = _with_context(request.message, memory, user_id, conversation_id)
+            # Strip @Agent prefix so the agent sees the clean task.
+            _, clean_message = detect_agent_prefix(request.message)
+            task = _with_context(clean_message, memory, user_id, conversation_id)
             agent = orchestrator.agents[agent_type]
             full = ""
             try:

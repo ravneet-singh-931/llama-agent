@@ -113,13 +113,12 @@ class BaseAgent:
             return m.get("content") or ""
         return ""
 
-    # Matches a string that consists ONLY of tool-call markers like
-    # "<list_uploaded_documents>{}</list_uploaded_documents>" or
-    # "<function=web_search>{\"query\": \"...\"}</function>" — not a real
-    # answer. Used to detect when a small model echoes the tool transcript
-    # back instead of producing a genuine response.
+    # Matches strings that consist ONLY of tool-call markers like
+    # "<list_uploaded_documents>{}</list_uploaded_documents>",
+    # "<function\web_search {...}</function>", or
+    # "<web_search>{"query": "..."}</web_search>" — not a real answer.
     _TOOL_TRANSCRIPT_RE = re.compile(
-        r"^(?:\s*<[^>]+>[^<]*</[^>]+>\s*)+$", re.DOTALL
+        r"^(?:\s*<\S+.*?</\S+>\s*)+$", re.DOTALL
     )
 
     def _execute_with_tools(self, task: str) -> str:
