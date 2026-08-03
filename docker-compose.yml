@@ -82,14 +82,14 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
       - REDIS_URL=redis://redis:6379
-       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
-       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
-       - ENVIRONMENT=production
-       # Tiered defaults: strong=70b for one-shot answers/agents,
-       # fast=8b for streaming chat. Delete these lines once the
-       # free-tier 70b daily quota is upgraded or resets.
-       - LLM_MODEL_STRONG=llama-3.3-70b-versatile
-       - LLM_MODEL_FAST=llama-3.1-8b-instant
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
+      - ENVIRONMENT=production
+      # Tiered defaults: strong=70b for one-shot answers/agents,
+      # fast=8b for streaming chat. Delete these lines once the
+      # free-tier 70b daily quota is upgraded or resets.
+      - LLM_MODEL_STRONG=llama-3.3-70b-versatile
+      - LLM_MODEL_FAST=llama-3.1-8b-instant
     secrets:
       - groq_api_key
       - jwt_secret_key
