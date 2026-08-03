@@ -88,7 +88,9 @@ jobs:
           #  B101 assert in tests (pytest standard), B105/B106/B107 hardcoded
           #  credentials in test fixtures only, B110 intentional except-pass
           #  cleanup paths, B104 binding 0.0.0.0 (required for containerized
-          #  services behind nginx). Everything else stays strict.
+          #  services behind nginx). B112 try/except/continue fallbacks are
+          #  intentional and carry inline # nosec B112 (agent_tools.py marker
+          #  parsing, multi_agent.py tier fallback). Everything else stays strict.
           bandit -r . -f json -o bandit-report.json \
             --skip B101,B104,B105,B106,B107,B110
 

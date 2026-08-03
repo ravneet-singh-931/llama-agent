@@ -186,7 +186,7 @@ def _parse_transcript_tool_calls(content: str) -> List[Tuple[str, dict]]:
     for m in _FUNC_MARKER_RE.finditer(content):
         try:
             args = json.loads(m.group("args"))
-        except Exception:
+        except Exception:  # nosec B112
             continue
         if isinstance(args, dict):
             calls.append((m.group("name"), args))
@@ -195,7 +195,7 @@ def _parse_transcript_tool_calls(content: str) -> List[Tuple[str, dict]]:
     for m in _LEGACY_MARKER_RE.finditer(content):
         try:
             args = json.loads(m.group("args"))
-        except Exception:
+        except Exception:  # nosec B112
             continue
         if isinstance(args, dict):
             calls.append((m.group("name"), args))

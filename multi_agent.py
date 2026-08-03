@@ -240,7 +240,7 @@ class BaseAgent:
                         )
                         yield from _tokens(stream)
                         return
-                    except Exception:
+                    except Exception:  # nosec B112
                         continue
                 yield {"type": "token", "content":
                     "I couldn't complete that task right now. Please try again."}
