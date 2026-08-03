@@ -22,6 +22,7 @@ iteration cap so a misbehaving model can never loop forever.
 
 import json
 import os
+import re
 from typing import Dict, List, Optional, Tuple
 
 from modules.secrets import get_secret
@@ -141,6 +142,106 @@ def dispatch_tool(name: str, arguments: dict) -> str:
     return f"Unknown tool: {name}"
 
 
+# ---------------------------------------------------------------------------
+# Transcript-style tool calls
+# ---------------------------------------------------------------------------
+# Some models (e.g. llama-3.3-70b-versatile) write tool calls as plain-text
+# markers inside the assistant content instead of using Groq's native
+# tool_calls field. Several shapes are parsed and executed as real tool calls:
+#   <function\web_search={"query": "..."}</function>
+#   <function=web_search={"query": "..."}</function>
+#   <function=web_search {"query": "..."} </function>
+#   <web_search>{"query": "..."}</web_search>
+
+_FUNC_MARKER_RE = re.compile(
+    r"<function[\\=](?P<name>\w+)\s*[=:>\s]?\s*(?P<args>\{.*?\})\s*</function>",
+    re.DOTALL,
+)
+_LEGACY_MARKER_RE = re.compile(
+    r"<(?P<name>\w+)>\s*(?P<args>\{.*?\})\s*</(?P=name)>",
+    re.DOTALL,
+)
+
+
+def _is_tool_use_failed(e: Exception) -> bool:
+    """True when Groq's backend failed to parse a model tool-call marker
+    (HTTP 400, code 'tool_use_failed')."""
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        return err.get("code") == "tool_use_failed"
+    text = str(body or e)
+    return "tool_use_failed" in text
+
+
+def _parse_transcript_tool_calls(content: str) -> List[Tuple[str, dict]]:
+    """Extract transcript-style tool calls from assistant text.
+
+    Returns a list of (tool_name, arguments) for every marker found.
+    Malformed markers are ignored; never raises.
+    """
+    if not content:
+        return []
+    calls: List[Tuple[str, dict]] = []
+    for m in _FUNC_MARKER_RE.finditer(content):
+        try:
+            args = json.loads(m.group("args"))
+        except Exception:
+            continue
+        if isinstance(args, dict):
+            calls.append((m.group("name"), args))
+    if calls:
+        return calls
+    for m in _LEGACY_MARKER_RE.finditer(content):
+        try:
+            args = json.loads(m.group("args"))
+        except Exception:
+            continue
+        if isinstance(args, dict):
+            calls.append((m.group("name"), args))
+    return calls
+
+
+# ---------------------------------------------------------------------------
+# Narration-frame responses
+# ---------------------------------------------------------------------------
+# Some models answer with a sentence about what they WILL do ("I'll search
+# for the latest news...") instead of actually answering. Those frames are
+# not answers: run_tool_rounds() pushes the model to use the tools instead
+# of returning the frame as the final response.
+
+_FRAME_RESPONSE_RE = re.compile(
+    r"^\s*(?:"
+    r"i'?ll\s+(?:search|look|look\s+up|find|check|research|investigate|"
+    r"get|gather|fetch|browse|see)\b"
+    r"|i\s+will\s+(?:search|look|look\s+up|find|check|research|"
+    r"investigate|get|gather)\b"
+    r"|let'?s\s+(?:search|look|find|check|see)\b"
+    r"|let\s+me\s+(?:search|look|look\s+up|find|check|research|see)\b"
+    r"|searching\s+for\b|looking\s+(?:for|up)\b|checking\s+for\b"
+    r"|i\s+need\s+to\s+(?:search|look|find|check)\b"
+    r"|now\s+(?:searching|looking|checking)\b"
+    r"|starting\s+(?:a\s+)?(?:search|research)\b"
+    r").*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_MAX_FRAME_CHARS = 200
+
+
+def is_frame_response(content: str) -> bool:
+    """True when the model only narrated what it WILL do (no answer yet).
+
+    Narration frames like "I'll search for the latest news..." are not
+    answers. Longer text is treated as a real answer even if it opens with
+    a narration phrase, so legitimate detailed answers are never discarded.
+    """
+    text = (content or "").strip()
+    if not text or len(text) > _MAX_FRAME_CHARS:
+        return False
+    return _FRAME_RESPONSE_RE.match(text) is not None
+
+
 def run_tool_rounds(client, model: str, messages: List[dict],
                     tools: List[Dict] = None,
                     max_rounds: int = _MAX_TOOL_ROUNDS,
@@ -158,16 +259,74 @@ def run_tool_rounds(client, model: str, messages: List[dict],
         return messages, [], None
     events: List[str] = []
     for _ in range(max_rounds):
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=max_tokens,
-        )
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=max_tokens,
+            )
+        except Exception as e:
+            # Groq's backend sometimes fails to parse llama's <function=...>
+            # markers (HTTP 400 'tool_use_failed') even though the marker is
+            # perfectly valid for our own parser. Retry the round WITHOUT
+            # tools so the marker comes back as plain content, which we then
+            # parse and execute ourselves. Any other error keeps failing.
+            if not _is_tool_use_failed(e):
+                raise
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+            )
         choice = response.choices[0]
         message = choice.message
         if not getattr(message, "tool_calls", None):
+            # Some models (e.g. llama-3.3-70b) write tool calls as plain-text
+            # transcript markers inside content instead of Groq's native
+            # tool_calls field. Parse those markers and execute them as real
+            # tool calls, then let the model answer with the results.
+            transcript_calls = _parse_transcript_tool_calls(message.content or "")
+            if transcript_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": message.content,
+                    "tool_calls": [
+                        {
+                            "id": f"call_t{i}",
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(args),
+                            },
+                        }
+                        for i, (name, args) in enumerate(transcript_calls)
+                    ],
+                })
+                for i, (name, args) in enumerate(transcript_calls):
+                    result = dispatch_tool(name, args)
+                    events.append(f"⚙️ **{name}**")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": f"call_t{i}",
+                        "content": str(result),
+                    })
+                continue
+            # Narration-only frame ("I'll search for the latest news...")
+            # with no actual tool call: not an answer. Push the model to
+            # use the tools and give it another chance to answer.
+            if is_frame_response(message.content or ""):
+                messages.append({"role": "assistant", "content": message.content})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Do not just say what you will do. Use the available "
+                        "tools to get the actual information, then give your "
+                        "full answer with the details."
+                    ),
+                })
+                continue
             # Model answered without calling a tool.
             if message.content:
                 messages.append({"role": "assistant", "content": message.content})
@@ -228,8 +387,11 @@ def run_tool_loop(client, model: str, messages: List[dict],
         messages.append({
             "role": "user",
             "content": (
-                "You have used all your tool calls. Give your best answer now "
-                "based on what you have."
+                "You have used all your tool calls. Write your final answer "
+                "now using the tool results above: include the actual facts, "
+                "names, numbers, and details from the results. Do not say "
+                "what you would do or that you will search - just deliver "
+                "the answer."
             ),
         })
         response = client.chat.completions.create(

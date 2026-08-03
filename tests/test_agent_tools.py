@@ -95,6 +95,44 @@ class _FakeClient:
         self.chat = _FakeChat(script)
 
 
+class _FakeToolUseFailed(Exception):
+    """Mirrors Groq's HTTP 400 with code 'tool_use_failed'."""
+    body = {"error": {"code": "tool_use_failed"}}
+
+
+class _FakeRateLimitError(Exception):
+    body = {"error": {"code": "rate_limit_exceeded"}}
+
+
+class _FakeRetryCompletions:
+    """create() entries: ('RAISE', exc) raises exc; otherwise (content,
+    tool_calls) is returned. Records whether each call passed tools=."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self._calls = 0
+        self.tools_flags = []
+
+    def create(self, **kwargs):
+        self.tools_flags.append("tools" in kwargs)
+        entry = self._script[self._calls]
+        self._calls += 1
+        if entry[0] == "RAISE":
+            raise entry[1]
+        content, tool_calls = entry
+        return _FakeResponse([_FakeChoice(_FakeMessage(content, tool_calls))])
+
+
+class _FakeRetryChat:
+    def __init__(self, script):
+        self.completions = _FakeRetryCompletions(script)
+
+
+class _FakeRetryClient:
+    def __init__(self, script):
+        self.chat = _FakeRetryChat(script)
+
+
 # ============ TOOL SCHEMAS ============
 
 def test_agent_tool_schemas_include_search_and_docs():
@@ -507,3 +545,167 @@ def test_execute_with_tools_returns_fallback_message_when_all_fail():
     result = agent._execute_with_tools("t")
     assert result != ""
     assert "try again" in result.lower()
+
+
+# ============ BUG FIX: TRANSCRIPT-STYLE TOOL CALLS ============
+# llama-3.3-70b writes tool calls as plain-text markers inside content
+# (<function\name={args}</function>, <name>{args}</name>) instead of using
+# Groq's native tool_calls field. Those markers must be parsed and executed
+# as real tool calls — not returned as the "final answer" (which left
+# web_search never running and answers coming from stale model memory).
+
+def test_parse_transcript_tool_calls_func_format():
+    from modules.agent_tools import _parse_transcript_tool_calls
+    out = _parse_transcript_tool_calls(
+        '<function\\web_search={"query": "OpenAI recent announcements"}</function>'
+    )
+    assert out == [("web_search", {"query": "OpenAI recent announcements"})]
+
+
+def test_parse_transcript_tool_calls_legacy_format():
+    from modules.agent_tools import _parse_transcript_tool_calls
+    out = _parse_transcript_tool_calls(
+        '<web_search>{"query": "latest AI news"}</web_search>'
+    )
+    assert out == [("web_search", {"query": "latest AI news"})]
+
+
+def test_parse_transcript_tool_calls_equals_variants():
+    from modules.agent_tools import _parse_transcript_tool_calls
+    # <function=name{json}</function> (no separator after the name)
+    assert _parse_transcript_tool_calls(
+        '<function=web_search{"query": "OpenAI recent announcements"}</function>'
+    ) == [("web_search", {"query": "OpenAI recent announcements"})]
+    # <function=name={json}</function> (extra '=' separator)
+    assert _parse_transcript_tool_calls(
+        '<function=web_search={"query": "latest AI news"}</function>'
+    ) == [("web_search", {"query": "latest AI news"})]
+    # <function=name {json} </function> (space separators)
+    assert _parse_transcript_tool_calls(
+        '<function=web_search {"query": "latest AI news"} </function>'
+    ) == [("web_search", {"query": "latest AI news"})]
+
+
+def test_parse_transcript_tool_calls_ignores_malformed():
+    from modules.agent_tools import _parse_transcript_tool_calls
+    assert _parse_transcript_tool_calls("plain answer text") == []
+    assert _parse_transcript_tool_calls(
+        '<function\\web_search={"broken"}</function>'
+    ) == []
+    assert _parse_transcript_tool_calls("") == []
+
+
+def test_tool_rounds_executes_transcript_style_tool_call():
+    """A content-only assistant message carrying a transcript marker must
+    execute the tool (append a real tool result) and continue to an answer."""
+    set_document_store(_store_with_docs())
+    client = _FakeClient([
+        ('<function\\list_uploaded_documents>{}</function>', None),
+        ("final answer text", None),
+    ])
+    msgs = [{"role": "user", "content": "read my docs"}]
+    out_msgs, events, final = run_tool_rounds(
+        client, "m", msgs, tools=AGENT_TOOL_SCHEMAS
+    )
+    assert final == "final answer text"
+    assert events == ["⚙️ **list_uploaded_documents**"]
+    # The tool result was appended as a real tool message.
+    assert out_msgs[-2]["role"] == "tool"
+    assert "CRM-3.docx" in out_msgs[-2]["content"]
+
+
+def test_tool_rounds_retries_without_tools_on_tool_use_failed():
+    """A Groq 400 'tool_use_failed' must be retried WITHOUT the tools param
+    so the model's marker comes back as plain content and still executes."""
+    set_document_store(_store_with_docs())
+    fake = _FakeRetryClient([
+        ("RAISE", _FakeToolUseFailed()),
+        ('<function=list_uploaded_documents{}</function>', None),
+        ("final answer text", None),
+    ])
+    msgs = [{"role": "user", "content": "read my docs"}]
+    out_msgs, events, final = run_tool_rounds(
+        fake, "m", msgs, tools=AGENT_TOOL_SCHEMAS, max_rounds=4
+    )
+    assert final == "final answer text"
+    assert events == ["⚙️ **list_uploaded_documents**"]
+    # First call had tools=, the retry dropped it, the next round has it again.
+    assert fake.chat.completions.tools_flags == [True, False, True]
+    # The tool result was appended as a real tool message.
+    assert out_msgs[-2]["role"] == "tool"
+    assert "CRM-3.docx" in out_msgs[-2]["content"]
+
+
+def test_tool_rounds_re_raises_non_tool_use_errors():
+    """Errors other than tool_use_failed must propagate, not be retried."""
+    set_document_store(SimpleRAG())
+    fake = _FakeRetryClient([("RAISE", _FakeRateLimitError())])
+    msgs = [{"role": "user", "content": "hi"}]
+    import pytest
+    with pytest.raises(_FakeRateLimitError):
+        run_tool_rounds(fake, "m", msgs, tools=AGENT_TOOL_SCHEMAS, max_rounds=4)
+    # Only the single failing call was made (no retry).
+    assert fake.chat.completions.tools_flags == [True]
+
+
+def test_tool_rounds_pushes_frame_response_to_use_tools():
+    """A narration-only response ("I'll search for...") is not an answer:
+    the loop must push the model to actually use the tools and continue."""
+    set_document_store(SimpleRAG())
+    client = _FakeClient([
+        ("I'll search for the latest news on OpenAI.", None),
+        ("Here is the answer.", None),
+    ])
+    msgs = [{"role": "user", "content": "any recent announcements?"}]
+    out_msgs, events, final = run_tool_rounds(
+        client, "m", msgs, tools=AGENT_TOOL_SCHEMAS, max_rounds=4
+    )
+    assert final == "Here is the answer."
+    # The frame + push message are present between the task and the answer.
+    assert [m["role"] for m in out_msgs].count("user") >= 2
+
+
+def test_is_frame_response_detects_narration():
+    from modules.agent_tools import is_frame_response
+    assert is_frame_response("I'll search for the latest news on OpenAI.")
+    assert is_frame_response("Searching for the latest announcements from OpenAI.")
+    assert is_frame_response("Let me look up the latest tech news this week.")
+    # Real answers are NOT frames.
+    assert not is_frame_response("OpenAI announced GPT-5 at its launch event.")
+    # Long text is an answer even if it opens with a narration phrase.
+    assert not is_frame_response("Searching for the latest information... " + "x" * 300)
+
+
+def test_duckduckgo_bot_wall_returns_unavailable_message():
+    """When DuckDuckGo serves its anomaly/challenge page, the agent must be
+    told search is unavailable (not a misleading 'no results')."""
+    import modules.web_tools as wt
+    wall = (
+        "<html><body>Anomaly detected! Please solve the challenge to "
+        "continue searching.</body></html>"
+    )
+    orig = wt._http_get
+    wt._http_get = lambda url, timeout=15: wall
+    try:
+        out = wt._search_duckduckgo("OpenAI news", 5)
+        assert "unavailable" in out.lower()
+        assert "blocking" in out.lower()
+    finally:
+        wt._http_get = orig
+
+
+def test_duckduckgo_normal_page_still_formats_results():
+    """A normal DDG results page must keep formatting results normally."""
+    import modules.web_tools as wt
+    page = (
+        '<a class="result__a" href="https://example.com/1">Example Title</a>'
+        '<a class="result__snippet">Example snippet text here.</a>'
+    )
+    orig = wt._http_get
+    wt._http_get = lambda url, timeout=15: page
+    try:
+        out = wt._search_duckduckgo("OpenAI news", 5)
+        assert "Example Title" in out
+        assert "https://example.com/1" in out
+    finally:
+        wt._http_get = orig

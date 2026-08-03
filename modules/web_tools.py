@@ -121,7 +121,22 @@ def _search_duckduckgo(query: str, max_results: int) -> str:
     for i, (href, title) in enumerate(titles[:max_results]):
         snippet = snippets[i] if i < len(snippets) else ""
         rows.append({"title": title, "url": href, "snippet": snippet})
+
+    if not rows and _looks_like_bot_wall(html):
+        # The engine served its "anomaly detected" / challenge page instead
+        # of results. Say so explicitly so the agent answers from its own
+        # knowledge instead of reporting a misleading "no results".
+        return (
+            "Web search is currently unavailable: the search engine is "
+            "blocking automated requests. No results could be fetched."
+        )
     return _format_results(rows)
+
+
+def _looks_like_bot_wall(html: str) -> bool:
+    """Heuristic for search engines serving a bot-detection page."""
+    text = html.lower()
+    return ("anomaly" in text or "challenge" in text) and "result__a" not in text
 
 
 def web_search(query: str, max_results: int = _MAX_RESULTS) -> str:

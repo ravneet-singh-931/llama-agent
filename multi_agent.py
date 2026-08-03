@@ -34,7 +34,7 @@ if _groq_key:
 # the real RAG store (app.state.rag) at startup.
 try:
     from modules.rag import SimpleRAG
-    from modules.agent_tools import set_document_store
+    from modules.agent_tools import set_document_store, is_frame_response
     set_document_store(SimpleRAG())
 except Exception:
     pass
@@ -150,13 +150,18 @@ class BaseAgent:
 
         result = self._last_assistant_content(final_messages)
         if (not result.strip()
-                or self._TOOL_TRANSCRIPT_RE.match(result.strip())):
-            # The model ended on a tool call or echoed the tool markers
-            # back instead of answering — force a clean final answer.
+                or self._TOOL_TRANSCRIPT_RE.match(result.strip())
+                or is_frame_response(result)):
+            # The model ended on a tool call, echoed the tool markers back,
+            # or only narrated what it would do ("I'll search for...")
+            # instead of answering — force a clean final answer.
             wrap = final_messages + [
                 {"role": "user", "content": (
-                    "You have the information you need. Give your final "
-                    "answer now, directly and concisely."
+                    "You have the information and tool results you need. "
+                    "Write your final answer now: include the actual facts, "
+                    "names, numbers, and details from the results. Do not "
+                    "say what you would do or that you will search - just "
+                    "deliver the answer."
                 )}
             ]
             try:
@@ -219,8 +224,11 @@ class BaseAgent:
         else:
             stream_messages = messages + [
                 {"role": "user", "content": (
-                    "You have used all your tool calls. Give your best answer "
-                    "now based on what you have."
+                    "You have used all your tool calls. Write your final "
+                    "answer now using the tool results above: include the "
+                    "actual facts, names, numbers, and details from the "
+                    "results. Do not say what you would do or that you will "
+                    "search - just deliver the answer."
                 )}
             ]
         stream = self.client.chat.completions.create(
