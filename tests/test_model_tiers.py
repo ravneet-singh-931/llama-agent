@@ -109,6 +109,52 @@ def test_doc_question_does_not_match_greeting():
     assert not is_document_question("hello, how are you?")
 
 
+# ============ DOC INVENTORY DETECTION ============
+
+def test_doc_inventory_what_documents_have_i_uploaded():
+    """The exact question that previously fell through to the generic agent:
+    'what documents have I uploaded?' must route to the RAG answerer."""
+    from api import is_document_question
+    assert is_document_question("what documents have I uploaded?")
+
+
+def test_doc_inventory_variants():
+    from api import is_document_question
+    assert is_document_question("list my uploaded files")
+    assert is_document_question("show the documents I uploaded")
+    assert is_document_question("which files do I have?")
+    assert is_document_question("how many documents have I uploaded?")
+
+
+def test_doc_inventory_listing_answer():
+    from api import answer_from_documents
+
+    class _FakeRag:
+        def list_documents(self):
+            return ["CRM-3.docx", "sample.txt"]
+
+        def get_context(self, query, top_k=3):
+            return "Relevant document excerpts:\n--- Source: CRM-3.docx ---\n..."
+
+    out = answer_from_documents("what documents have I uploaded?", _FakeRag())
+    assert "CRM-3.docx" in out and "sample.txt" in out
+    assert "2" in out
+
+
+def test_doc_inventory_empty_answer():
+    from api import answer_from_documents
+
+    class _EmptyRag:
+        def list_documents(self):
+            return []
+
+        def get_context(self, query, top_k=3):
+            return "No documents have been uploaded."
+
+    out = answer_from_documents("list my files", _EmptyRag())
+    assert "No documents have been uploaded yet" in out
+
+
 # ============ DOC FOLLOW-UP DETECTION ============
 
 def test_doc_follow_up_what_about():

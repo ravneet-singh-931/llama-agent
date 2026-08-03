@@ -863,6 +863,32 @@ _DOC_QUESTION_PHRASES = [
 ]
 
 
+# Questions asking WHAT documents/files are uploaded (an inventory question)
+# rather than about the CONTENT of one specific file. These route to RAG so
+# the answer lists the user's actual uploads instead of a generic agent guess.
+_DOC_INVENTORY_PHRASES = (
+    "what documents", "which documents", "what files", "which files",
+    "list my documents", "list the documents", "list documents",
+    "list my files", "list the files", "list files",
+    "show my documents", "show the documents", "show documents",
+    "show my files", "show the files", "show files",
+    "uploaded documents", "uploaded files",
+    "what have i uploaded", "what did i upload",
+    "documents have i uploaded", "files have i uploaded",
+    "how many documents", "how many files",
+    "what is uploaded", "what are the documents", "what are the files",
+    "what documents are", "what files are", "see my documents", "see my files",
+)
+
+
+def _is_document_inventory_question(message: str) -> bool:
+    """True if the message asks to LIST the user's uploaded documents/files
+    (e.g. "what documents have I uploaded?") instead of asking about the
+    content of one specific file."""
+    m = (message or "").lower()
+    return any(p in m for p in _DOC_INVENTORY_PHRASES)
+
+
 def is_document_question(message: str, rag=None) -> bool:
     """True if the user is asking about their uploaded documents/files.
 
@@ -872,6 +898,8 @@ def is_document_question(message: str, rag=None) -> bool:
     """
     m = message.lower()
     if any(p in m for p in _DOC_QUESTION_PHRASES):
+        return True
+    if _is_document_inventory_question(m):
         return True
     # Generic pattern: a document-intent phrase + a reference to a file.
     # Catches forms the exact phrase list misses, e.g. "summarize the CRM
@@ -1218,6 +1246,20 @@ def answer_from_documents(query: str, rag) -> str:
     contain the information), the question is reformulated into a more
     specific query and the documents are searched once more before giving up.
     """
+    # Inventory question ("what documents have I uploaded?") -> list the
+    # actual uploads straight from the index; no retrieval needed.
+    if _is_document_inventory_question(query):
+        try:
+            files = sorted(set(rag.list_documents()))
+        except Exception:
+            files = []
+        if not files:
+            return ("No documents have been uploaded yet. "
+                    "Upload a file on the Documents page first, then ask me about it.")
+        listing = "\n".join(f"- {os.path.basename(f) or f}" for f in files)
+        label = "document" if len(files) == 1 else "documents"
+        return f"You have {len(files)} uploaded {label}:\n{listing}"
+
     try:
         context = rag.get_context(query)
     except Exception:
