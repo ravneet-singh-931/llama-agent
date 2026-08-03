@@ -177,6 +177,10 @@ class BaseAgent:
 
         Yields dicts: {"type": "tool", "content": ...} for each tool call as
         it happens, then {"type": "token", "content": ...} for answer tokens.
+        If the strong tier is rate-limited or unavailable, the whole round
+        retries on the fast tier. The final answer is streamed from the text
+        the tool round already produced - no extra generation call - so a
+        rate-limited or TPM-limited tier can never lose the answer.
         """
         from modules.agent_tools import run_tool_rounds, AGENT_TOOL_SCHEMAS
 
@@ -186,29 +190,58 @@ class BaseAgent:
                 {"role": "user", "content": self._task_prompt.format(task=task)},
             ]
 
+        def _tokens(stream):
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                delta = getattr(choices[0], "delta", None) if choices else None
+                text = getattr(delta, "content", None) if delta else None
+                if text:
+                    yield {"type": "token", "content": text}
+            yield {"type": "token", "content": ""}
+
+        def _text_tokens(text):
+            """Emit an already-generated answer as token events so the UI
+            streams it without another model call (the call that would fail
+            when the tier is rate-limited or TPM-limited)."""
+            for chunk in re.split(r"(?<=\s)", text or ""):
+                if chunk:
+                    yield {"type": "token", "content": chunk}
+            yield {"type": "token", "content": ""}
+
         model = self.model
         try:
             messages, events, final_content = run_tool_rounds(
                 self.client, model, _initial_messages(), AGENT_TOOL_SCHEMAS,
                 max_tokens=2048
             )
-        except Exception:
+        except Exception as e:
             # Tool loop failed (API error, rate limit, malformed response).
-            # Fall back to a plain non-tool stream instead of crashing.
-            try:
-                stream = self.client.chat.completions.create(
-                    model=self.model, messages=_initial_messages(),
-                    stream=True, max_tokens=2048
-                )
-                for chunk in stream:
-                    choices = getattr(chunk, "choices", None) or []
-                    delta = getattr(choices[0], "delta", None) if choices else None
-                    text = getattr(delta, "content", None) if delta else None
-                    if text:
-                        yield {"type": "token", "content": text}
-                yield {"type": "token", "content": ""}
-                return
-            except Exception:
+            # Retry the whole round on the fast tier when the strong tier is
+            # rate-limited; otherwise fall back to a plain non-tool stream.
+            if should_fallback(e, "strong"):
+                try:
+                    model = resolve_model("fast")
+                    messages, events, final_content = run_tool_rounds(
+                        self.client, model, _initial_messages(),
+                        AGENT_TOOL_SCHEMAS, max_tokens=2048
+                    )
+                except Exception:
+                    messages = events = final_content = None
+            else:
+                messages = events = final_content = None
+            if messages is None:
+                # Both tool-loop attempts failed — stream a plain answer,
+                # trying the strong tier then the fast tier.
+                for candidate in (self.model, resolve_model("fast")):
+                    try:
+                        stream = self.client.chat.completions.create(
+                            model=candidate, messages=_initial_messages(),
+                            stream=True, max_tokens=2048
+                        )
+                        yield from _tokens(stream)
+                        return
+                    except Exception:
+                        continue
                 yield {"type": "token", "content":
                     "I couldn't complete that task right now. Please try again."}
                 return
@@ -216,30 +249,40 @@ class BaseAgent:
         for ev in events:
             yield {"type": "tool", "content": ev}
 
-        # Stream the final answer fresh. When the model already answered
-        # (non-streamed), drop that answer and regenerate from the same
-        # prompt/tool context so the user sees the tokens arrive.
-        if final_content is not None and messages and messages[-1].get("role") == "assistant":
-            stream_messages = messages[:-1]
-        else:
-            stream_messages = messages + [
-                {"role": "user", "content": (
-                    "You have used all your tool calls. Write your final "
-                    "answer now using the tool results above: include the "
-                    "actual facts, names, numbers, and details from the "
-                    "results. Do not say what you would do or that you will "
-                    "search - just deliver the answer."
-                )}
-            ]
-        stream = self.client.chat.completions.create(
-            model=model, messages=stream_messages, stream=True, max_tokens=2048
-        )
-        for chunk in stream:
-            choices = getattr(chunk, "choices", None) or []
-            delta = getattr(choices[0], "delta", None) if choices else None
-            text = getattr(delta, "content", None) if delta else None
-            if text:
-                yield {"type": "token", "content": text}
+        # The tool round produced a real answer — stream that text directly.
+        # No extra generation call, so a rate-limited / TPM-limited tier can
+        # never kill the stream after the work is already done.
+        if (final_content
+                and not self._TOOL_TRANSCRIPT_RE.match(final_content.strip())
+                and not is_frame_response(final_content)):
+            yield from _text_tokens(final_content)
+            return
+
+        # No answer yet (round cap hit / empty) — force a wrap-up
+        # generation, falling back to the fast tier once.
+        stream_messages = messages + [
+            {"role": "user", "content": (
+                "You have used all your tool calls. Write your final "
+                "answer now using the tool results above: include the "
+                "actual facts, names, numbers, and details from the "
+                "results. Do not say what you would do or that you will "
+                "search - just deliver the answer."
+            )}
+        ]
+        try:
+            stream = self.client.chat.completions.create(
+                model=model, messages=stream_messages, stream=True,
+                max_tokens=2048
+            )
+        except Exception:
+            if model == resolve_model("fast"):
+                # Already on the cheapest tier — nothing further to retry.
+                raise
+            stream = self.client.chat.completions.create(
+                model=resolve_model("fast"), messages=stream_messages,
+                stream=True, max_tokens=2048
+            )
+        yield from _tokens(stream)
     
     def think(self, task: str) -> str:
         """Think about a task"""

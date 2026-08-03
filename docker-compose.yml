@@ -84,6 +84,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
+      - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
       - ENVIRONMENT=production
       # Tiered defaults: strong=70b for one-shot answers/agents,
       # fast=8b for streaming chat. Delete these lines once the
@@ -93,6 +94,7 @@ services:
     secrets:
       - groq_api_key
       - jwt_secret_key
+      - tavily_api_key
       - postgres_password
     depends_on:
       postgres:
@@ -130,11 +132,13 @@ services:
     environment:
        - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
        - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+       - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
        # Override: use 70b for strong model, 8b for fast.
        - LLM_MODEL_STRONG=llama-3.3-70b-versatile
        - LLM_MODEL_FAST=llama-3.1-8b-instant
     secrets:
       - groq_api_key
+      - tavily_api_key
       - postgres_password
     depends_on:
       - api
@@ -162,11 +166,13 @@ services:
     restart: unless-stopped
     environment:
        - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+       - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
        # Override: use 70b for strong model, 8b for fast.
        - LLM_MODEL_STRONG=llama-3.3-70b-versatile
        - LLM_MODEL_FAST=llama-3.1-8b-instant
     secrets:
       - groq_api_key
+      - tavily_api_key
     # Also inject the key directly so Python code can access it
     # This works because docker-compose reads the file and sets the env var
     command: python mcp_agents_server.py --transport sse --port 8001 --host 0.0.0.0
@@ -348,6 +354,8 @@ secrets:
     file: ./secrets/postgres_password.txt
   grafana_admin_password:
     file: ./secrets/grafana_admin_password.txt
+  tavily_api_key:
+    file: ./secrets/tavily_api_key.txt
 
 
 # ============================================

@@ -133,6 +133,56 @@ class _FakeRetryClient:
         self.chat = _FakeRetryChat(script)
 
 
+class _StreamDelta:
+    def __init__(self, text):
+        self.content = text
+
+
+class _StreamChoice:
+    def __init__(self, text):
+        self.delta = _StreamDelta(text)
+
+
+class _StreamChunk:
+    def __init__(self, text):
+        self.choices = [_StreamChoice(text)]
+
+
+class _StreamCompletions:
+    """Streaming chat completions for _stream_with_tools.
+
+    Each create() plays the next script entry:
+      ("RAISE", exc)      -> raise exc (models the strong tier failing)
+      ("STREAM", [tokens]) -> return chunks with delta.content = token
+    Records every model and messages payload it was called with.
+    """
+
+    def __init__(self, script):
+        self._script = list(script)
+        self._calls = 0
+        self.models = []
+        self.messages = []
+
+    def create(self, **kwargs):
+        self.models.append(kwargs.get("model"))
+        self.messages.append(kwargs.get("messages"))
+        entry = self._script[self._calls]
+        self._calls += 1
+        if entry[0] == "RAISE":
+            raise entry[1]
+        return [_StreamChunk(t) for t in entry[1]]
+
+
+class _StreamChat:
+    def __init__(self, script):
+        self.completions = _StreamCompletions(script)
+
+
+class _StreamClient:
+    def __init__(self, script):
+        self.chat = _StreamChat(script)
+
+
 # ============ TOOL SCHEMAS ============
 
 def test_agent_tool_schemas_include_search_and_docs():
@@ -545,6 +595,126 @@ def test_execute_with_tools_returns_fallback_message_when_all_fail():
     result = agent._execute_with_tools("t")
     assert result != ""
     assert "try again" in result.lower()
+
+
+# ============ STREAMING WITH TOOLS ============
+# _stream_with_tools drives the same tool loop as _execute_with_tools but
+# yields tool activity + answer tokens. It must survive a rate-limited
+# strong tier: retry the whole tool round on the fast tier, then stream
+# the final answer — never the generic "couldn't complete" message.
+
+def _stream_tokens(out):
+    return "".join(o["content"] for o in out if o["type"] == "token").strip()
+
+
+def test_stream_with_tools_falls_back_to_fast_tier_on_rate_limit(monkeypatch):
+    """When the strong tier is rate-limited, the whole tool round must be
+    retried on the fast tier and the detailed answer still streamed."""
+    os.environ["GROQ_API_KEY"] = "test-key"
+    from multi_agent import ResearchAgent
+    from modules.model_tiers import resolve_model
+    agent = ResearchAgent()
+    client = _StreamClient([])  # no regeneration call may happen
+    agent.client = client
+
+    calls = {"n": 0, "models": []}
+
+    def fake_run_tool_rounds(client_, model_, messages_, tools_, **kwargs):
+        calls["models"].append(model_)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("429 rate limit reached")
+        return messages_, ["⚙️ web_search"], "final content"
+
+    monkeypatch.setattr(
+        "modules.agent_tools.run_tool_rounds", fake_run_tool_rounds
+    )
+    out = list(agent._stream_with_tools("t"))
+    assert calls["n"] == 2
+    assert calls["models"][0] == agent.model
+    assert calls["models"][1] == resolve_model("fast")
+    assert {"type": "tool", "content": "⚙️ web_search"} in out
+    assert _stream_tokens(out) == "final content"
+    # The answer is streamed directly - no extra (TPM-prone) generation.
+    assert client.chat.completions.models == []
+
+
+def test_stream_with_tools_plain_stream_when_both_tool_rounds_fail(monkeypatch):
+    """If the tool loop fails on both tiers, fall back to a plain
+    non-tool stream (strong, then fast) instead of the failure message."""
+    os.environ["GROQ_API_KEY"] = "test-key"
+    from multi_agent import ResearchAgent
+    from modules.model_tiers import resolve_model
+    agent = ResearchAgent()
+    client = _StreamClient([
+        ("RAISE", RuntimeError("429 rate limit reached")),  # strong plain stream
+        ("STREAM", ["plain ", "answer"]),                   # fast plain stream
+    ])
+    agent.client = client
+
+    def fake_run_tool_rounds(client_, model_, messages_, tools_, **kwargs):
+        raise RuntimeError("api down")
+
+    monkeypatch.setattr(
+        "modules.agent_tools.run_tool_rounds", fake_run_tool_rounds
+    )
+    out = list(agent._stream_with_tools("t"))
+    assert client.chat.completions.models == [
+        agent.model, resolve_model("fast"),
+    ]
+    assert _stream_tokens(out) == "plain answer"
+
+
+def test_stream_with_tools_wrap_up_generation_falls_back_to_fast_tier(monkeypatch):
+    """When the tool round hits the cap without an answer, the forced
+    wrap-up generation retries on the fast tier if the strong tier
+    rate-limits mid-run."""
+    os.environ["GROQ_API_KEY"] = "test-key"
+    from multi_agent import ResearchAgent
+    from modules.model_tiers import resolve_model
+    agent = ResearchAgent()
+    client = _StreamClient([
+        ("RAISE", RuntimeError("429 rate limit reached")),  # strong wrap-up
+        ("STREAM", ["final ", "answer"]),                   # fast wrap-up
+    ])
+    agent.client = client
+
+    def fake_run_tool_rounds(client_, model_, messages_, tools_, **kwargs):
+        # Round cap reached without an answer -> caller must force wrap-up.
+        return messages_, ["⚙️ web_search"], None
+
+    monkeypatch.setattr(
+        "modules.agent_tools.run_tool_rounds", fake_run_tool_rounds
+    )
+    out = list(agent._stream_with_tools("t"))
+    assert client.chat.completions.models == [
+        agent.model, resolve_model("fast"),
+    ]
+    assert {"type": "tool", "content": "⚙️ web_search"} in out
+    assert _stream_tokens(out) == "final answer"
+
+
+def test_stream_with_tools_streams_existing_answer_without_api_call(monkeypatch):
+    """A real answer from the tool round is streamed as tokens directly —
+    no regeneration API call — so a rate-limited tier can't lose it."""
+    os.environ["GROQ_API_KEY"] = "test-key"
+    from multi_agent import ResearchAgent
+    agent = ResearchAgent()
+    client = _StreamClient([])  # any create() call would fail the test
+    agent.client = client
+
+    def fake_run_tool_rounds(client_, model_, messages_, tools_, **kwargs):
+        return messages_, ["⚙️ web_search"], "real detailed answer"
+
+    monkeypatch.setattr(
+        "modules.agent_tools.run_tool_rounds", fake_run_tool_rounds
+    )
+    out = list(agent._stream_with_tools("t"))
+    assert {"type": "tool", "content": "⚙️ web_search"} in out
+    assert _stream_tokens(out) == "real detailed answer"
+    assert client.chat.completions.models == []
+
+
 
 
 # ============ BUG FIX: TRANSCRIPT-STYLE TOOL CALLS ============
