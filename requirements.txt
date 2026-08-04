@@ -21,6 +21,7 @@ chromadb
 
 # --- Observability (Phoenix by Arize AI) ---
 arize-phoenix
+opentelemetry-instrumentation-fastapi
 openinference-instrumentation-llama-index
 
 # --- Data Processing ---
