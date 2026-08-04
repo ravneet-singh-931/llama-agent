@@ -830,7 +830,14 @@ async def _with_context(message: str, memory, user_id: str, conversation_id: str
         if msgs is None:
             msgs = await pg_store.get_messages(user_id, conversation_id)
             if msgs is not None:
-                await redis_store.set_json(redis_store.messages_key(norm), msgs, ttl=redis_store.MSGS_TTL)
+                # Only trust PostgreSQL when the conversation actually exists
+                # there; an empty result may also mean the conversation is a
+                # legacy one that predates the Postgres mirror and lives only
+                # in the JSON memory store.
+                if not msgs and await pg_store.get_conversation(user_id, conversation_id) is None:
+                    msgs = None
+                else:
+                    await redis_store.set_json(redis_store.messages_key(norm), msgs, ttl=redis_store.MSGS_TTL)
     except Exception as e:
         _log.debug("_with_context pg read failed, using memory: %s", e)
         msgs = None
@@ -848,6 +855,48 @@ async def _with_context(message: str, memory, user_id: str, conversation_id: str
     if not context or "No conversation history yet." in context:
         return message
     return f"Recent conversation context:\n{context}\n\nUser's new message: {message}"
+
+
+def _merge_conversations(pg_convs: List[Dict], mem_convs: List[Dict]) -> List[Dict]:
+    """Combine Postgres conversations with JSON-memory conversations.
+
+    PostgreSQL only contains chats created after the mirror was added; older
+    conversations live solely in the JSON memory store. Merging both (deduped
+    by normalized conversation id, newest first) guarantees no history is ever
+    hidden from the sidebar.
+    """
+    from modules import pg_store
+    merged = list(pg_convs or [])
+    seen = {pg_store.normalize_conversation_id(c["id"]) for c in merged}
+    for c in mem_convs or []:
+        key = pg_store.normalize_conversation_id(c["id"])
+        if key not in seen:
+            merged.append(c)
+            seen.add(key)
+    merged.sort(key=lambda c: c.get("updated_at") or "", reverse=True)
+    return merged
+
+
+async def _list_conversations_for(user_id: str, memory) -> List[Dict]:
+    """Full sidebar conversation list for a user.
+
+    Read path: Redis cache -> PostgreSQL (durable store) -> JSON memory store,
+    merging the legacy memory conversations into the Postgres result so chats
+    that predate the Postgres mirror are always shown. Populates the cache so
+    the sidebar never hits the database twice.
+    """
+    from modules import pg_store, redis_store
+    cache_key = redis_store.list_key(user_id)
+    cached = await redis_store.get_json(cache_key)
+    if cached is not None:
+        return cached
+    convs = await pg_store.list_conversations(user_id)
+    if convs is None:
+        convs = memory.get_conversations(user_id)
+    else:
+        convs = _merge_conversations(convs, memory.get_conversations(user_id))
+    await redis_store.set_json(cache_key, convs, ttl=redis_store.LIST_TTL)
+    return convs
 
 
 _DOC_QUESTION_PHRASES = [
@@ -1870,20 +1919,12 @@ async def list_documents():
 @app.get("/memory")
 async def get_memory(user = Depends(optional_auth)):
     """Get conversation memory (scoped to the current user)"""
-    from modules import pg_store, redis_store
     try:
         memory = app.state.memory
         user_id = str(user["id"]) if user else "guest"
         recent = memory.get_recent(20, user_id=user_id)
         stats = memory.get_stats()
-        cache_key = redis_store.list_key(user_id)
-        conversations = await redis_store.get_json(cache_key)
-        if conversations is None:
-            conversations = await pg_store.list_conversations(user_id)
-            if conversations is None:
-                conversations = memory.get_conversations(user_id)
-            else:
-                await redis_store.set_json(cache_key, conversations, ttl=redis_store.LIST_TTL)
+        conversations = await _list_conversations_for(user_id, memory)
         return {
             "stats": stats,
             "recent_messages": recent,
@@ -1921,22 +1962,13 @@ async def clear_memory(user = Depends(optional_auth)):
 async def list_conversations(user = Depends(optional_auth)):
     """List the current user's conversations (newest first).
 
-    Read path: Redis cache -> PostgreSQL (durable store) -> JSON memory fallback.
+    Read path: Redis cache -> PostgreSQL (durable store) -> JSON memory store.
+    Legacy memory conversations are merged in so pre-mirror history is shown.
     """
-    from modules import pg_store, redis_store
     try:
         memory = app.state.memory
         user_id = str(user["id"]) if user else "guest"
-        cache_key = redis_store.list_key(user_id)
-        cached = await redis_store.get_json(cache_key)
-        if cached is not None:
-            return {"conversations": cached}
-        convs = await pg_store.list_conversations(user_id)
-        if convs is None:
-            # Database unreachable -> fall back to the JSON memory store
-            convs = memory.get_conversations(user_id)
-        else:
-            await redis_store.set_json(cache_key, convs, ttl=redis_store.LIST_TTL)
+        convs = await _list_conversations_for(user_id, memory)
         return {"conversations": convs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

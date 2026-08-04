@@ -155,6 +155,53 @@ def test_doc_inventory_empty_answer():
     assert "No documents have been uploaded yet" in out
 
 
+# ============ CONVERSATION MERGE (pg + legacy memory) ============
+
+def test_merge_keeps_legacy_memory_conversations_when_pg_empty():
+    """Postgres returning an EMPTY list must not hide legacy memory chats."""
+    from api import _merge_conversations
+
+    merged = _merge_conversations([], [
+        {"id": "default_abc", "user_id": "u1", "title": "old chat",
+         "updated_at": "2026-07-01T00:00:00"},
+    ])
+    assert len(merged) == 1
+    assert merged[0]["title"] == "old chat"
+
+
+def test_merge_combines_and_dedupes():
+    from api import _merge_conversations
+
+    pg = [
+        {"id": "b70e9daa-ef41-5509-b205-332f8f61b390", "title": "new chat",
+         "updated_at": "2026-08-03T00:00:00"},
+    ]
+    mem = [
+        {"id": "b70e9daa-ef41-5509-b205-332f8f61b390", "title": "new chat",
+         "updated_at": "2026-08-03T00:00:00"},
+        {"id": "default_abc", "title": "old chat",
+         "updated_at": "2026-07-01T00:00:00"},
+    ]
+    merged = _merge_conversations(pg, mem)
+    assert len(merged) == 2
+    # Newest first
+    assert merged[0]["id"] == "b70e9daa-ef41-5509-b205-332f8f61b390"
+
+
+def test_merge_dedupes_legacy_vs_normalized_id():
+    """A legacy 'default_<uuid>' memory conv and its normalized UUID in
+    Postgres refer to the SAME conversation - must not appear twice."""
+    from api import _merge_conversations
+    from modules import pg_store
+
+    mem_id = "default_626eb3ff-75a4-4f50-85d6-2359a3f674bd"
+    pg_id = pg_store.normalize_conversation_id(mem_id)  # what Postgres stores
+    pg = [{"id": pg_id, "title": "same", "updated_at": "2026-07-15T00:00:00"}]
+    mem = [{"id": mem_id, "title": "same", "updated_at": "2026-07-15T00:00:00"}]
+    merged = _merge_conversations(pg, mem)
+    assert len(merged) == 1
+
+
 # ============ DOC FOLLOW-UP DETECTION ============
 
 def test_doc_follow_up_what_about():
