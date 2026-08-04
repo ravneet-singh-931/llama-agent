@@ -280,7 +280,15 @@ async def lifespan(app: FastAPI):
     
     # Initialize Prometheus metrics
     init_metrics()
-    
+
+    # Phoenix tracing (OTel auto-instruments FastAPI, httpx, etc.)
+    try:
+        from phoenix.otel import register as register_phoenix
+        register_phoenix(endpoint="http://phoenix:6006/v1/traces")
+        print("📡 Phoenix tracing active")
+    except Exception as e:
+        print(f"⚠️  Phoenix tracing unavailable: {e}")
+
     yield
     
     # Shutdown
