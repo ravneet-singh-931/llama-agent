@@ -87,7 +87,15 @@ class GroqLLM(LLM):
         formatted = []
         for message in messages:
             role = message.role.value if isinstance(message.role, MessageRole) else message.role
-            formatted.append({"role": role, "content": message.content})
+            entry: Dict[str, Any] = {"role": role, "content": message.content}
+            # Preserve tool-calling fields (multi-agent tool loop) that a
+            # content-only mapping would drop: assistant messages carry
+            # tool_calls, tool messages carry tool_call_id.
+            if message.additional_kwargs.get("tool_calls"):
+                entry["tool_calls"] = message.additional_kwargs["tool_calls"]
+            if message.additional_kwargs.get("tool_call_id"):
+                entry["tool_call_id"] = message.additional_kwargs["tool_call_id"]
+            formatted.append(entry)
         return formatted
 
     def _parse_response(self, response: Any) -> ChatResponse:

@@ -18,7 +18,7 @@ except ImportError:
     def load_dotenv(*_args, **_kwargs):
         return False
 
-from groq import Groq
+from llama_index.core.llms import ChatMessage, MessageRole
 from modules.secrets import get_secret
 from modules.model_tiers import resolve_model, should_fallback
 
@@ -40,6 +40,83 @@ except Exception:
     pass
 
 
+# ============ INSTRUMENTED GROQ CLIENT ============
+
+class InstrumentedGroqClient:
+    """Drop-in replacement for ``groq.Groq`` that routes every completion
+    through the repo's llama-index ``GroqLLM``.
+
+    The OpenInference llama-index instrumentor only emits ``GroqLLM.*``
+    spans for calls made through a llama-index LLM, so the raw Groq SDK
+    client used here before produced no LLM spans in Phoenix. This wrapper
+    keeps the exact ``chat.completions.create(...)`` surface the multi-agent
+    tool loop already uses, but executes each call via
+    ``GroqLLM.chat``/``stream_chat`` and returns the *native* Groq response
+    (from ``ChatResponse.raw``), so ``choices[0].message.{content,tool_calls}``
+    and streaming ``choices[0].delta.content`` behave identically and the
+    existing fallback / rate-limit logic works unchanged.
+    """
+
+    class _Completions:
+        def __init__(self, client: "InstrumentedGroqClient"):
+            self._client = client
+
+        def create(self, **kwargs):
+            model = kwargs.get("model")
+            if not model:
+                raise ValueError("model is required")
+            # Import lazily: llama_agent1 requires GROQ_API_KEY at import
+            # time, which is not guaranteed in offline test contexts.
+            from llama_agent1 import GroqLLM
+
+            llm = self._client._llms.get(model)
+            if llm is None:
+                llm = GroqLLM(model=model, api_key=self._client._api_key)
+                self._client._llms[model] = llm
+
+            chat_messages = [
+                _to_llama_chat_message(m) for m in kwargs.get("messages", [])
+            ]
+            llm_kwargs = {
+                k: kwargs[k]
+                for k in ("tools", "tool_choice", "max_tokens")
+                if k in kwargs and kwargs[k] is not None
+            }
+
+            if kwargs.get("stream"):
+                def _chunks():
+                    for chunk in llm.stream_chat(chat_messages, **llm_kwargs):
+                        yield chunk.raw
+                return _chunks()
+
+            return llm.chat(chat_messages, **llm_kwargs).raw
+
+    class _Chat:
+        def __init__(self, client: "InstrumentedGroqClient"):
+            self.completions = InstrumentedGroqClient._Completions(client)
+
+    def __init__(self, api_key: str):
+        self._api_key = api_key
+        self._llms = {}
+        self.chat = self._Chat(self)
+
+
+def _to_llama_chat_message(message: Dict) -> ChatMessage:
+    """Convert a dict message (role/content/tool_calls/tool_call_id) into a
+    llama-index ChatMessage, keeping tool-calling fields in additional_kwargs
+    (GroqLLM._format_messages re-applies them to the API payload)."""
+    additional_kwargs = {}
+    if message.get("tool_calls"):
+        additional_kwargs["tool_calls"] = message["tool_calls"]
+    if message.get("tool_call_id"):
+        additional_kwargs["tool_call_id"] = message["tool_call_id"]
+    return ChatMessage(
+        role=MessageRole(message.get("role", "user")),
+        content=message.get("content") or "",
+        additional_kwargs=additional_kwargs,
+    )
+
+
 # ============ BASE AGENT ============
 
 class BaseAgent:
@@ -59,7 +136,7 @@ class BaseAgent:
             api_key = get_secret("GROQ_API_KEY", default="")
             if api_key:
                 os.environ["GROQ_API_KEY"] = api_key
-        self.client = Groq(api_key=api_key)
+        self.client = InstrumentedGroqClient(api_key=api_key)
         self.memory: List[Dict] = []
 
     def _chat(self, messages, max_tokens: int = 2048):
@@ -507,8 +584,10 @@ Which agent should handle it?
 
 Respond with ONLY the agent name (research/coder/writer/analyzer/planner)."""
         
-        # Use Groq to determine routing (cheap helper call -> fast tier)
-        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        # Use Groq to determine routing (cheap helper call -> fast tier).
+        # Through the instrumented client so the routing call also shows up
+        # as a GroqLLM.* span in Phoenix.
+        client = InstrumentedGroqClient(api_key=os.getenv("GROQ_API_KEY"))
         response = client.chat.completions.create(
             model=resolve_model("fast"),
             messages=[
