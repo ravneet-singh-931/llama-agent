@@ -29,6 +29,9 @@ conversation_memory.json
 fact_memory.json
 notes.txt
 
+# Test artifacts
+tests/_tmp_memory_test.json
+
 # Runtime data (ChromaDB, embeddings, etc.)
 data/
 

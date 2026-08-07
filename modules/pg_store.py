@@ -40,6 +40,21 @@ def get_database_url() -> str:
     return url.replace("+asyncpg", "")
 
 
+def is_registered_user(user_id: Optional[str]) -> bool:
+    """True when user_id is a real UUID (i.e. a registered JWT user).
+
+    Anonymous/derived ids (e.g. "guest", usernames) are normalized to a
+    deterministic uuid5 that has no row in the FK-protected `users` table, so
+    writes for them must be skipped rather than attempting an INSERT that can
+    never satisfy the conversations_user_id_fkey constraint.
+    """
+    try:
+        uuid.UUID(str(user_id or ""))
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
 def normalize_user_id(user_id: Optional[str]) -> str:
     """Map any user identifier to a UUID string for the users/conversations tables."""
     user_id = user_id or "guest"
@@ -90,7 +105,14 @@ async def close_pool():
 
 async def ensure_conversation(user_id: str, conversation_id: str,
                               title: str = "New chat") -> Optional[str]:
-    """Create (or touch) a conversation row. Returns the normalized id or None."""
+    """Create (or touch) a conversation row. Returns the normalized id or None.
+
+    Writes for anonymous/derived users (no users row) are skipped: their chat
+    history lives in the JSON memory store only.
+    """
+    if not is_registered_user(user_id):
+        logger.debug("pg_store.ensure_conversation: skipping write for %r (memory only)", user_id)
+        return None
     norm_user = normalize_user_id(user_id)
     norm_conv = normalize_conversation_id(conversation_id)
     try:
@@ -115,6 +137,9 @@ async def add_message(user_id: str, conversation_id: str, role: str, content: st
     Returns the normalized conversation id on success, None when the mirror is
     unavailable (caller keeps the JSON memory store as source of truth).
     """
+    if not is_registered_user(user_id):
+        logger.debug("pg_store.add_message: skipping write for %r (memory only)", user_id)
+        return None
     norm_user = normalize_user_id(user_id)
     norm_conv = normalize_conversation_id(conversation_id)
     try:

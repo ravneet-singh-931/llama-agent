@@ -48,6 +48,41 @@ def test_normalize_user_id_deterministic_and_distinct():
     assert pg_store.normalize_user_id("guest") != pg_store.normalize_user_id("other")
 
 
+def test_is_registered_user_detects_real_uuids_only():
+    assert pg_store.is_registered_user(str(uuid.uuid4())) is True
+    assert pg_store.is_registered_user("guest") is False
+    assert pg_store.is_registered_user("") is False
+    assert pg_store.is_registered_user(None) is False
+
+
+def test_pg_add_message_skips_unregistered_users_without_db(monkeypatch):
+    """Anonymous/derived users must not attempt FK-violating writes."""
+    called = {"n": 0}
+
+    async def boom():
+        called["n"] += 1
+        raise AssertionError("pool must not be touched for unregistered users")
+
+    monkeypatch.setattr(pg_store, "get_pool", boom)
+    assert _run(pg_store.add_message("guest", "c", "user", "hello")) is None
+    assert _run(pg_store.ensure_conversation("guest", "c")) is None
+    assert called["n"] == 0
+
+
+def test_pg_add_message_still_attempts_real_users(monkeypatch):
+    """Registered UUID users keep the normal persistence path (pool is hit)."""
+    called = {"n": 0}
+
+    async def boom():
+        called["n"] += 1
+        raise ConnectionRefusedError("no database")
+
+    monkeypatch.setattr(pg_store, "get_pool", boom)
+    uid = str(uuid.uuid4())
+    assert _run(pg_store.add_message(uid, "c", "user", "hello")) is None
+    assert called["n"] == 1
+
+
 # ---------------- memory store contract (used by the mirror) ----------------
 
 
