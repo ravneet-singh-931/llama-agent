@@ -291,6 +291,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️  Phoenix tracing unavailable: {e}")
 
+    # Instrument the FastAPI app itself so EVERY request (chat, health, auth...)
+    # becomes a trace in Phoenix. The phoenix `auto_instrument` flag only wires
+    # OpenInference entry points (openai, llama-index), NOT the plain OTel
+    # FastAPI instrumentor, so it must be applied explicitly.
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        FastAPIInstrumentor.instrument_app(app)
+        # CRITICAL: uvicorn invokes the app with a `lifespan` ASGI scope BEFORE
+        # the lifespan body runs, which makes Starlette build AND cache the
+        # middleware stack (without the OTel middleware) ahead of time.
+        # instrument_app only patches build_middleware_stack, so the cached
+        # stack must be rebuilt explicitly or requests will never be traced.
+        app.middleware_stack = app.build_middleware_stack()
+        print("🌐 FastAPI request tracing active")
+    except Exception as e:
+        print(f"⚠️  FastAPI instrumentation unavailable: {e}")
+
     yield
     
     # Shutdown
