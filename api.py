@@ -1345,12 +1345,12 @@ def answer_from_documents(query: str, rag) -> str:
     if "No documents" in context:
         return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
 
-    from groq import Groq
+    from multi_agent import InstrumentedGroqClient
     from modules.secrets import get_secret
     api_key = os.environ.get("GROQ_API_KEY", "") or get_secret("GROQ_API_KEY", default="")
     if not api_key:
         return context
-    client = Groq(api_key=api_key)
+    client = InstrumentedGroqClient(api_key=api_key)
 
     # Multi-document comparison: retrieve per document and answer with a
     # comparison instead of a single mixed context.
