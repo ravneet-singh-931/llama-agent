@@ -149,6 +149,12 @@ class GroqLLM(LLM):
 # streaming path below uses the fast tier for low latency.
 llm = GroqLLM(model=resolve_model("strong"), api_key=GROQ_API_KEY)
 
+# Streaming agent runs (run_agent_stream) use the fast tier. Keeping a
+# dedicated llama-index LLM here - instead of calling the raw Groq SDK
+# client - ensures streaming calls are instrumented and show up as
+# GroqLLM.* spans in Phoenix.
+stream_llm = GroqLLM(model=resolve_model("fast"), api_key=GROQ_API_KEY)
+
 # ===================== ENHANCED TOOLS =====================
 
 def calculator(expression: str) -> str:
@@ -601,7 +607,6 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
     """
     mem = memory if memory is not None else globals().get("memory")
     fact_store = facts if facts is not None else globals().get("facts")
-    client = Groq(api_key=GROQ_API_KEY)
 
     # Build messages with context (scoped to this user's conversation)
     context = mem.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
@@ -628,19 +633,19 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
 
     messages.append({"role": "user", "content": user_input})
 
-    # Stream from Groq API (fast tier: streaming chat favors low latency)
+    # Stream from the llama-index LLM (fast tier) instead of the raw Groq
+    # client: the OpenInference llama-index instrumentor only emits
+    # GroqLLM.* spans for calls routed through llama-index, so using the raw
+    # SDK here previously produced zero LLM spans in Phoenix.
+    llm_messages = [
+        ChatMessage(role=MessageRole(message["role"]), content=message["content"])
+        for message in messages
+    ]
     try:
-        stream = client.chat.completions.create(
-            model=resolve_model("fast"),
-            messages=messages,
-            stream=True,
-            max_tokens=2048,
-        )
-
         full_response = ""
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                token = chunk.choices[0].delta.content
+        for chunk in stream_llm.stream_chat(llm_messages, max_tokens=2048):
+            token = chunk.text
+            if token:
                 full_response += token
                 yield token
     except Exception as e:
