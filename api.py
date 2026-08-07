@@ -282,10 +282,12 @@ async def lifespan(app: FastAPI):
     init_metrics()
 
     # Phoenix tracing (OTel auto-instruments FastAPI, httpx, etc.)
+    # batch=True uses a BatchSpanProcessor (recommended for production) instead
+    # of the default SimpleSpanProcessor.
     try:
         from phoenix.otel import register as register_phoenix
-        register_phoenix(endpoint="http://phoenix:6006/v1/traces", auto_instrument=True)
-        print("📡 Phoenix tracing active")
+        register_phoenix(endpoint="http://phoenix:6006/v1/traces", auto_instrument=True, batch=True)
+        print("📡 Phoenix tracing active (batch processor)")
     except Exception as e:
         print(f"⚠️  Phoenix tracing unavailable: {e}")
 
