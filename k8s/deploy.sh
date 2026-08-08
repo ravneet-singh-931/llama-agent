@@ -67,6 +67,13 @@ kubectl wait --for=condition=ready pod -l component=frontend -n $NAMESPACE --tim
 echo "🌐 Setting up Ingress..."
 kubectl apply -f k8s/ingress.yaml
 
+# Docker Desktop (kind mode) does NOT forward hostPort 80/443 from the node
+# to the host. Its built-in cloud-provider DOES publish LoadBalancer services
+# on localhost, so expose the ingress controller as a LoadBalancer:
+#   kubectl patch svc ingress-nginx-controller -n ingress-nginx \
+#     --type=merge -p '{"spec":{"type":"LoadBalancer"}}'
+# Then: add "127.0.0.1 llama-agent.local" to the hosts file (admin rights).
+
 echo "✅ Deployment complete!"
 echo ""
 echo "📊 Check status: kubectl get pods -n $NAMESPACE"
