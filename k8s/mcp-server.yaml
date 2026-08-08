@@ -25,6 +25,7 @@ spec:
       containers:
         - name: mcp-server
           image: ravneet231/llama-agent-mcp-server:latest
+          imagePullPolicy: IfNotPresent
           command: ["python", "mcp_agents_server.py", "--transport", "sse", "--port", "8001", "--host", "0.0.0.0"]
           ports:
             - containerPort: 8001

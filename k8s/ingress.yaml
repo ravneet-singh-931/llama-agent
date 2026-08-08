@@ -22,10 +22,9 @@ metadata:
     # WebSocket + SSE support (harmless for plain HTTP backends)
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-      proxy_set_header X-Forwarded-Prefix /streamlit;
+    # NOTE: configuration-snippet intentionally NOT used - it is disabled by
+    # default in ingress-nginx (allow-snippet-annotations=false) for security.
+    # WebSocket Upgrade/Connection headers are set automatically by ingress-nginx.
 spec:
   ingressClassName: nginx
   rules:

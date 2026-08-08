@@ -26,6 +26,7 @@ spec:
       containers:
         - name: frontend
           image: ravneet231/llama-agent-frontend:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
               name: http
