@@ -1,0 +1,198 @@
+# ============================================
+# Grafana - Monitoring dashboards
+# ============================================
+# Service is named "grafana" (host grafana.llama-agent.local via
+# monitoring-ingress.yaml).
+#
+# Admin password: a Secret named "grafana-secret" with key
+# "admin-password" is created from secrets/grafana_admin_password.txt
+# (run from repo root, never commit the real file):
+#   kubectl create secret generic grafana-secret -n llama-agent \
+#     --from-file=admin-password=secrets/grafana_admin_password.txt
+#
+# Provisioning comes from ConfigMaps (datasources + dashboard provider +
+# dashboard JSON). The dashboard ConfigMap is created from the repo file:
+#   kubectl create configmap grafana-dashboard-llama-agent -n llama-agent \
+#     --from-file=llama-agent.json=config/grafana/dashboards/llama-agent.json \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# Grafana image runs as UID 472; Docker Desktop's hostpath PVCs are
+# root-owned, so we run as root (runAsUser: 0) to allow writes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: llama-agent
+  labels:
+    app: llama-agent
+    component: grafana
+data:
+  datasource.yml: |
+    # ============================================
+    # Grafana Datasources - Auto-provisioned
+    # ============================================
+
+    apiVersion: 1
+
+    datasources:
+      # ---- Prometheus (Metrics) ----
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: true
+
+      # ---- Loki (Logs) ----
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki:3100
+        editable: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: llama-agent
+  labels:
+    app: llama-agent
+    component: grafana
+data:
+  dashboard.yml: |
+    # ============================================
+    # Grafana Dashboard Provisioning
+    # ============================================
+
+    apiVersion: 1
+
+    providers:
+      - name: "Llama Agent Dashboards"
+        orgId: 1
+        folder: "Llama Agent"
+        type: file
+        disableDeletion: false
+        editable: true
+        updateIntervalSeconds: 10
+        options:
+          path: /var/lib/grafana/dashboards
+          foldersFromFilesStructure: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: llama-agent
+  labels:
+    app: llama-agent
+    component: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llama-agent
+      component: grafana
+  template:
+    metadata:
+      labels:
+        app: llama-agent
+        component: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:10.4.0
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: GF_SERVER_HTTP_PORT
+              value: "3000"
+            - name: GF_SECURITY_ADMIN_USER
+              value: "admin"
+            - name: GF_SECURITY_ADMIN_PASSWORD_FILE
+              value: /etc/grafana/secrets/admin-password
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_SERVER_ROOT_URL
+              value: "http://grafana.llama-agent.local"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          securityContext:
+            runAsUser: 0
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - name: grafana-secret
+              mountPath: /etc/grafana/secrets
+              readOnly: true
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources/datasource.yml
+              subPath: datasource.yml
+              readOnly: true
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards/dashboard.yml
+              subPath: dashboard.yml
+              readOnly: true
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/grafana
+      volumes:
+        - name: grafana-secret
+          secret:
+            secretName: grafana-secret
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboard-llama-agent
+        - name: data
+          persistentVolumeClaim:
+            claimName: grafana-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: llama-agent
+spec:
+  selector:
+    app: llama-agent
+    component: grafana
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: llama-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

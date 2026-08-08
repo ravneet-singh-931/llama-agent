@@ -67,6 +67,39 @@ kubectl wait --for=condition=ready pod -l component=frontend -n $NAMESPACE --tim
 echo "🌐 Setting up Ingress..."
 kubectl apply -f k8s/ingress.yaml
 
+# ============================================
+# Monitoring stack (Prometheus, Loki, promtail, Grafana, node-exporter)
+# ============================================
+echo "📈 Deploying monitoring stack..."
+
+# Grafana admin password Secret — created from the gitignored file.
+# k8s/secrets.yaml only holds placeholders; real secrets are created
+# directly with kubectl (never commit the real files).
+kubectl create secret generic grafana-secret -n $NAMESPACE \
+  --from-file=admin-password=secrets/grafana_admin_password.txt \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Grafana dashboard ConfigMap — created from the repo dashboard JSON
+# (avoids YAML-escaping the ~8KB JSON inside a manifest).
+kubectl create configmap grafana-dashboard-llama-agent -n $NAMESPACE \
+  --from-file=llama-agent.json=config/grafana/dashboards/llama-agent.json \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl apply -f k8s/prometheus.yaml
+kubectl apply -f k8s/loki.yaml
+kubectl apply -f k8s/promtail.yaml
+kubectl apply -f k8s/node-exporter.yaml
+kubectl apply -f k8s/grafana.yaml
+
+echo "⏳ Waiting for monitoring pods..."
+kubectl wait --for=condition=ready pod -l component=prometheus -n $NAMESPACE --timeout=120s
+kubectl wait --for=condition=ready pod -l component=loki -n $NAMESPACE --timeout=120s
+kubectl wait --for=condition=ready pod -l component=grafana -n $NAMESPACE --timeout=120s
+kubectl wait --for=condition=ready pod -l component=promtail -n $NAMESPACE --timeout=120s
+kubectl wait --for=condition=ready pod -l component=node-exporter -n $NAMESPACE --timeout=120s
+
+kubectl apply -f k8s/monitoring-ingress.yaml
+
 # Docker Desktop (kind mode) does NOT forward hostPort 80/443 from the node
 # to the host. Its built-in cloud-provider DOES publish LoadBalancer services
 # on localhost, so expose the ingress controller as a LoadBalancer:
@@ -82,3 +115,7 @@ echo "📋 MCP logs:     kubectl logs -f deployment/llama-agent-mcp-server -n $N
 echo "📋 Web logs:     kubectl logs -f deployment/llama-agent-web -n $NAMESPACE"
 echo "📋 Frontend logs: kubectl logs -f deployment/llama-agent-frontend -n $NAMESPACE"
 echo "🔗 App URL:      http://llama-agent.local (add to /etc/hosts, then use the ingress)"
+echo "🔭 Phoenix:      http://phoenix.llama-agent.local"
+echo "📊 Grafana:      http://grafana.llama-agent.local (admin / secrets/grafana_admin_password.txt)"
+echo "📈 Prometheus:   http://prometheus.llama-agent.local"
+echo "🪵 Loki:         http://loki.llama-agent.local"

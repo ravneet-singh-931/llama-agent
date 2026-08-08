@@ -1,0 +1,56 @@
+# ============================================
+# Monitoring UI - dedicated Ingress
+# Hosts (add to /etc/hosts):
+#   grafana.llama-agent.local      -> Grafana
+#   prometheus.llama-agent.local   -> Prometheus
+#   loki.llama-agent.local         -> Loki
+#
+# Kept SEPARATE from llama-agent-ingress on purpose: that Ingress uses
+# rewrite-target: /$2 which mangles root-served UIs (no capture groups).
+# Grafana/Prometheus/Loki all serve their UI at the root with relative
+# asset paths, so this Ingress has NO rewrite-target (same pattern as
+# phoenix-ingress.yaml and frontend-ingress.yaml).
+# ============================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: monitoring-ingress
+  namespace: llama-agent
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: grafana.llama-agent.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
+    - host: prometheus.llama-agent.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus
+                port:
+                  number: 9090
+    - host: loki.llama-agent.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: loki
+                port:
+                  number: 3100

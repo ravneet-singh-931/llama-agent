@@ -1,0 +1,241 @@
+# ============================================
+# Prometheus - Metrics collection
+# ============================================
+# Service is named "prometheus" so the Grafana datasource URL
+# http://prometheus:9090 (config/grafana/provisioning/datasources/datasource.yml)
+# resolves unchanged inside the cluster.
+#
+# NOTE: scrape targets from the compose config are adapted to k8s
+# service names: api:8000 -> llama-agent-api-service:8000.
+#
+# Prometheus image runs as UID 65534 (nobody); Docker Desktop's hostpath
+# PVCs are root-owned, so we run as root (runAsUser: 0) to allow writes
+# to /prometheus.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: llama-agent
+  labels:
+    app: llama-agent
+    component: prometheus
+data:
+  prometheus.yml: |
+    # ============================================
+    # Prometheus Configuration (k8s)
+    # Scrapes metrics from all services
+    # ============================================
+
+    global:
+      scrape_interval: 15s       # How often to pull metrics
+      evaluation_interval: 15s   # How often to evaluate rules
+
+    # Alert rules
+    rule_files:
+      - /etc/prometheus/alerts.yml
+
+    # Scrape targets
+    scrape_configs:
+      # ---- FastAPI Application Metrics ----
+      - job_name: "llama-agent-api"
+        metrics_path: "/metrics"
+        static_configs:
+          - targets: ["llama-agent-api-service:8000"]
+            labels:
+              service: "llama-agent-api"
+              environment: "production"
+
+      # ---- Prometheus Self-Monitoring ----
+      - job_name: "prometheus"
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      # ---- Node Exporter (System Metrics) ----
+      - job_name: "node-exporter"
+        static_configs:
+          - targets: ["node-exporter:9100"]
+            labels:
+              service: "system"
+  alerts.yml: |
+    # ============================================
+    # Prometheus Alert Rules (k8s)
+    # ============================================
+
+    groups:
+      # ---- Application Alerts ----
+      - name: llama_agent_app
+        rules:
+          - alert: ApiDown
+            expr: absent(up{job="llama-agent-api"})
+            for: 2m
+            labels:
+              severity: critical
+              service: llama-agent
+            annotations:
+              summary: "API is DOWN"
+              description: "Llama Agent API has not been reachable for 2 minutes."
+
+          - alert: HighErrorRate
+            expr: rate(llama_agent_errors_total[5m]) > 5
+            for: 5m
+            labels:
+              severity: warning
+              service: llama-agent
+            annotations:
+              summary: "High error rate detected"
+              description: "Error rate is {{ $value }} errors/sec (threshold: 5)."
+
+          - alert: HighResponseTime
+            expr: histogram_quantile(0.95, rate(llama_agent_response_time_seconds_bucket[5m])) > 5
+            for: 5m
+            labels:
+              severity: warning
+              service: llama-agent
+            annotations:
+              summary: "Slow API responses detected"
+              description: "P95 response time is {{ $value | humanizeDuration }} (threshold: 5s)."
+
+          - alert: VeryHighResponseTime
+            expr: histogram_quantile(0.99, rate(llama_agent_response_time_seconds_bucket[5m])) > 10
+            for: 5m
+            labels:
+              severity: critical
+              service: llama-agent
+            annotations:
+              summary: "CRITICAL: Very slow API responses"
+              description: "P99 response time is {{ $value | humanizeDuration }} (threshold: 10s)."
+
+          - alert: ServerErrors
+            expr: rate(llama_agent_http_responses_total{status_code=~"5.."}[5m]) > 1
+            for: 5m
+            labels:
+              severity: warning
+              service: llama-agent
+            annotations:
+              summary: "Server errors (5xx) detected"
+              description: "{{ $value }} 5xx responses/sec detected."
+
+      # ---- Infrastructure Alerts ----
+      - name: llama_agent_infra
+        rules:
+          - alert: HighCpuUsage
+            expr: 100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+            for: 10m
+            labels:
+              severity: warning
+              service: system
+            annotations:
+              summary: "High CPU usage"
+              description: "CPU usage is {{ $value | humanize }}% (threshold: 85%)."
+
+          - alert: HighMemoryUsage
+            expr: 100 - ((node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100) > 90
+            for: 5m
+            labels:
+              severity: warning
+              service: system
+            annotations:
+              summary: "High memory usage"
+              description: "Memory usage is {{ $value | humanize }}% (threshold: 90%)."
+
+          - alert: DiskSpaceLow
+            expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 10
+            for: 5m
+            labels:
+              severity: critical
+              service: system
+            annotations:
+              summary: "Disk space critically low"
+              description: "Only {{ $value | humanize }}% disk space remaining."
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: llama-agent
+  labels:
+    app: llama-agent
+    component: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llama-agent
+      component: prometheus
+  template:
+    metadata:
+      labels:
+        app: llama-agent
+        component: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.51.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.retention.time=30d
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+              name: http
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          securityContext:
+            runAsUser: 0
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: prometheus-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: llama-agent
+spec:
+  selector:
+    app: llama-agent
+    component: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090
+      name: http
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: llama-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
