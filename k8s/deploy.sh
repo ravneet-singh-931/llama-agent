@@ -38,6 +38,11 @@ echo "⏳ Waiting for infrastructure..."
 kubectl wait --for=condition=ready pod -l app=postgres -n $NAMESPACE --timeout=120s
 kubectl wait --for=condition=ready pod -l app=redis -n $NAMESPACE --timeout=120s
 
+# Deploy observability (Phoenix must exist before API/web/mcp so the
+# "phoenix" Service is present; app pods rely on http://phoenix:6006)
+echo "🔭 Deploying Phoenix (observability)..."
+kubectl apply -f k8s/phoenix.yaml
+
 # Deploy application
 echo "🤖 Deploying Llama Agent API..."
 kubectl apply -f k8s/api.yaml

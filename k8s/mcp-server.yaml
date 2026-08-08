@@ -43,6 +43,10 @@ spec:
               value: llama-3.3-70b-versatile
             - name: LLM_MODEL_FAST
               value: llama-3.1-8b-instant
+            # K8s injects PHOENIX_PORT as "tcp://<IP>:<PORT>" because the
+            # "phoenix" Service exists; the phoenix client needs an integer.
+            - name: PHOENIX_PORT
+              value: "6006"
           resources:
             requests:
               memory: "128Mi"
