@@ -1,0 +1,33 @@
+# ============================================
+# Next.js Frontend - dedicated Ingress
+# Host: llama-agent.local
+#
+# Kept SEPARATE from llama-agent-ingress on purpose: that Ingress uses
+# rewrite-target: /$2, but the catch-all pattern /(.*) has only ONE capture
+# group, so $2 is empty and every request (including /_next/static/* assets)
+# would be rewritten to / -> index.html -> black screen. This Ingress has
+# NO rewrite-target so static assets pass through untouched. More specific
+# paths (/api, /ws, /mcp, /streamlit) in llama-agent-ingress take precedence.
+# ============================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend-ingress
+  namespace: llama-agent
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: llama-agent.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: llama-agent-frontend-service
+                port:
+                  number: 3000

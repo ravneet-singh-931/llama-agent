@@ -7,7 +7,11 @@
 #   /ws/*       -> API WebSocket port (prefix stripped)
 #   /mcp/*      -> MCP agent server (prefix stripped)
 #   /streamlit/*-> Streamlit web UI (prefix stripped)
-#   /*          -> Next.js frontend (paths passed through)
+#
+# NOTE: the Next.js frontend catch-all lives in frontend-ingress.yaml with
+# NO rewrite-target. The global /$2 here would corrupt /_next/static/* paths
+# (the /(.*) pattern has only one capture group, so $2 is empty and every
+# asset request rewrites to / -> index.html -> black screen).
 # ============================================
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -59,10 +63,3 @@ spec:
                 name: llama-agent-web-service
                 port:
                   number: 8501
-          - path: /(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: llama-agent-frontend-service
-                port:
-                  number: 3000
