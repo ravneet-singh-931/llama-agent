@@ -3,138 +3,137 @@
 [![CI](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml/badge.svg)](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ed.svg?logo=docker)](https://www.docker.com/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009639.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Next.js](https://img.shields.io/badge/Next.js-16+-000000.svg?logo=nextdotjs)](https://nextjs.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.40+-FF4B4B.svg?logo=streamlit)](https://streamlit.io/)
-[![Next.js](https://img.shields.io/badge/Next.js-15+-000000.svg?logo=nextdotjs)](https://nextjs.org/)
 [![Groq](https://img.shields.io/badge/Groq-API-00F5A8.svg?logo=groq)](https://groq.com/)
+[![Phoenix](https://img.shields.io/badge/Phoenix-Observability-43B58B.svg)](https://arize.com/phoenix/)
+[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-000000.svg?logo=opentelemetry)](https://opentelemetry.io/)
 [![Prometheus](https://img.shields.io/badge/Prometheus-Monitoring-00C0F0.svg?logo=prometheus)](https://prometheus.io/)
 [![Grafana](https://img.shields.io/badge/Grafana-Dashboards-F46842.svg?logo=grafana)](https://grafana.com/)
-[![Phoenix](https://img.shields.io/badge/Phoenix-Observability-43B58B.svg)](https://arize.com/phoenix/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ed.svg?logo=docker)](https://www.docker.com/)
 
 ---
 
-## 🚀 Llama Agent — Production-Grade AI Assistant
+## 🚀 Llama Agent — Production-Grade Multi-Agent AI Assistant
 
-> **Upload documents (PDFs, TXTs, CSVs) and ask questions. The AI reads your files and gives you accurate answers based on their content.**
+A full-stack, multi-agent AI assistant with **end-to-end observability**. Upload documents (PDF, TXT, CSV, DOCX), chat with a team of five specialized agents (`@Research`, `@Coder`, `@Writer`, `@Planner`, `@Analyzer`), and get answers grounded in your files — every LLM call traced, every span captured.
+
+> **Built to be observed.** Every request flows through a single trace: `POST /chat/stream` → `GroqLLM.chat` → tool calls → HTTP send/receive — visible live in Phoenix.
 
 ```
-You: "What's the refund policy?"
-AI:  "Based on the uploaded documents, our refund policy allows..."
+You:  "summarize the CRM file"
+AI:   "This document is a Word document (CRM-3.docx) discussing investment and
+       capital allocation strategies, involving financial analysis and business
+       metrics (CRM-3.docx, chunk 0)..."
+
+You:  "@Research Agent tell me a fun fact about Japan"
+AI:   "Japan has a vending machine culture, with over 5.5 million vending
+       machines across the country — offering drinks, snacks, and even live crabs."
 ```
 
 ---
 
-## 📋 Table of Contents
+## 📚 Documentation
 
-- [✨ Demo](#demo)
-- [🚀 Quick Start](#quick-start)
-- [🔐 Security](#security)
-- [📊 Monitoring & Observability](#monitoring--observability)
-- [�� Architecture](#architecture)
-- [💻 Tech Stack](#tech-stack)
-- [� Docker Containers](#docker-containers-13-total)
-- [🔧 Common Commands](#common-commands)
-- [☸️ Kubernetes Deployment](#kubernetes-deployment)
-- [📁 Project Structure](#project-structure)
-- [🔌 API Endpoints](#api-endpoints)
-- [⚙️ Environment Variables](#environment-variables)
-- [🔧 Troubleshooting](#troubleshooting)
-- [🤝 Contributing](#contributing)
-- [📄 License](#license)
+| Document | What it covers |
+|----------|---------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Full system design, data flow, and decision records |
+| [API_DOCUMENTATION.md](API_DOCUMENTATION.md) | Every REST/WebSocket endpoint with payloads and examples |
+| [SECURITY.md](SECURITY.md) | Threat model, security posture, and responsible disclosure |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and development guide |
+| [CHANGELOG.md](CHANGELOG.md) | Version history and notable changes |
 
 ---
 
-## ✨ Demo
+## ✨ Highlights
 
-The Llama Agent provides a full-stack AI assistant experience with multiple interfaces:
-
-- **Next.js Frontend** — Modern web UI with chat, document management, and agent dashboard
-- **API Documentation** — Interactive Swagger UI for all REST endpoints
-- **Streamlit UI** — Legacy interface for quick testing
-- **Grafana Dashboard** — Real-time monitoring with 12 panels covering metrics, costs, and SLA
+- **Multi-Agent Orchestration** — five specialized agents + team mode, keyword-routed (`@Research Agent ...`) or automatic
+- **Document RAG** — upload files, retrieve with ChromaDB, cite every claim with file + chunk
+- **Two-Pass Retrieval** — thin answers trigger query reformulation and a second search
+- **Streaming Chat** — SSE streaming with agent/tool transcript markers
+- **LLM Observability** — every Groq call (agents *and* RAG) emits `GroqLLM.chat` spans to Phoenix via llama-index instrumentation
+- **Full DevOps Stack** — Prometheus, Grafana, Loki, Promtail, node-exporter, nginx (SSL + LB)
+- **Enterprise Security** — JWT auth, rate limiting, brute-force lockout, CSRF, audit logging, Docker secrets
 
 ---
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- 🐳 Docker Desktop installed and running
-- 🐍 Python 3.10+ (for local development)
-- 🔑 Groq API key ([get one here](https://console.groq.com/))
+- 🐳 **Docker Desktop** (or Docker Engine + Compose v2)
+- 🔑 A **Groq API key** ([console.groq.com](https://console.groq.com/)) — free tier works
+- (Optional) A **Tavily API key** for web-search powered agents
 
-### 1️⃣ Clone the repo
+### 1️⃣ Clone
 ```bash
 git clone https://github.com/ravneet-png/llama-agent.git
 cd llama-agent
 ```
 
-### 2️⃣ Add your API key
+### 2️⃣ Add your secrets (never committed)
 ```bash
-# Create secrets directory
 mkdir -p secrets
 
-# Add your Groq API key
+# Groq API key (required)
 echo "gsk_YOUR_KEY_HERE" > secrets/groq_api_key.txt
 
-# Create other secrets
-echo "your_postgres_password" > secrets/postgres_password.txt
-echo "your_jwt_secret" > secrets/jwt_secret_key.txt
-echo "admin_password" > secrets/grafana_admin_password.txt
+# Tavily API key (optional; used by research/analyzer agents)
+echo "tvly_YOUR_KEY_HERE" > secrets/tavily_api_key.txt
+
+# Postgres password + JWT secret (generate strong random values!)
+python -c "import secrets; print(secrets.token_hex(32))" > secrets/postgres_password.txt
+python -c "import secrets; print(secrets.token_hex(32))" > secrets/jwt_secret_key.txt
+echo "change_me_grafana" > secrets/grafana_admin_password.txt
 ```
 
-### 3️⃣ Start everything
+> 🔐 **Security note:** the `secrets/` directory is **gitignored** (`secrets/` in `.gitignore`).
+> Compose mounts these files as **Docker secrets** at `/run/secrets/<name>` — keys never
+> appear in code, images, or environment listings. See [SECURITY.md](SECURITY.md).
+
+### 3️⃣ Start the stack
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ### 4️⃣ Open the app
 | Service | URL |
 |---------|-----|
 | **Main App (Next.js)** | http://localhost:3001 |
-| **Streamlit UI (legacy)** | http://localhost:8501 |
 | **API Docs (Swagger)** | http://localhost:8000/docs |
-| **Grafana Dashboard** | http://localhost:3002 |
-| **Prometheus** | http://localhost:9090 |
-| **Phoenix Dashboard** | http://localhost:6006 |
+| **Streamlit UI (legacy)** | http://localhost:8501 |
+| **Nginx (SSL/LB)** | https://localhost |
+
+> Monitoring UIs (Phoenix `:6006`, Grafana `:3002`, Prometheus `:9090`) are **not exposed
+> by default** — see [Secure-by-default](#-secure-by-default) below.
 
 ### 5️⃣ Create an account
-1. Go to http://localhost:3001
-2. Click "Sign Up"
-3. Create username/password
-4. Login and start chatting!
+1. Open http://localhost:3001 → **Sign Up**
+2. Create a username/password, log in, and start chatting
+3. Try: `@Research Agent tell me a fun fact about Japan` or `summarize the CRM file`
 
 ---
 
-## 🔐 Security
+## 🛡️ Secure-by-default
 
-| Feature | Description |
-|---------|-------------|
-| 🔑 **JWT Authentication** | Secure login/signup with token-based auth |
-| 📁 **File Validation** | Checks types, sizes, scans for threats |
-| 🚦 **Rate Limiting** | Prevents abuse with configurable limits |
-| 🛡️ **Brute-Force Protection** | Auto-locks IPs/usernames after repeated failures |
-| 🛡️ **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options |
-| 📝 **Audit Logging** | Login, registration, uploads, rate-limit events |
-| 🧼 **Input Sanitization** | SQL injection / XSS / command injection detection |
-| 🛡️ **CSRF Protection** | Token-based request validation |
-| 🔐 **Secrets Management** | API keys never in code (Docker secrets) |
+The committed `docker-compose.yml` publishes **only** the user-facing ports
+(`3001`, `8000`, `8501`, `80/443`). Infrastructure ports (Postgres, Redis,
+Phoenix, Grafana, Prometheus, Loki, node-exporter, MCP) are **internal to the
+Docker network** — cloned copies are secure out of the box.
 
----
+For local debugging, the owner can add a **gitignored** override (this file is
+**not** committed and never ships to users):
 
-## 📊 Monitoring & Observability
-
-| Tool | Purpose |
-|------|---------|
-| 📈 **Prometheus + Grafana** | Real-time metrics dashboards (12 panels) |
-| 📜 **Loki + Promtail** | Centralized log aggregation |
-| 🚨 **Alert Rules** | 8 automatic alerts for issues |
-| 📊 **Enterprise Dashboard** | `/monitoring/dashboard` (business metrics, costs, SLA, alerts) |
-| 💰 **Cost Tracking** | Groq API spend per model/user/day |
-| 📏 **SLA Monitoring** | Uptime, response-time, and error-rate compliance |
-| 🔍 **Phoenix (Arize AI)** | Traces every AI step |
-| 📡 **OpenTelemetry** | See exactly what the AI is thinking |
-| 🐞 **Debug Dashboard** | Find why answers are wrong |
+```yaml
+# docker-compose.override.yml (local only — DO NOT COMMIT)
+services:
+  phoenix:
+    ports: ["6006:6006"]
+  grafana:
+    ports: ["3002:3000"]
+  prometheus:
+    ports: ["9090:9090"]
+```
 
 ---
 
@@ -144,49 +143,45 @@ docker-compose up -d
 ┌─────────────────────────────────────────────────────────┐
 │                    User (Browser)                        │
 └───────────────────────┬─────────────────────────────────┘
-                        │
+                        │  HTTPS
                         ▼
 ┌─────────────────────────────────────────────────────────┐
-│              Nginx (Load Balancer + SSL + CDN headers)   │
-└───────────────┬──────────────────────┬──────────────────┘
-                │                      │
-                ▼                      ▼
-┌─────────────────────┐        ┌──────────────────────────┐
-│  Next.js UI (main)  │        │    Streamlit UI (legacy) │
-│  Port 3001/3000     │        │    Port 8501             │
-└───────────┬─────────┘        └───────────┬──────────────┘
-            │                              │
-            ▼                              ▼
-┌─────────────────────────────────────────────────────────┐
-│               FastAPI REST + WebSocket (8000)            │
-│  /chat /chat/stream /ws /auth /documents /monitoring     │
-└───────┬───────────────────────────┬─────────────────────┘
-        │                           │
-        ▼                           ▼
-┌──────────────────┐        ┌─────────────────────────────┐
-│   PostgreSQL     │        │  MCP Agent Server (SSE)     │
-│   (Database)     │        │  Port 8001 → 5 agents → Groq│
-└────────┬─────────┘        └──────────────┬──────────────┘
-         │                                 │
-         ▼                                 ▼
-┌─────────────────────────────────────────────────────────┐
-│                    AI Pipeline                           │
-│                                                         │
-│  Query → Router → Search → Re-rank → Answer             │
-│                    │                                     │
-│                    ▼                                     │
-│              ChromaDB (Vectors)   Redis (Cache)         │
-│              Groq API (LLM)                             │
-└─────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────┐
-│                 Observability                            │
-│                                                         │
-│  Prometheus → Grafana (Metrics)   Phoenix (AI Traces)   │
-│  Loki → Promtail (Logs)                                 │
-└─────────────────────────────────────────────────────────┘
+│              Nginx (SSL + Load Balancer + CDN headers)   │
+└───────┬──────────────┬──────────────┬───────────────────┘
+        │              │              │
+        ▼              ▼              ▼
+┌──────────────┐ ┌─────────────┐ ┌───────────────────────┐
+│ Next.js UI   │ │ Streamlit   │ │ FastAPI (8000)        │
+│ :3001        │ │ UI :8501    │ │ /chat /chat/stream    │
+│              │ │ (legacy)    │ │ /ws /auth /documents  │
+└──────────────┘ └─────────────┘ │ /monitoring /metrics  │
+                                 └───────┬───────────────┘
+        ┌───────────────────────────────┬┘───────────┬────────────┐
+        ▼                               ▼            ▼            ▼
+┌──────────────┐ ┌──────────────────┐ ┌─────────────┐ ┌─────────────┐
+│  PostgreSQL  │ │  MCP Agent Svc   │ │  Redis      │ │  ChromaDB   │
+│  (state)     │ │  :8001 (SSE)     │ │  (cache/WS) │ │  (vectors)  │
+│              │ │  5 agents → Groq │ │             │ │             │
+└──────────────┘ └──────────────────┘ └─────────────┘ └─────────────┘
+                                 ▼
+                        ┌────────────────┐
+                        │  Groq (LLMs)   │  llama-3.3-70b (strong)
+                        │                │  llama-3.1-8b (fast)
+                        └────────────────┘
+        ┌───────────────────────────────┬───────────────────────────────┐
+        ▼                               ▼                               ▼
+┌──────────────┐                 ┌──────────────┐                 ┌──────────────┐
+│  Phoenix     │                 │  Prometheus  │                 │  Loki        │
+│  LLM traces  │                 │  → Grafana   │                 │  ← Promtail  │
+│  (6006)      │                 │  (metrics)   │                 │  (logs)      │
+└──────────────┘                 └──────────────┘                 └──────────────┘
 ```
+
+**Observability flow:** FastAPI + llama-index are auto-instrumented with
+OpenTelemetry; all traces are exported to Phoenix. Every LLM call — whether from
+the multi-agent orchestrator or the document RAG pipeline — is routed through
+`GroqLLM` (a llama-index wrapper) so it emits a proper `GroqLLM.chat` **LLM span**
+with latency, model, and I/O, parented under the originating `POST /chat/stream` span.
 
 ---
 
@@ -195,127 +190,68 @@ docker-compose up -d
 | Layer | Technology |
 |-------|-----------|
 | **Frontend** | Next.js 16 (main UI), Streamlit (legacy) |
-| **Backend** | FastAPI, Python 3.10 |
-| **Database** | PostgreSQL 15, Redis 7, ChromaDB |
-| **AI/ML** | Groq (Llama 3), LlamaIndex, 5-agent team |
-| **Agents** | MCP (Model Context Protocol) over SSE |
-| **Monitoring** | Prometheus, Grafana, Loki, Enterprise dashboard |
-| **Observability** | Phoenix (Arize AI), OpenTelemetry |
-| **Infrastructure** | Docker, Docker Compose, Nginx |
-| **Security** | JWT, brute-force protection, audit logs, CSP headers, CSRF, rate limiting |
+| **Backend** | FastAPI, Python 3.10, asyncpg |
+| **Database** | PostgreSQL 15 (+ pgvector), Redis 7, ChromaDB |
+| **AI/ML** | Groq (Llama 3.3-70b / 3.1-8b), LlamaIndex |
+| **Agents** | 5 specialized agents (Research, Coder, Writer, Planner, Analyzer) via MCP/SSE |
+| **Observability** | Phoenix (Arize), OpenTelemetry, OpenInference |
+| **Monitoring** | Prometheus, Grafana, Loki, Promtail, node-exporter |
+| **Infrastructure** | Docker Compose (13 services), Nginx, Kubernetes (k8s/) |
+| **Security** | JWT, Docker secrets, rate limiting, brute-force lockout, CSRF, CSP headers, audit logging |
 
 ---
 
-## 🐳 Docker Containers (13 Total)
+## 🐳 Docker Services (13)
 
-| Container | Purpose | Port |
-|-----------|---------|------|
-| `postgres` | Database | 5432 |
-| `redis` | Caching | 6379 |
-| `api` | REST API + WebSocket | 8000 |
-| `mcp-server` | MCP agent server (SSE) | 8001 |
-| `frontend` | Next.js UI | 3001 |
-| `web` | Streamlit UI (legacy) | 8501 |
-| `nginx` | Load Balancer + SSL | 80, 443 |
-| `prometheus` | Metrics | 9090 |
-| `grafana` | Dashboards | 3002 |
-| `loki` | Logs | 3100 |
-| `promtail` | Log Shipping | — |
-| `node-exporter` | System Metrics | 9100 |
-| `phoenix` | AI Observability | 6006 |
-
----
-
-## 🔧 Common Commands
-
-```bash
-# Start everything
-docker-compose up -d
-
-# Stop everything
-docker-compose down
-
-# Rebuild after code changes
-docker-compose up -d --build api web mcp-server frontend nginx
-
-# View logs
-docker-compose logs -f web
-docker-compose logs -f api
-
-# Check status
-docker-compose ps
-
-# Run tests locally
-pytest tests/ -v -m "not mcp"
-```
+| Container | Service | Purpose | Port |
+|-----------|---------|---------|------|
+| `llama-agent-db` | `postgres` | PostgreSQL 15 (+pgvector) | internal |
+| `llama-agent-redis` | `redis` | Caching + WebSocket pub/sub | internal |
+| `llama-agent-api` | `api` | FastAPI REST + WebSocket + SSE chat | **8000** |
+| `llama-agent-mcp` | `mcp-server` | MCP agent server (SSE, 5 agents) | internal |
+| `llama-agent-web` | `web` | Streamlit UI (legacy) | **8501** |
+| `llama-agent-frontend` | `frontend` | Next.js 16 UI | **3001** |
+| `llama-agent-nginx` | `nginx` | SSL + Load Balancer + CDN headers | **80, 443** |
+| `llama-agent-prometheus` | `prometheus` | Metrics collection + alert rules | internal |
+| `llama-agent-grafana` | `grafana` | Monitoring dashboards | internal |
+| `llama-agent-loki` | `loki` | Log aggregation | internal |
+| `llama-agent-promtail` | `promtail` | Log shipping → Loki | internal |
+| `llama-agent-node-exporter` | `node-exporter` | System metrics | internal |
+| `llama-agent-phoenix` | `phoenix` | LLM observability (Arize Phoenix) | internal |
 
 ---
 
-## ☸️ Kubernetes Deployment
+## 🔐 Security
 
-Kubernetes manifests live in `k8s/` and cover all application components:
-API, Streamlit web UI, Next.js frontend, MCP agent server, PostgreSQL,
-Redis, secrets, namespace, and ingress.
-
-```bash
-# One-command deploy (requires kubectl + a cluster with nginx ingress)
-./k8s/deploy.sh
-
-# Or step by step
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/secrets.yaml        # fill in real values first!
-kubectl apply -f k8s/postgres.yaml k8s/redis.yaml
-kubectl apply -f k8s/api.yaml k8s/mcp-server.yaml k8s/web.yaml k8s/frontend.yaml
-kubectl apply -f k8s/ingress.yaml
-```
-
-> **Note:** Add `llama-agent.local` to your `/etc/hosts` file (pointing at your
-> cluster's ingress IP) to reach the app. The ingress routes `/` to the Next.js
-> frontend, `/api/*` + `/ws/*` to the API, `/mcp/*` to the MCP server, and
-> `/streamlit/*` to the Streamlit UI. Images are pulled from Docker Hub
-> (`ravneet231/llama-agent*`) — build and push them first. Real secret values
-> must replace the placeholders in `k8s/secrets.yaml`.
+| Feature | Description |
+|---------|-------------|
+| 🔑 **JWT Authentication** | Secure signup/login with token-based auth |
+| 🔐 **Docker Secrets** | API keys mounted at `/run/secrets/*` — never in code or images |
+| 📁 **File Validation** | Upload type/size checks + threat scanning |
+| 🚦 **Rate Limiting** | Per-IP/per-user limits with configurable thresholds |
+| 🛡️ **Brute-Force Protection** | Automatic IP/username lockout after repeated failures |
+| 🛡️ **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options |
+| 🧼 **Input Sanitization** | SQL injection / XSS / command-injection detection |
+| 🛡️ **CSRF Protection** | Token-based request validation |
+| 📝 **Audit Logging** | Login, registration, uploads, rate-limit events |
+| 🔒 **Secure-by-default** | Infra ports never published to the host in committed config |
 
 ---
 
-## 📁 Project Structure
+## 📊 Observability
 
-```
-llama-agent/
-├── app.py                    # Streamlit application (legacy UI)
-├── api.py                    # FastAPI REST API (enterprise: security + monitoring wired in)
-├── mcp_agents_server.py      # MCP agent server (SSE, 5 specialized agents)
-├── multi_agent.py            # Multi-agent orchestrator
-├── frontend/                 # Next.js 16 main UI
-├── modules/
-│   ├── auth.py               # JWT authentication
-│   ├── config.py             # App configuration
-│   ├── database.py           # PostgreSQL models
-│   ├── memory.py             # Conversation memory
-│   ├── monitoring.py         # Logging + metrics
-│   ├── security.py           # File validation, rate limiting
-│   ├── security_hardening.py # Headers, brute-force, audit log, CSRF, sanitization
-│   ├── advanced_monitoring.py# Alerts, business metrics, cost tracking, SLA
-│   ├── cicd_improvements.py  # Feature flags, A/B testing, deployments
-│   ├── database_improvements.py # Migrations, backups, health checks
-│   ├── mcp_client.py         # MCP client (SSE → agent server)
-│   ├── vector_store.py       # ChromaDB vector search
-│   ├── advanced_rag.py       # RAG pipeline + Phoenix tracing
-│   └── rag.py                # Legacy RAG (simple)
-├── tests/
-│   ├── test_enterprise.py    # Enterprise module tests (security, monitoring, flags)
-│   └── ...                   # 114+ tests total
-├── config/
-│   ├── feature_flags.json    # Runtime feature flag configuration
-│   ├── grafana/              # Dashboard configs
-│   ├── prometheus/           # Metrics + alerts
-│   ├── loki/                 # Log aggregation
-│   └── promtail/             # Log shipping
-├── secrets/                  # API keys (gitignored)
-├── docker-compose.yml        # 13 containers
-├── Dockerfile                # App container
-└── Dockerfile.nginx          # Nginx container
-```
+Every turn is a **full trace** in Phoenix:
+
+- **Multi-agent turns** → `POST /chat/stream` → **2 × `GroqLLM.chat`** LLM spans (research + answer)
+- **Document/RAG turns** → `POST /chat/stream` → **1 × `GroqLLM.chat`** LLM span (grounded answer)
+- **HTTP layer** → `http send` / `http receive` children capture the full request/response
+
+In addition:
+- **Prometheus + Grafana** — pre-provisioned dashboards + 8 alert rules
+- **Loki + Promtail** — centralized log aggregation
+- **Enterprise dashboard** — `GET /monitoring/dashboard` (business metrics, costs, SLA, alerts)
+- **Cost tracking** — Groq spend per model/user/day
+- **`GET /metrics`** and **`GET /metrics/json`** — Prometheus / JSON metric endpoints
 
 ---
 
@@ -330,9 +266,11 @@ llama-agent/
 | `POST` | `/chat/stream` | SSE streaming chat |
 | `WebSocket` | `/ws/{user_id}` | Real-time chat |
 | `GET` | `/mcp/status` | MCP server + tools status |
-| `POST` | `/mcp/tools` | Invoke MCP agent tool (e.g. `coder_agent`) |
-| `GET` | `/monitoring/dashboard` | Enterprise metrics, costs, SLA, alerts |
+| `POST` | `/mcp/tools` | Invoke an MCP agent tool (e.g. `coder_agent`) |
+| `GET` | `/documents` | Uploaded-document listing |
+| `GET` | `/monitoring/dashboard` | Business metrics, costs, SLA, alerts |
 | `GET` | `/metrics` | Prometheus metrics |
+| `GET` | `/metrics/json` | Metrics as JSON |
 
 ---
 
@@ -340,13 +278,113 @@ llama-agent/
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection | `postgresql+asyncpg://...` |
+| `GROQ_API_KEY_FILE` | Path to Groq API key (Docker secret) | `/run/secrets/groq_api_key` |
+| `JWT_SECRET_KEY_FILE` | Path to JWT secret (Docker secret) | `/run/secrets/jwt_secret_key` |
+| `TAVILY_API_KEY_FILE` | Path to Tavily key (Docker secret) | `/run/secrets/tavily_api_key` |
+| `DATABASE_URL` | PostgreSQL async connection | `postgresql+asyncpg://postgres:...` |
 | `REDIS_URL` | Redis connection | `redis://redis:6379` |
-| `GROQ_API_KEY_FILE` | Path to Groq API key | `/run/secrets/groq_api_key` |
-| `JWT_SECRET_KEY_FILE` | Path to JWT secret | `/run/secrets/jwt_secret_key` |
+| `LLM_MODEL_STRONG` | Strong model (agents, one-shot answers, RAG) | `llama-3.3-70b-versatile` |
+| `LLM_MODEL_FAST` | Fast model (streaming chat, reformulation) | `llama-3.1-8b-instant` |
 | `MCP_SERVER_URL` | MCP agent server base URL | `http://mcp-server:8001` |
-| `LLM_MODEL` | Groq model used by agents (multi-agent, streaming, WebSocket) | `llama-3.3-70b-versatile` |
-| `ENVIRONMENT` | `development` or `production` | `development` |
+| `ENVIRONMENT` | `development` or `production` | `production` |
+
+---
+
+## 📁 Project Structure
+
+```
+llama-agent/
+├── api.py                    # FastAPI REST API (auth, chat, RAG, monitoring)
+├── llama_agent1.py           # GroqLLM llama-index wrapper + streaming agent
+├── multi_agent.py            # Multi-agent orchestrator (5 agents) + Phoenix-aware client
+├── mcp_agents_server.py      # MCP agent server (SSE, 5 specialized agents)
+├── app.py                    # Streamlit application (legacy UI)
+├── frontend/                 # Next.js 16 main UI
+├── modules/
+│   ├── auth.py               # JWT authentication
+│   ├── security.py           # File validation, rate limiting, sanitization
+│   ├── security_hardening.py # Headers, brute-force, audit log, CSRF
+│   ├── advanced_monitoring.py# Alerts, business metrics, cost tracking, SLA
+│   ├── agent_tools.py        # Tool loop (run_tool_rounds / run_tool_loop)
+│   ├── vector_store.py       # ChromaDB vector search
+│   ├── advanced_rag.py       # RAG pipeline + Phoenix tracing
+│   ├── memory.py             # Per-user conversation memory
+│   ├── mcp_client.py         # MCP client (SSE → agent server)
+│   └── secrets.py            # Docker-secret reader (env/file fallback)
+├── tests/                    # 200+ tests (217 passing, pytest)
+├── config/
+│   ├── nginx/                # SSL + reverse proxy config
+│   ├── prometheus/           # Metrics + alert rules
+│   ├── grafana/              # Provisioned dashboards
+│   ├── loki/                 # Log aggregation
+│   └── promtail/             # Log shipping
+├── k8s/                      # Kubernetes manifests + deploy.sh
+├── docker-compose.yml        # 13 services (secure-by-default)
+├── Dockerfile                # App container
+└── Dockerfile.nginx          # Nginx container
+```
+
+---
+
+## 🧪 Tests
+
+```bash
+# Unit + integration tests (MCP server tests excluded by default)
+pytest tests/ -q -m "not mcp"
+
+# Run everything
+pytest tests/ -q
+```
+
+**Current status:** 217 passing, 17 deselected (`-m "not mcp"`), across 8 test
+modules — covering security hardening, rate limiting, monitoring, RAG,
+multi-agent routing/streaming, and the Phoenix span-instrumentation path.
+
+---
+
+## ☸️ Kubernetes Deployment
+
+Kubernetes manifests live in `k8s/` and cover API, web, frontend, MCP server,
+PostgreSQL, Redis, secrets, namespace, and ingress.
+
+```bash
+./k8s/deploy.sh            # one-command deploy (kubectl + nginx ingress)
+
+# or step by step
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/secrets.yaml          # replace placeholders with real values!
+kubectl apply -f k8s/postgres.yaml k8s/redis.yaml
+kubectl apply -f k8s/api.yaml k8s/mcp-server.yaml k8s/web.yaml k8s/frontend.yaml
+kubectl apply -f k8s/ingress.yaml
+```
+
+> **Note:** add `llama-agent.local` → ingress IP to `/etc/hosts`. Ingress routes
+> `/` → Next.js, `/api/*` + `/ws/*` → API, `/mcp/*` → MCP, `/streamlit/*` → Streamlit.
+> Images come from Docker Hub (`ravneet231/llama-agent*`) — build & push first,
+> and **replace all placeholders in `k8s/secrets.yaml`** before applying.
+
+---
+
+## 🔧 Common Commands
+
+```bash
+# Start / stop
+docker compose up -d
+docker compose down
+
+# Rebuild after code changes
+docker compose up -d --build api web frontend
+
+# Logs
+docker compose logs -f api
+docker compose logs -f frontend
+
+# Status
+docker compose ps
+
+# Run tests
+pytest tests/ -q -m "not mcp"
+```
 
 ---
 
@@ -354,39 +392,32 @@ llama-agent/
 
 ### App won't start
 ```bash
-# Check if Docker is running
-docker info
-
-# Check container logs
-docker-compose logs web
-docker-compose logs api
+docker info                      # is the daemon running?
+docker compose ps                # which services are up?
+docker compose logs api          # what failed?
 ```
 
 ### Groq API key error
 ```bash
-# Verify key exists
-cat secrets/groq_api_key.txt
-
-# Rebuild container
-docker-compose up -d --build web
+# Key file must exist (gitignored, so clones need it)
+ls secrets/groq_api_key.txt
+# Rebuild the container after adding it
+docker compose up -d --build api
 ```
 
 ### Phoenix not showing traces
 ```bash
-# Check Phoenix is running
-docker-compose ps phoenix
-
-# Check web container can reach Phoenix
-docker exec llama-agent-web python -c "import urllib.request; print(urllib.request.urlopen('http://phoenix:6006/').status)"
+docker compose ps phoenix        # is it running?
+# (Owner override only) is the port exposed?
+curl http://localhost:6006/health
+# Check the API can reach it
+docker compose logs api | grep -i phoenix
 ```
 
 ### Database connection failed
 ```bash
-# Check PostgreSQL is healthy
-docker-compose ps postgres
-
-# Restart database
-docker-compose restart postgres
+docker compose ps postgres redis
+docker compose logs postgres
 ```
 
 ---
@@ -395,21 +426,17 @@ docker-compose restart postgres
 
 1. Fork the repo
 2. Create a branch (`git checkout -b feature/amazing`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push (`git push origin feature/amazing`)
 5. Open a Pull Request
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 ---
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## 👤 Author
-
-**Ravneet** - [GitHub](https://github.com/ravneet-png)
+[MIT](LICENSE) © Ravneet — see [LICENSE](LICENSE) for details.
 
 ---
 
