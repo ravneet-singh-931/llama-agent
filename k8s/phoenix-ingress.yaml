@@ -1,0 +1,33 @@
+# ============================================
+# Phoenix UI - dedicated Ingress
+# Host: phoenix.llama-agent.local (add to /etc/hosts)
+#
+# Kept SEPARATE from llama-agent-ingress on purpose: that Ingress uses
+# rewrite-target: /$2 which mangles Phoenix paths (no capture groups),
+# turning POST /graphql into POST / (405). Phoenix serves its UI at the
+# root with relative asset paths, so this Ingress has NO rewrite-target.
+# ============================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: phoenix-ingress
+  namespace: llama-agent
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: phoenix.llama-agent.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: phoenix
+                port:
+                  number: 6006
