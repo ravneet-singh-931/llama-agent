@@ -39,9 +39,12 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: database-url
-            # TEMPORARY: llama-3.3-70b-versatile free-tier daily limit still 429s
-            # (verified live 2026-07-31). Remove once quota resets or tier upgraded.
-            - name: LLM_MODEL
+            # Tiered defaults: strong=70b for one-shot answers/agents,
+            # fast=8b for streaming chat. Delete these lines once the
+            # free-tier 70b daily quota is upgraded or resets.
+            - name: LLM_MODEL_STRONG
+              value: llama-3.3-70b-versatile
+            - name: LLM_MODEL_FAST
               value: llama-3.1-8b-instant
             - name: ENVIRONMENT
               value: production
