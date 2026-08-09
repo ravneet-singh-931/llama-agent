@@ -213,7 +213,22 @@ async def lifespan(app: FastAPI):
     
     app.state.memory = ConversationMemory()
     app.state.facts = FactMemory()
-    app.state.rag = SimpleRAG()
+    
+    # Use OptimizedRAG (7 production-grade RAG features) when enabled via env var.
+    # Falls back to SimpleRAG for backward compatibility / when ChromaDB is unavailable.
+    use_optimized = os.environ.get("USE_OPTIMIZED_RAG", "").lower() in ("true", "1", "yes")
+    if use_optimized:
+        try:
+            from modules.rag_optimizations import OptimizedRAG
+            from modules.vector_store import get_vector_store
+            vector_store = get_vector_store()
+            app.state.rag = OptimizedRAG(vector_store)
+            print("✅ OptimizedRAG initialized (Hybrid Search, Cross-Encoder, Contextual Retrieval, Query Decomposition, CRAG, Conversational Retrieval, Semantic Cache)")
+        except Exception as e:
+            print(f"⚠️  Failed to initialize OptimizedRAG, falling back to SimpleRAG: {e}")
+            app.state.rag = SimpleRAG()
+    else:
+        app.state.rag = SimpleRAG()
     app.state.logger = AgentLogger()
     app.state.monitor = PerformanceMonitor()
     app.state.config = config
