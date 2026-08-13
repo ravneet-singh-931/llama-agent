@@ -54,7 +54,7 @@ spec:
                   name: app-secrets
                   key: jwt-secret-key
             - name: MCP_SERVER_URL
-              value: http://llama-agent-mcp-server-service:8001
+              value: http://llama-agent-mcp-server-service:8001/sse
             # Tiered defaults: strong=70b for one-shot answers/agents,
             # fast=8b for streaming chat. Delete these lines once the
             # free-tier 70b daily quota is upgraded or resets.
