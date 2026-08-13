@@ -75,10 +75,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # Pinned to the same image as the k8s deployment (ravneet231/llama-agent:v6)
-    # so OptimizedRAG is active here too. `docker-compose up -d --build` rebuilds
-    # from local code and re-tags as v6; without --build it pulls v6 from Docker Hub.
-    image: ravneet231/llama-agent:v6
+    # Pinned to the same image as the k8s deployment (ravneet231/llama-agent:latest)
+    # so OptimizedRAG is active here too. CI builds and pushes :latest on every
+    # push to main, so this always tracks the latest successful build.
+    image: ravneet231/llama-agent:latest
     container_name: llama-agent-api
     restart: unless-stopped
     ports:

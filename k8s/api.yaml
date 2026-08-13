@@ -23,8 +23,11 @@ spec:
     spec:
       containers:
         - name: api
-          image: ravneet231/llama-agent:v6
-          imagePullPolicy: IfNotPresent
+          image: ravneet231/llama-agent:latest
+          # Always re-pull :latest so a freshly pushed CI image is picked up
+          # on the next rollout (the kind node would otherwise keep a cached
+          # :latest and never update).
+          imagePullPolicy: Always
           command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
           ports:
             - containerPort: 8000
