@@ -21,6 +21,8 @@ A full-stack, multi-agent AI assistant with **end-to-end observability**. Upload
 
 > **Built to be observed.** Every request flows through a single trace: `POST /chat/stream` → `GroqLLM.chat` → tool calls → HTTP send/receive — visible live in Phoenix.
 
+> 🔒 **Secure by default, observable by design.** Enterprise-grade auth (JWT, rate limiting, brute-force lockout, CSRF, CSP/HSTS headers, audit logging) and full LLM observability (Phoenix traces, Prometheus metrics, Grafana dashboards, Loki logs) — with all infrastructure locked down and **never exposed publicly**.
+
 ```
 You:  "summarize the CRM file"
 AI:   "This document is a Word document (CRM-3.docx) discussing investment and
@@ -112,13 +114,21 @@ echo "change_me_grafana" > secrets/grafana_admin_password.txt
 > appear in code, images, or environment listings. See [SECURITY.md](SECURITY.md).
 
 ### 3️⃣ Start the stack
+
+**Kubernetes (this repo's live deployment):**
+```bash
+./k8s/deploy.sh
+```
+
+**Docker Compose (alternative — not running by default here):**
 ```bash
 docker compose up -d
 ```
 
 ### 4️⃣ Open the app
 
-**Kubernetes deployment** (this repo's live setup — ingress on `llama-agent.local`):
+This repo's **live deployment runs on Kubernetes** (ingress on `llama-agent.local`).
+After deploying with `./k8s/deploy.sh`, open:
 
 | Service | URL |
 |---------|-----|
@@ -129,22 +139,14 @@ docker compose up -d
 > Requires `llama-agent.local` in your `hosts` file pointing at the ingress IP. See
 > [Kubernetes Deployment](#️-kubernetes-deployment).
 
-**Docker Compose deployment** (ports published on `localhost`):
-
-| Service | URL |
-|---------|-----|
-| **Main App (Next.js)** | http://localhost:3001 |
-| **API Docs (Swagger)** | http://localhost:8000/docs |
-| **Streamlit UI (legacy)** | http://localhost:8501 |
-| **Nginx (SSL/LB)** | https://localhost |
-
-> Monitoring UIs (Phoenix `:6006`, Grafana `:3002`, Prometheus `:9090`) are **not exposed
-> by default** — see [Secure-by-default](#-secure-by-default) below.
+**Alternative — Docker Compose:** the same stack can run locally with
+`docker compose up -d`, publishing the app on `http://localhost:3001`
+(API docs `http://localhost:8000/docs`, Streamlit `http://localhost:8501`).
+The Compose containers are **not running by default** here — Kubernetes is the
+active deployment. Monitoring UIs are never exposed publicly in either mode.
 
 ### 5️⃣ Create an account
-1. Open the app URL for your deployment:
-   - **Kubernetes:** http://llama-agent.local/ → **Sign Up**
-   - **Compose:** http://localhost:3001 → **Sign Up**
+1. Open the app → **Sign Up** (Kubernetes: http://llama-agent.local/)
 2. Create a username/password, log in, and start chatting
 3. Try: `@Research Agent tell me a fun fact about Japan` or `summarize the CRM file`
 
@@ -156,6 +158,10 @@ The committed `docker-compose.yml` publishes **only** the user-facing ports
 (`3001`, `8000`, `8501`, `80/443`). Infrastructure ports (Postgres, Redis,
 Phoenix, Grafana, Prometheus, Loki, node-exporter, MCP) are **internal to the
 Docker network** — cloned copies are secure out of the box.
+
+The Kubernetes deployment is locked down the same way: the ingress exposes only the
+app routes (`/`, `/api`, `/ws`, `/mcp`, `/streamlit`); observability (Phoenix, Prometheus,
+Grafana, Loki) runs internally and is **never published** to the public.
 
 For local debugging, the owner can add a **gitignored** override (this file is
 **not** committed and never ships to users):
