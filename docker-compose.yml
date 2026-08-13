@@ -75,6 +75,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Pinned to the same image as the k8s deployment (ravneet231/llama-agent:v2)
+    # so OptimizedRAG is active here too. `docker-compose up -d --build` rebuilds
+    # from local code and re-tags as v2; without --build it pulls v2 from Docker Hub.
+    image: ravneet231/llama-agent:v2
     container_name: llama-agent-api
     restart: unless-stopped
     ports:
@@ -86,6 +90,10 @@ services:
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
       - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
       - ENVIRONMENT=production
+      # Enable the 7-feature OptimizedRAG pipeline (Hybrid Search, Cross-Encoder
+      # Reranker, Contextual Retrieval, Query Decomposition, Corrective RAG,
+      # Conversational Retrieval, Semantic Cache). Mirrors the k8s deployment.
+      - USE_OPTIMIZED_RAG=true
       # Tiered defaults: strong=70b for one-shot answers/agents,
       # fast=8b for streaming chat. Delete these lines once the
       # free-tier 70b daily quota is upgraded or resets.
@@ -114,6 +122,10 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      # Grace period for first-boot ChromaDB embedding model download
+      # (mirrors the k8s startupProbe). Without this the container can be
+      # marked unhealthy while OptimizedRAG downloads all-MiniLM-L6-v2.
+      start_period: 300s
     networks:
       - backend
       - monitoring
