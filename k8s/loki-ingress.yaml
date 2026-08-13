@@ -1,0 +1,34 @@
+# ============================================
+# Loki Ingress — protected by basic-auth
+# Host (add to /etc/hosts): loki.llama-agent.local -> Loki
+#
+# Basic-auth uses the SAME credentials as Grafana (admin / grafana password).
+# The htpasswd secret (monitoring-auth) is created by k8s/deploy.sh from the
+# gitignored secrets/grafana_admin_password.txt — never committed.
+# ============================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: loki-ingress
+  namespace: llama-agent
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: monitoring-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Monitoring"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: loki.llama-agent.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: loki
+                port:
+                  number: 3100

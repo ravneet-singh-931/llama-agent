@@ -98,7 +98,25 @@ kubectl wait --for=condition=ready pod -l component=grafana -n $NAMESPACE --time
 kubectl wait --for=condition=ready pod -l component=promtail -n $NAMESPACE --timeout=120s
 kubectl wait --for=condition=ready pod -l component=node-exporter -n $NAMESPACE --timeout=120s
 
-kubectl apply -f k8s/monitoring-ingress.yaml
+# Monitoring UIs — Grafana keeps its own login; Prometheus/Loki/Phoenix are
+# protected by basic-auth using the SAME credentials as Grafana.
+kubectl apply -f k8s/grafana-ingress.yaml
+kubectl apply -f k8s/prometheus-ingress.yaml
+kubectl apply -f k8s/loki-ingress.yaml
+kubectl apply -f k8s/phoenix-ingress.yaml
+
+# Monitoring basic-auth Secret — SAME credentials as Grafana
+# (admin / secrets/grafana_admin_password.txt). Generated at deploy time from
+# the gitignored password file; never committed.
+if [ -f secrets/grafana_admin_password.txt ]; then
+  GRAFANA_PW=$(cat secrets/grafana_admin_password.txt)
+  HTPASSWD="admin:$(openssl passwd -apr1 "$GRAFANA_PW")"
+  printf '%s' "$HTPASSWD" > /tmp/monitoring_htpasswd.txt
+  kubectl create secret generic monitoring-auth -n $NAMESPACE \
+    --from-file=auth=/tmp/monitoring_htpasswd.txt \
+    --dry-run=client -o yaml | kubectl apply -f -
+  rm -f /tmp/monitoring_htpasswd.txt
+fi
 
 # Docker Desktop (kind mode) does NOT forward hostPort 80/443 from the node
 # to the host. Its built-in cloud-provider DOES publish LoadBalancer services

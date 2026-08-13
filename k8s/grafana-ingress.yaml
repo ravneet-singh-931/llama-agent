@@ -1,0 +1,31 @@
+# ============================================
+# Grafana Ingress
+# Host (add to /etc/hosts): grafana.llama-agent.local -> Grafana
+#
+# Grafana has its OWN login (admin / grafana_admin_password.txt), so no
+# ingress-level basic-auth is added here. Prometheus, Loki and Phoenix use
+# separate Ingress resources protected by basic-auth (same credentials).
+# ============================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana-ingress
+  namespace: llama-agent
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: grafana.llama-agent.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
