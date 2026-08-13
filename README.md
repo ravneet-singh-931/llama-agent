@@ -117,6 +117,25 @@ docker compose up -d
 ```
 
 ### 4️⃣ Open the app
+
+**Kubernetes deployment** (this repo's live setup — ingress on `llama-agent.local`):
+
+| Service | URL |
+|---------|-----|
+| **Main App (Next.js)** | http://llama-agent.local/ |
+| **API Docs (Swagger)** | http://llama-agent.local/api/docs |
+| **Streamlit UI (legacy)** | http://llama-agent.local/streamlit/ |
+| **Grafana** | http://grafana.llama-agent.local |
+| **Prometheus** | http://prometheus.llama-agent.local |
+| **Loki** | http://loki.llama-agent.local |
+| **Phoenix** | http://phoenix.llama-agent.local |
+
+> Requires `llama-agent.local` (and the `*.llama-agent.local` subdomains) in your
+> `hosts` file pointing at the ingress IP. See
+> [Kubernetes Deployment](#️-kubernetes-deployment).
+
+**Docker Compose deployment** (ports published on `localhost`):
+
 | Service | URL |
 |---------|-----|
 | **Main App (Next.js)** | http://localhost:3001 |
@@ -128,7 +147,9 @@ docker compose up -d
 > by default** — see [Secure-by-default](#-secure-by-default) below.
 
 ### 5️⃣ Create an account
-1. Open http://localhost:3001 → **Sign Up**
+1. Open the app URL for your deployment:
+   - **Kubernetes:** http://llama-agent.local/ → **Sign Up**
+   - **Compose:** http://localhost:3001 → **Sign Up**
 2. Create a username/password, log in, and start chatting
 3. Try: `@Research Agent tell me a fun fact about Japan` or `summarize the CRM file`
 
@@ -305,7 +326,7 @@ In addition:
 | `REDIS_URL` | Redis connection | `redis://redis:6379` |
 | `LLM_MODEL_STRONG` | Strong model (agents, one-shot answers, RAG) | `llama-3.3-70b-versatile` |
 | `LLM_MODEL_FAST` | Fast model (streaming chat, reformulation) | `llama-3.1-8b-instant` |
-| `MCP_SERVER_URL` | MCP agent server base URL | `http://mcp-server:8001` |
+| `MCP_SERVER_URL` | MCP agent server base URL (SSE) | `http://mcp-server:8001/sse` (k8s: `http://llama-agent-mcp-server-service:8001/sse`) |
 | `ENVIRONMENT` | `development` or `production` | `production` |
 
 ---
@@ -378,10 +399,12 @@ kubectl apply -f k8s/api.yaml k8s/mcp-server.yaml k8s/web.yaml k8s/frontend.yaml
 kubectl apply -f k8s/ingress.yaml
 ```
 
-> **Note:** add `llama-agent.local` → ingress IP to `/etc/hosts`. Ingress routes
-> `/` → Next.js, `/api/*` + `/ws/*` → API, `/mcp/*` → MCP, `/streamlit/*` → Streamlit.
-> Images come from Docker Hub (`ravneet231/llama-agent*`) — build & push first,
-> and **replace all placeholders in `k8s/secrets.yaml`** before applying.
+> **Note:** add `llama-agent.local` (and `grafana`/`prometheus`/`loki`/`phoenix`.llama-agent.local)
+> → ingress IP to your `hosts` file. Ingress routes `/` → Next.js, `/api/*` + `/ws/*` → API,
+> `/mcp/*` → MCP, `/streamlit/*` → Streamlit; the monitoring hostnames route to
+> Grafana / Prometheus / Loki / Phoenix respectively. Images come from Docker Hub
+> (`ravneet231/llama-agent*`) — build & push first, and **replace all placeholders in
+> `k8s/secrets.yaml`** before applying.
 
 > ⚠️ **Port 80 clash:** the Compose stack's `nginx` service also binds host port
 > 80/443, which conflicts with the Kubernetes ingress. Run **either** Compose
