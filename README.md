@@ -125,13 +125,8 @@ docker compose up -d
 | **Main App (Next.js)** | http://llama-agent.local/ |
 | **API Docs (Swagger)** | http://llama-agent.local/api/docs |
 | **Streamlit UI (legacy)** | http://llama-agent.local/streamlit/ |
-| **Grafana** | http://grafana.llama-agent.local |
-| **Prometheus** | http://prometheus.llama-agent.local |
-| **Loki** | http://loki.llama-agent.local |
-| **Phoenix** | http://phoenix.llama-agent.local |
 
-> Requires `llama-agent.local` (and the `*.llama-agent.local` subdomains) in your
-> `hosts` file pointing at the ingress IP. See
+> Requires `llama-agent.local` in your `hosts` file pointing at the ingress IP. See
 > [Kubernetes Deployment](#️-kubernetes-deployment).
 
 **Docker Compose deployment** (ports published on `localhost`):
@@ -399,12 +394,10 @@ kubectl apply -f k8s/api.yaml k8s/mcp-server.yaml k8s/web.yaml k8s/frontend.yaml
 kubectl apply -f k8s/ingress.yaml
 ```
 
-> **Note:** add `llama-agent.local` (and `grafana`/`prometheus`/`loki`/`phoenix`.llama-agent.local)
-> → ingress IP to your `hosts` file. Ingress routes `/` → Next.js, `/api/*` + `/ws/*` → API,
-> `/mcp/*` → MCP, `/streamlit/*` → Streamlit; the monitoring hostnames route to
-> Grafana / Prometheus / Loki / Phoenix respectively. Images come from Docker Hub
-> (`ravneet231/llama-agent*`) — build & push first, and **replace all placeholders in
-> `k8s/secrets.yaml`** before applying.
+> **Note:** add `llama-agent.local` → ingress IP to your `hosts` file. Ingress routes
+> `/` → Next.js, `/api/*` + `/ws/*` → API, `/mcp/*` → MCP, `/streamlit/*` → Streamlit.
+> Images come from Docker Hub (`ravneet231/llama-agent*`) — build & push first, and
+> **replace all placeholders in `k8s/secrets.yaml`** before applying.
 
 > ⚠️ **Port 80 clash:** the Compose stack's `nginx` service also binds host port
 > 80/443, which conflicts with the Kubernetes ingress. Run **either** Compose
