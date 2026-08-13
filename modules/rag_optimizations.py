@@ -915,10 +915,13 @@ class SemanticCache:
             )
         return self._cache_collection
 
-    def lookup(self, query: str, top_k: int = 3) -> Optional[Dict]:
+    def lookup(self, query: str, top_k: int = 3, threshold: float = 0.3) -> Optional[str]:
         """Look up a cached answer for the query.
 
-        Returns the cached answer if found, None otherwise.
+        Returns the cached answer only if the closest stored query is within
+        `threshold` cosine distance (i.e. a near-duplicate question). This
+        prevents serving an unrelated cached answer for a different question.
+        Returns None if there is no sufficiently similar cached answer.
         """
         try:
             cache_collection = self._get_cache_collection()
@@ -926,24 +929,35 @@ class SemanticCache:
             return None
 
         # Search for similar cached answers using ChromaDB's own
-        # embedding (no need for a separate _embed call).
+        # embedding (no need for a separate _embed call). The cached
+        # *query* is what is embedded (see store), so a repeat of the
+        # same question matches at ~0 distance and returns its answer.
         try:
             results = cache_collection.query(
                 query_texts=[query],
                 n_results=top_k,
-                include=["documents", "metadatas"],
+                include=["metadatas", "distances"],
             )
         except Exception:
             return None
 
-        if results and results.get("documents") and results["documents"][0]:
-            # ChromaDB returns documents as a list of lists (one per query)
-            # Return the first cached answer string
-            return results["documents"][0][0]
+        if (results and results.get("metadatas") and results["metadatas"][0]
+                and results.get("distances") and results["distances"][0]):
+            # ChromaDB returns metadatas/distances as lists of lists (one per query).
+            # Only return the cached answer if the nearest stored query is close
+            # enough (a near-duplicate question), preventing stale leakage.
+            distance = results["distances"][0][0]
+            if distance <= threshold:
+                meta = results["metadatas"][0][0] or {}
+                return meta.get("answer")
         return None
 
     def store(self, query: str, answer: str):
-        """Store a query-answer pair in the cache."""
+        """Store a query-answer pair in the cache.
+
+        The *query* is embedded (so repeat questions match at ~0 distance),
+        and the *answer* is kept in metadata and returned on a cache hit.
+        """
         try:
             cache_collection = self._get_cache_collection()
         except Exception:
@@ -955,8 +969,8 @@ class SemanticCache:
         query_hash = hashlib.md5(query.encode(), usedforsecurity=False).hexdigest()
         cache_collection.upsert(
             ids=[f"query_{query_hash}"],
-            documents=[answer],
-            metadatas=[{"query": query, "timestamp": time.time()}],
+            documents=[query],
+            metadatas=[{"query": query, "answer": answer, "timestamp": time.time()}],
         )
 
     def clear(self):
@@ -1078,6 +1092,15 @@ class OptimizedRAG:
         self._store.clear()
         self._contextual._summaries.clear()
         self._cache.clear()
+
+    def get_cached_answer(self, query: str):
+        """Return a cached answer for the query, or None (Semantic Cache)."""
+        return self._cache.lookup(query)
+
+    def cache_answer(self, query: str, answer: str):
+        """Store an answer in the Semantic Cache so repeat queries skip the LLM."""
+        if answer:
+            self._cache.store(query, answer)
 
     def query(
         self,

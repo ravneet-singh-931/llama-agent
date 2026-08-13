@@ -696,6 +696,46 @@ class TestSemanticCache:
         cache.clear()
         assert cache.collection.count() == 0
 
+    def test_lookup_matches_on_query_not_answer(self):
+        """Regression: a repeat query must match the stored *query* (distance
+        ~0), not the stored *answer*. The old code embedded the answer as the
+        document, so repeat questions never matched and the cache never hit."""
+        from modules.rag_optimizations import SemanticCache
+
+        class QueryAwareCollection:
+            def __init__(self):
+                self._docs = []
+                self._metas = []
+            def upsert(self, ids, documents, metadatas):
+                self._docs.extend(documents)
+                self._metas.extend(metadatas)
+            def query(self, query_texts, n_results=3, include=None):
+                q = query_texts[0]
+                # Simulate ChromaDB: distance 0 only when the query equals the
+                # embedded (stored) document; otherwise it is far away.
+                if self._docs and q == self._docs[0]:
+                    return {"metadatas": [[self._metas[0]]], "distances": [[0.0]]}
+                return {"metadatas": [[]], "distances": [[]]}
+
+        class QueryAwareClient:
+            def get_or_create_collection(self, name, metadata=None):
+                return QueryAwareCollection()
+
+        class Store:
+            client = QueryAwareClient()
+
+        cache = SemanticCache(Store())
+        cache.store(
+            "What does OptimizedRAG include?",
+            "A long answer that is nothing like the question text.",
+        )
+        # Repeat of the SAME question must hit (query matches query at dist 0).
+        assert cache.lookup("What does OptimizedRAG include?") == (
+            "A long answer that is nothing like the question text."
+        )
+        # A different question must miss.
+        assert cache.lookup("What is the weather in Paris?") is None
+
 
 # =============================================================================
 # 10.  OPTIMIZED RAG (full pipeline)

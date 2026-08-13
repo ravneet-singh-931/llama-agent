@@ -1351,6 +1351,11 @@ def answer_from_documents(query: str, rag) -> str:
         label = "document" if len(files) == 1 else "documents"
         return f"You have {len(files)} uploaded {label}:\n{listing}"
 
+    # Semantic Cache: serve a cached answer if one exists (skips the LLM call)
+    cached = rag.get_cached_answer(query)
+    if cached:
+        return cached
+
     try:
         context = rag.get_context(query)
     except Exception:
@@ -1387,8 +1392,11 @@ def answer_from_documents(query: str, rag) -> str:
                 # Combine both retrievals (skip if the second is just a
                 # substring of the first - i.e. nothing new was found).
                 combined = context if context2 in context else context + "\n\n" + context2
-                return _ask_doc_question(client, reformulated, combined)
+                answer = _ask_doc_question(client, reformulated, combined)
+                rag.cache_answer(query, answer)
+                return answer
 
+    rag.cache_answer(query, first)
     return first
 
 
