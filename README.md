@@ -50,11 +50,31 @@ AI:   "Japan has a vending machine culture, with over 5.5 million vending
 
 - **Multi-Agent Orchestration** — five specialized agents + team mode, keyword-routed (`@Research Agent ...`) or automatic
 - **Document RAG** — upload files, retrieve with ChromaDB, cite every claim with file + chunk
+- **OptimizedRAG** — production RAG pipeline with 7 optimizations: hybrid search (BM25 + dense vectors), a cross-encoder reranker, contextual retrieval with semantic chunking, query decomposition, corrective RAG (CRAG), conversational retrieval, and a semantic cache. Enabled by `USE_OPTIMIZED_RAG=true` (on by default in the deployed image).
 - **Two-Pass Retrieval** — thin answers trigger query reformulation and a second search
 - **Streaming Chat** — SSE streaming with agent/tool transcript markers
 - **LLM Observability** — every Groq call (agents *and* RAG) emits `GroqLLM.chat` spans to Phoenix via llama-index instrumentation
 - **Full DevOps Stack** — Prometheus, Grafana, Loki, Promtail, node-exporter, nginx (SSL + LB)
 - **Enterprise Security** — JWT auth, rate limiting, brute-force lockout, CSRF, audit logging, Docker secrets
+
+---
+
+## 🧠 OptimizedRAG
+
+The deployed API uses **OptimizedRAG** — a drop-in replacement for the basic RAG
+pipeline that layers seven production-grade optimizations on top of ChromaDB:
+
+1. **Hybrid Search** — BM25 keyword + dense-vector retrieval, fused
+2. **Cross-Encoder Reranker** — re-ranks candidates by true relevance
+3. **Contextual Retrieval** — LLM-generated context per chunk (semantic chunking)
+4. **Query Decomposition** — splits complex questions into sub-questions
+5. **Corrective RAG (CRAG)** — self-checks retrieval and retries on weak context
+6. **Conversational Retrieval** — history-aware answers across turns
+7. **Semantic Cache** — near-duplicate questions return the cached answer (skips the LLM)
+
+It is activated with the `USE_OPTIMIZED_RAG=true` environment variable (already set
+in `k8s/api.yaml` and `docker-compose.yml`). The HTTP API (`POST /documents/ask`)
+and the document-upload flow use it automatically — no code changes needed.
 
 ---
 
@@ -362,6 +382,12 @@ kubectl apply -f k8s/ingress.yaml
 > `/` → Next.js, `/api/*` + `/ws/*` → API, `/mcp/*` → MCP, `/streamlit/*` → Streamlit.
 > Images come from Docker Hub (`ravneet231/llama-agent*`) — build & push first,
 > and **replace all placeholders in `k8s/secrets.yaml`** before applying.
+
+> ⚠️ **Port 80 clash:** the Compose stack's `nginx` service also binds host port
+> 80/443, which conflicts with the Kubernetes ingress. Run **either** Compose
+> **or** k8s — don't start Compose's `nginx` while the k8s ingress is up, or one
+> will fail to bind the port. (The API, frontend, db, and redis Compose services
+> are fine to run alongside k8s; only `nginx` clashes.)
 
 ---
 

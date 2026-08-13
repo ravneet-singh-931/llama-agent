@@ -5,6 +5,19 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-08-13
+
+### Added
+- **OptimizedRAG** — production RAG pipeline replacing the basic retriever, with 7 optimizations: hybrid search (BM25 + dense vectors), cross-encoder reranker, contextual retrieval with semantic chunking, query decomposition, corrective RAG (CRAG), conversational retrieval, and a semantic cache. Activated via `USE_OPTIMIZED_RAG=true` (set in `k8s/api.yaml` and `docker-compose.yml`).
+
+### Changed
+- Kubernetes and Compose images now track `ravneet231/llama-agent:latest` (built and pushed by CI on every push to `main`); the API uses `imagePullPolicy: Always` so new builds are picked up on rollout.
+- ChromaDB ONNX embedding model is pre-downloaded at image build time (CI has fast network) so runtime pods no longer re-download it on cold start.
+
+### Fixed
+- Semantic Cache now actually hits on repeat questions (it previously embedded the answer instead of the query, so the cache never matched).
+- GitHub Actions Docker build no longer `COPY`s a gitignored local model dir, so the build succeeds in CI.
+
 ## [3.1.0] - 2026-07-23
 
 ### Added
