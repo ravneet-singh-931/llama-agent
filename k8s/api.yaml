@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: ravneet231/llama-agent:latest
+          image: ravneet231/llama-agent:v2
           imagePullPolicy: IfNotPresent
           command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
           ports:
@@ -61,6 +61,8 @@ spec:
               value: llama-3.1-8b-instant
             - name: ENVIRONMENT
               value: production
+            - name: USE_OPTIMIZED_RAG
+              value: "true"
             # K8s injects PHOENIX_PORT as "tcp://<IP>:<PORT>" because the
             # "phoenix" Service exists; the phoenix client needs an integer.
             - name: PHOENIX_PORT
@@ -72,6 +74,17 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          # startupProbe gives slow-starting apps (e.g. OptimizedRAG
+          # downloading the ChromaDB embedding model on first boot) up to
+          # 10 minutes before k8s treats the container as failed. Without
+          # this the liveness/readiness probes kill the pod mid-download,
+          # creating a restart death-spiral.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            failureThreshold: 60
+            periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
@@ -89,10 +102,16 @@ spec:
               mountPath: /app/uploads
             - name: logs
               mountPath: /app/logs
+            # Persist ChromaDB embedding model cache across container
+            # restarts so the first-boot download is not lost on restart.
+            - name: chroma-cache
+              mountPath: /root/.cache/chroma
       volumes:
         - name: uploads
           persistentVolumeClaim:
             claimName: uploads-pvc
+        - name: chroma-cache
+          emptyDir: {}
         - name: logs
           emptyDir: {}
 ---
