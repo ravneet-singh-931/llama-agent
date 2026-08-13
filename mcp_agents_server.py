@@ -64,6 +64,9 @@ mcp = FastMCP(
             "[::1]:*",
             "mcp-server",
             "mcp-server:*",
+            # Kubernetes service DNS (k8s/mcp-server.yaml)
+            "llama-agent-mcp-server-service",
+            "llama-agent-mcp-server-service:*",
         ],
         allowed_origins=[
             "http://localhost:*",
