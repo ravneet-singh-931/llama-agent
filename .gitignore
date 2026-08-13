@@ -49,7 +49,3 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
-
-# Baked ChromaDB ONNX embedding model (large, copied from a running container
-# into the image at build time; not committed to git)
-chroma_model_cache_tmp/

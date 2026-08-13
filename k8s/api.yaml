@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: ravneet231/llama-agent:v5
+          image: ravneet231/llama-agent:v6
           imagePullPolicy: IfNotPresent
           command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
           ports:

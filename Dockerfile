@@ -25,10 +25,13 @@ RUN pip install --no-cache-dir mcp
 # Copy all code
 COPY . .
 
-# Bake the ChromaDB ONNX embedding model (all-MiniLM-L6-v2) into the image
-# so pods don't re-download it (~80MB, very slow on the cluster) on every
-# cold start. Source dir is gitignored + copied from a running container.
-COPY chroma_model_cache_tmp /root/.cache/chroma
+# Pre-download the ChromaDB ONNX embedding model (all-MiniLM-L6-v2) at build
+# time so runtime pods don't re-download it (~80MB, very slow on the cluster)
+# on every cold start. CI has fast network; the model lands in
+# /root/.cache/chroma, which is where ChromaDB looks for it at runtime.
+ENV CHROMA_CACHE_DIR=/root/.cache/chroma
+RUN python -c "from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2; ONNXMiniLM_L6_V2().embed_with_retries(['warmup'])" \
+    && rm -rf /tmp/chromadb* 2>/dev/null; true
 
 # Create necessary directories
 RUN mkdir -p logs data documents uploads
