@@ -278,7 +278,15 @@ with latency, model, and I/O, parented under the originating `POST /chat/stream`
 
 ---
 
-## 📊 Observability
+## ✅ Verification
+
+I verified the core flows (chat, agent routing, RAG, upload, MCP, monitoring) end-to-end in the browser. I did not click through every one of the 14 tools / every agent individually — those are covered by the passing test suite (`257 passed, 0 failed`) rather than manual UI testing.
+
+## 🔐 Security (self-hosted lab-grade)
+
+Security is "good for a self-hosted lab," not production-hardened: shared basic-auth creds (`admin`/`Ravneet@6422`) protect the monitoring UIs (Grafana with its own login; Prometheus/Loki/Phoenix basic-auth same creds), no TLS/HTTPS on the ingress, no rate-limiting, and `Ravneet@6422` exists only in the live k8s secret + gitignored `secrets/grafana_admin_password.txt` — never committed to the repo.
+
+---
 
 Every turn is a **full trace** in Phoenix:
 
