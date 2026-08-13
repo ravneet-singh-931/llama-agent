@@ -84,6 +84,7 @@ and the document-upload flow use it automatically — no code changes needed.
 
 ### Prerequisites
 - 🐳 **Docker Desktop** (or Docker Engine + Compose v2)
+- ☸️ **Kubernetes** — Docker Desktop's built-in k8s (enable in settings) with [ingress-nginx](https://kubernetes.github.io/ingress-nginx/), or a kind cluster
 - 🔑 A **Groq API key** ([console.groq.com](https://console.groq.com/)) — free tier works
 - (Optional) A **Tavily API key** for web-search powered agents
 
@@ -93,60 +94,57 @@ git clone https://github.com/ravneet-png/llama-agent.git
 cd llama-agent
 ```
 
-### 2️⃣ Add your secrets (never committed)
-```bash
-mkdir -p secrets
+### 2️⃣ Deploy — choose your path
 
-# Groq API key (required)
-echo "gsk_YOUR_KEY_HERE" > secrets/groq_api_key.txt
+#### ☸️ Kubernetes (this repo's live deployment)
+1. **Add secrets** — open `k8s/secrets.yaml` and replace every `REPLACE_ME_*` placeholder
+   with a real value (Groq key, JWT secret, Postgres password, Grafana password, Tavily key).
+   > 🔐 These are placeholders only; real values are supplied at deploy time and never committed.
+2. **Deploy:**
+   ```bash
+   ./k8s/deploy.sh
+   ```
+3. **Point your `hosts` file** at the ingress IP (e.g. `127.0.0.1 llama-agent.local`).
+4. **Open the app:**
+   | Service | URL |
+   |---------|-----|
+   | **Main App (Next.js)** | http://llama-agent.local/ |
+   | **API Docs (Swagger)** | http://llama-agent.local/api/docs |
+   | **Streamlit UI (legacy)** | http://llama-agent.local/streamlit/ |
 
-# Tavily API key (optional; used by research/analyzer agents)
-echo "tvly_YOUR_KEY_HERE" > secrets/tavily_api_key.txt
+#### 🐳 Docker Compose (alternative — not running by default here)
+1. **Add your secrets** (never committed):
+   ```bash
+   mkdir -p secrets
 
-# Postgres password + JWT secret (generate strong random values!)
-python -c "import secrets; print(secrets.token_hex(32))" > secrets/postgres_password.txt
-python -c "import secrets; print(secrets.token_hex(32))" > secrets/jwt_secret_key.txt
-echo "change_me_grafana" > secrets/grafana_admin_password.txt
-```
+   # Groq API key (required)
+   echo "gsk_YOUR_KEY_HERE" > secrets/groq_api_key.txt
 
-> 🔐 **Security note:** the `secrets/` directory is **gitignored** (`secrets/` in `.gitignore`).
-> Compose mounts these files as **Docker secrets** at `/run/secrets/<name>` — keys never
-> appear in code, images, or environment listings. See [SECURITY.md](SECURITY.md).
+   # Tavily API key (optional; used by research/analyzer agents)
+   echo "tvly_YOUR_KEY_HERE" > secrets/tavily_api_key.txt
 
-### 3️⃣ Start the stack
+   # Postgres password + JWT secret (generate strong random values!)
+   python -c "import secrets; print(secrets.token_hex(32))" > secrets/postgres_password.txt
+   python -c "import secrets; print(secrets.token_hex(32))" > secrets/jwt_secret_key.txt
+   echo "change_me_grafana" > secrets/grafana_admin_password.txt
+   ```
+   > 🔐 The `secrets/` directory is **gitignored** — Compose mounts these as Docker secrets at
+   > `/run/secrets/<name>`, so keys never appear in code, images, or env listings.
+2. **Start the stack:**
+   ```bash
+   docker compose up -d
+   ```
+3. **Open the app** (only after the command above — Compose is stopped by default in this
+   repo's live setup, where Kubernetes is the active deployment):
+   | Service | URL |
+   |---------|-----|
+   | **Main App (Next.js)** | http://localhost:3001 |
+   | **API Docs (Swagger)** | http://localhost:8000/docs |
+   | **Streamlit UI (legacy)** | http://localhost:8501 |
+   | **Nginx (SSL/LB)** | https://localhost |
 
-**Kubernetes (this repo's live deployment):**
-```bash
-./k8s/deploy.sh
-```
-
-**Docker Compose (alternative — not running by default here):**
-```bash
-docker compose up -d
-```
-
-### 4️⃣ Open the app
-
-This repo's **live deployment runs on Kubernetes** (ingress on `llama-agent.local`).
-After deploying with `./k8s/deploy.sh`, open:
-
-| Service | URL |
-|---------|-----|
-| **Main App (Next.js)** | http://llama-agent.local/ |
-| **API Docs (Swagger)** | http://llama-agent.local/api/docs |
-| **Streamlit UI (legacy)** | http://llama-agent.local/streamlit/ |
-
-> Requires `llama-agent.local` in your `hosts` file pointing at the ingress IP. See
-> [Kubernetes Deployment](#️-kubernetes-deployment).
-
-**Alternative — Docker Compose:** the same stack can run locally with
-`docker compose up -d`, publishing the app on `http://localhost:3001`
-(API docs `http://localhost:8000/docs`, Streamlit `http://localhost:8501`).
-The Compose containers are **not running by default** here — Kubernetes is the
-active deployment. Monitoring UIs are never exposed publicly in either mode.
-
-### 5️⃣ Create an account
-1. Open the app → **Sign Up** (Kubernetes: http://llama-agent.local/)
+### 3️⃣ Create an account
+1. Open the app → **Sign Up**
 2. Create a username/password, log in, and start chatting
 3. Try: `@Research Agent tell me a fun fact about Japan` or `summarize the CRM file`
 
