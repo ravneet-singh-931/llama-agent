@@ -1,0 +1,64 @@
+# ============================================
+# cert-manager — Let's Encrypt ClusterIssuers
+# ============================================
+# Installs two issuers (staging + prod) using the HTTP-01 solver via the
+# existing ingress-nginx controller. cert-manager is NOT bundled in this repo;
+# install it once per cluster (see k8s/deploy.sh, guarded by INSTALL_OPERATORS):
+#
+#   helm repo add jetstack https://charts.jetstack.io
+#   helm install cert-manager jetstack/cert-manager \
+#     --namespace cert-manager --create-namespace \
+#     --set crds.enabled=true
+#
+# Then apply this file. Ingresses reference an issuer via the
+#   cert-manager.io/cluster-issuer: <name>
+# annotation and a `tls:` block (see k8s/ingress.yaml, *-ingress.yaml).
+#
+# NOTE: Let's Encrypt cannot issue certificates for `.local` domains. For the
+# local lab (llama-agent.local) use the `selfsigned` issuer instead of
+# `letsencrypt-prod` (swap the annotation on each ingress). For real cloud
+# deployments replace the host with your public FQDN and keep `letsencrypt-prod`.
+# ============================================
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    # Production Let's Encrypt endpoint (real, trusted certs; tight rate limits).
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # Replace with a real, monitored inbox — cert expiry notices are sent here.
+    email: certs@llama-agent.example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    # Staging endpoint — issues untrusted certs, used to test the flow without
+    # burning the production rate limits.
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: certs@llama-agent.example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+---
+# Self-signed issuer for the local lab (.local domains). cert-manager still
+# provisions a Secret, but the cert is signed by a locally-generated CA and
+# will show as "not trusted" in the browser — fine for dev, never for prod.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}

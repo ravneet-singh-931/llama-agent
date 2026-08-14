@@ -1,0 +1,98 @@
+# ============================================
+# PostgreSQL backup CronJob (Point 5 — backups)
+# ============================================
+# Daily logical backup of the in-cluster Postgres to a dedicated PVC.
+# For production, prefer a MANAGED Postgres (RDS / Cloud SQL / Aurora) with
+# native automated backups + PITR; this CronJob is the self-hosted fallback.
+#
+# To ship backups to object storage instead of (or in addition to) a PVC,
+# mount an S3/AWS credential Secret and pipe pg_dump into `aws s3 cp -`
+# (see the commented block at the bottom). Requires the backup container to
+# have the aws-cli (use a postgres image + an init container, or a custom
+# image). Keep credentials in the secret manager (Point 6), never inline.
+#
+# Restore:
+#   kubectl exec -n llama-agent deploy/postgres -- pg_restore \
+#     -U postgres -d llama_agent /backup/llama_agent_<DATE>.sql.gz
+# ============================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: llama-agent
+spec:
+  schedule: "0 2 * * *"          # daily at 02:00 cluster time
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: llama-agent
+            component: postgres-backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pg-backup
+              image: postgres:15-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  DATE=$(date +%F-%H%M%S)
+                  echo "Backing up Postgres -> /backup/llama_agent_${DATE}.sql.gz"
+                  pg_dump \
+                    --host=postgres-service \
+                    --username="$POSTGRES_USER" \
+                    --dbname=llama_agent \
+                    --no-password \
+                    --clean --if-exists --create \
+                    | gzip > "/backup/llama_agent_${DATE}.sql.gz"
+                  echo "Backup complete: $(ls -lh /backup/llama_agent_${DATE}.sql.gz | awk '{print $5}')"
+                  # Keep only the 7 most recent dumps (rotate).
+                  ls -1t /backup/llama_agent_*.sql.gz | tail -n +8 | xargs -r rm -f
+                  echo "Retained dumps:"; ls -1 /backup/ | tail -n 7
+              env:
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-secrets
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-secrets
+                      key: password
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
+              volumeMounts:
+                - name: backup-store
+                  mountPath: /backup
+          volumes:
+            - name: backup-store
+              persistentVolumeClaim:
+                claimName: postgres-backup-pvc
+---
+# Dedicated PVC for backups (separate from the live data PVC so a node/disk
+# failure on the data volume does not also destroy the backups).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backup-pvc
+  namespace: llama-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

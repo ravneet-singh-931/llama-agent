@@ -1,0 +1,131 @@
+# ============================================
+# oauth2-proxy — SSO gateway for observability UIs
+# ============================================
+# Provides OIDC-based SSO in front of Grafana/Prometheus/Loki/Phoenix via
+# ingress-nginx external-auth. This is the "ingress auth" half of Point 2;
+# Grafana ALSO has native OAuth configured in k8s/grafana.yaml.
+#
+# ACTIVATION (config step, not a rewrite):
+#   1. Create the Secret with your IdP creds (do NOT commit real values):
+#        kubectl create secret generic oauth2-proxy-secret -n llama-agent \
+#          --from-literal=oauth-client-id=<YOUR_OIDC_CLIENT_ID> \
+#          --from-literal=oauth-client-secret=<YOUR_OIDC_CLIENT_SECRET> \
+#          --from-literal=oauth-cookie-secret=$(python -c "import secrets;print(secrets.token_hex(16))")
+#   2. Set OIDC_ENABLED=true when running k8s/deploy.sh (it applies this file,
+#      the callback ingress, and annotates the observability ingresses with
+#      external-auth, replacing basic-auth).
+#
+# The Secret below is a PLACEHOLDER only; real values come from the user or
+# the External Secrets Operator (see k8s/external-secrets.yaml).
+# ============================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oauth2-proxy-secret
+  namespace: llama-agent
+type: Opaque
+stringData:
+  oauth-client-id: REPLACE_ME_OIDC_CLIENT_ID
+  oauth-client-secret: REPLACE_ME_OIDC_CLIENT_SECRET
+  oauth-cookie-secret: REPLACE_ME_32_BYTE_HEX
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: llama-agent
+  labels:
+    app: llama-agent
+    component: oauth2-proxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: llama-agent
+      component: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app: llama-agent
+        component: oauth2-proxy
+    spec:
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+          args:
+            - --provider=oidc
+            - --oidc-issuer-url=$(OIDC_ISSUER_URL)
+            - --client-id=$(OIDC_CLIENT_ID)
+            - --client-secret=$(OIDC_CLIENT_SECRET)
+            - --cookie-secret=$(OIDC_COOKIE_SECRET)
+            - --redirect-url=https://oauth.llama-agent.local/oauth2/callback
+            - --set-xauthrequest=true
+            - --set-authorization-header=true
+            - --pass-user-headers=true
+            - --email-domain=*
+            - --upstream=static://200
+            - --cookie-secure=true
+            - --cookie-samesite=lax
+            - --skip-provider-button=false
+          env:
+            - name: OIDC_ISSUER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy-secret
+                  key: oidc-issuer-url
+                  optional: true
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy-secret
+                  key: oauth-client-id
+                  optional: true
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy-secret
+                  key: oauth-client-secret
+                  optional: true
+            - name: OIDC_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy-secret
+                  key: oauth-cookie-secret
+                  optional: true
+          ports:
+            - containerPort: 4180
+              name: http
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: llama-agent
+spec:
+  selector:
+    app: llama-agent
+    component: oauth2-proxy
+  ports:
+    - port: 4180
+      targetPort: 4180
+      name: http
+  type: ClusterIP

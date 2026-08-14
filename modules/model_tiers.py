@@ -69,3 +69,85 @@ def should_fallback(error, tier: str) -> bool:
         return False
     text = str(error).lower()
     return any(signal in text for signal in _FALLBACK_SIGNALS)
+
+
+# ============================================================
+# Point 9: multi-provider config + fallback chain
+# ============================================================
+# The app is instrumented for Groq via llama-index's GroqLLM (Phoenix spans).
+# To add a PAID / multi-provider setup without losing tracing, register the
+# provider here and wire its client at the call sites (see README
+# "Cloud Hardening" > Multi-provider LLM). The chain + fallback logic below is
+# provider-agnostic and fully testable offline.
+#
+# Activate by setting (needs the provider's paid key in the env/secret):
+#   LLM_PROVIDER_CHAIN=groq,openai,anthropic
+# Each provider falls through to the next on rate-limit / quota / auth errors.
+
+DEFAULT_PROVIDER = "groq"
+
+# Per-provider model tiers. Override per provider via env:
+#   GROQ_MODEL_STRONG / GROQ_MODEL_FAST
+#   OPENAI_MODEL_STRONG / OPENAI_MODEL_FAST
+#   ANTHROPIC_MODEL_STRONG / ANTHROPIC_MODEL_FAST
+PROVIDER_MODELS = {
+    "groq":      {"strong": "llama-3.3-70b-versatile", "fast": "llama-3.1-8b-instant"},
+    "openai":    {"strong": "gpt-4o",                 "fast": "gpt-4o-mini"},
+    "anthropic": {"strong": "claude-3-5-sonnet-latest", "fast": "claude-3-5-haiku-latest"},
+}
+
+_PROVIDER_ENV = {
+    "groq":      ("GROQ_MODEL_STRONG", "GROQ_MODEL_FAST"),
+    "openai":    ("OPENAI_MODEL_STRONG", "OPENAI_MODEL_FAST"),
+    "anthropic": ("ANTHROPIC_MODEL_STRONG", "ANTHROPIC_MODEL_FAST"),
+}
+
+_PROVIDER_API_KEY_ENV = {
+    "groq": "GROQ_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+
+def resolve_provider_chain() -> list:
+    """Ordered providers to try, from LLM_PROVIDER_CHAIN (comma-separated).
+
+    Groq is always appended as the guaranteed final fallback if not already
+    present, and unknown providers are dropped. De-duplicated, order preserved.
+    """
+    raw = os.getenv("LLM_PROVIDER_CHAIN", DEFAULT_PROVIDER)
+    chain = [p.strip().lower() for p in raw.split(",") if p.strip()]
+    if DEFAULT_PROVIDER not in chain:
+        chain.append(DEFAULT_PROVIDER)
+    seen, out = set(), []
+    for p in chain:
+        if p not in seen and p in PROVIDER_MODELS:
+            seen.add(p)
+            out.append(p)
+    return out or [DEFAULT_PROVIDER]
+
+
+def resolve_model_for_provider(provider: str, tier: str) -> str:
+    """Return the configured model for a provider + tier (strong/fast)."""
+    if tier not in ("strong", "fast"):
+        raise ValueError(f"Unknown model tier: {tier!r} (expected 'strong' or 'fast')")
+    default = PROVIDER_MODELS.get(provider, PROVIDER_MODELS[DEFAULT_PROVIDER])[tier]
+    env_strong, env_fast = _PROVIDER_ENV.get(provider, (None, None))
+    if tier == "strong" and env_strong:
+        return os.getenv(env_strong, default)
+    if tier == "fast" and env_fast:
+        return os.getenv(env_fast, default)
+    return default
+
+
+def provider_api_key_env(provider: str) -> str:
+    """Env var that holds the API key for a provider."""
+    return _PROVIDER_API_KEY_ENV.get(provider, "GROQ_API_KEY")
+
+
+def should_fallback_to_next_provider(error, idx: int, chain: list) -> bool:
+    """True if the failure on chain[idx] means we should try chain[idx+1]."""
+    if idx >= len(chain) - 1:
+        return False
+    text = str(error).lower()
+    return any(signal in text for signal in _FALLBACK_SIGNALS)

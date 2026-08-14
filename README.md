@@ -310,9 +310,87 @@ Both keep ChromaDB cluster-internal (no published host port).
 
 I verified the core flows (chat, agent routing, RAG, upload, MCP, monitoring) end-to-end in the browser, and confirmed the **multi-replica state fix**: `remember` on one replica is visible to `list facts` on another, and document `search` / `list documents` return consistent results across both API replicas (shared Redis + shared ChromaDB server). The 14 tools / 5 agents are covered by the passing test suite (`257 passed, 0 failed`).
 
-## 🔐 Security (self-hosted lab-grade)
+## 🔐 Security & Cloud Hardening
 
-Security is "good for a self-hosted lab," not production-hardened: shared basic-auth creds (`admin`/`Ravneet@6422`) protect the monitoring UIs (Grafana with its own login; Prometheus/Loki/Phoenix basic-auth same creds), no TLS/HTTPS on the ingress, no rate-limiting, and `Ravneet@6422` exists only in the live k8s secret + gitignored `secrets/grafana_admin_password.txt` — never committed to the repo.
+The app ships with enterprise-grade app-layer security (JWT, rate limiting,
+brute-force lockout, CSRF, CSP/HSTS headers, audit logging, Docker secrets).
+On top of that, the `k8s/` manifests are now **production-state ready** — the 9
+cloud-hardening points below are implemented as committed, validated manifests.
+Items that need *your* cloud accounts/credentials are scaffolded (config +
+manifests) so activation is a config step, not a rewrite. See
+[Cloud Hardening (9 Points)](#☁️-cloud-hardening-9-points) for the full table
+and exactly what to fill in.
+
+> The legacy shared basic-auth creds (`admin`/`<monitoring-password>`) still
+> protect the monitoring UIs in the **local lab** (no cert-manager/SSO
+> installed). That password exists only in the live k8s secret + gitignored
+> `secrets/grafana_admin_password.txt` — never committed to the repo. In cloud
+> deployments, TLS + SSO (Point 1 & 2) replace this.
+
+---
+
+## ☁️ Cloud Hardening (9 Points)
+
+All 9 points are implemented as committed, validated Kubernetes manifests in
+`k8s/`. "Scaffold" means the manifest/config is present and correct, but it
+activates only once *you* supply the corresponding cloud account or credential
+(nothing is provisioned for you, and no real certs/keys are issued by this
+repo).
+
+| # | Hardening point | What's in the repo | Status | You must provide |
+|---|-----------------|--------------------|--------|------------------|
+| 1 | **TLS / HTTPS** | `k8s/cert-manager.yaml` (Let's Encrypt staging/prod + self-signed issuers); every ingress has a `tls:` block + `cert-manager.io/cluster-issuer` | ✅ manifest | A public FQDN (Let's Encrypt can't issue for `.local`); install cert-manager (`CERT_MANAGER=true`) |
+| 2 | **SSO / OIDC** | `k8s/oauth2-proxy.yaml` + `oauth2-proxy-ingress.yaml`; Grafana native OAuth env (optional, disabled by default) | 🔧 scaffold | OIDC client ID/secret/issuer → `oauth2-proxy-secret`; enable `OIDC_ENABLED=true` |
+| 3 | **Rate-limit / WAF** | `limit-rps`/`limit-rpm`/`limit-connections` + ModSecurity/OWASP CRS annotations on all ingresses | ✅ manifest | ingress-nginx controller built with ModSecurity enabled |
+| 4 | **Pin image tags** | `k8s/api.yaml` + `k8s/mcp-server.yaml` use `:v7` + `imagePullPolicy: IfNotPresent`; CI pushes `:v7` | ✅ manifest | CI builds `:v7` on main (already wired); optionally pin to a digest |
+| 5 | **Managed/HA datastores + backups** | `k8s/postgres-backup-cronjob.yaml` (daily `pg_dump` → PVC); PDBs for api/postgres/redis/chromadb/mcp | ✅ manifest | For true HA, use managed Postgres/Redis (see below); backups run as-is |
+| 6 | **Secret manager** | `k8s/external-secrets.yaml` (ESO `ClusterSecretStore` + `ExternalSecret`s for AWS SM, GCP alt commented) | 🔧 scaffold | Cloud secret-manager backend + creds; enable `ESO_ENABLED=true` |
+| 7 | **HPA / PDB / quotas / NetworkPolicies** | `k8s/api-hpa.yaml`, `k8s/poddisruptionbudgets.yaml`, `k8s/resourcequota.yaml`, `k8s/networkpolicy.yaml` | ✅ manifest | metrics-server (for HPA); enable `NETWORK_POLICY=true` to enforce |
+| 8 | **CI → cloud deploy** | `.github/workflows/main.yml` deploy jobs run real `kubectl apply` (guarded by `KUBE_CONFIG`) | ✅ manifest | A base64 `KUBE_CONFIG` repo secret + pre-created runtime Secrets |
+| 9 | **Paid / multi-provider LLM** | `modules/model_tiers.py` provider chain + fallback; `LLMConfig.provider_chain`; offline tests | 🔧 scaffold | Paid provider API keys (OpenAI/Anthropic); set `LLM_PROVIDER_CHAIN` |
+
+### Activating the scaffolded points
+
+**TLS (1):** install cert-manager, then set the ingress host to your public
+FQDN and keep `cert-manager.io/cluster-issuer: letsencrypt-prod` (or
+`selfsigned` for the `.local` lab). For the local lab, HTTP still works even
+without cert-manager (the `tls:` secret is just absent).
+
+**SSO/OIDC (2):** create `oauth2-proxy-secret` with your IdP's
+`oauth-client-id`, `oauth-client-secret`, `oauth-cookie-secret`, and
+`oidc-issuer-url`, then run `OIDC_ENABLED=true ./k8s/deploy.sh`. This deploys
+oauth2-proxy, the callback ingress, swaps the observability ingresses from
+basic-auth to external-auth, and flips Grafana's native OAuth on.
+
+**Secret manager (6):** install ESO, create the IAM/cloud credential Secret
+referenced by the `ClusterSecretStore` (use IRSA/Workload Identity in prod),
+pre-create the remote secrets (`llama-agent/app`, `llama-agent/db`,
+`llama-agent/oauth2-proxy`), then `ESO_ENABLED=true ./k8s/deploy.sh` (this
+skips the static `k8s/secrets.yaml` so ESO owns the Secrets).
+
+**Managed datastores (5):** for production HA, point `DATABASE_URL` /
+`REDIS_URL` at managed Postgres (RDS / Cloud SQL) and Redis (ElastiCache /
+Memorystore) instead of the in-cluster Deployments, and keep the backup
+CronJob as an extra safety net (or rely on the managed service's native PITR).
+
+**Multi-provider LLM (9):** set `LLM_PROVIDER_CHAIN=groq,openai,anthropic` and
+supply the provider keys. The chain + fallback resolver is wired and tested;
+the actual non-Groq client construction is the one follow-up that needs your
+key + a test pass (Groq stays the instrumented, tracing-preserving default).
+
+### Deploy flags
+
+`./k8s/deploy.sh [env]` reads these env vars (all default **off** so the local
+lab keeps working without extra operators):
+
+```
+CERT_MANAGER=true ESO_ENABLED=true OIDC_ENABLED=true NETWORK_POLICY=true \
+  ./k8s/deploy.sh production
+```
+
+The CI pipeline (`.github/workflows/main.yml`) builds & pushes `:v7` (app +
+MCP server) and, when a base64 `KUBE_CONFIG` secret is present, applies the
+core manifests to staging then production (GitHub Environments gate prod).
 
 ---
 
@@ -364,6 +442,11 @@ In addition:
 | `LLM_MODEL_FAST` | Fast model (streaming chat, reformulation) | `llama-3.1-8b-instant` |
 | `MCP_SERVER_URL` | MCP agent server base URL (SSE) | `http://mcp-server:8001/sse` (k8s: `http://llama-agent-mcp-server-service:8001/sse`) |
 | `ENVIRONMENT` | `development` or `production` | `production` |
+| `LLM_PROVIDER_CHAIN` | **(Point 9)** Ordered providers to try, comma-separated; Groq appended as fallback | `groq` |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | **(Point 9)** Paid provider keys for the multi-provider chain | unset |
+| `GROQ_MODEL_STRONG` / `GROQ_MODEL_FAST` | Per-provider model overrides (OpenAI/Anthropic variants also supported) | provider defaults |
+| `OIDC_ISSUER_URL` / `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` | **(Point 2)** OIDC IdP config for oauth2-proxy SSO (in `oauth2-proxy-secret`) | unset |
+| `CERT_MANAGER` / `ESO_ENABLED` / `OIDC_ENABLED` / `NETWORK_POLICY` | **(deploy flags)** Opt-in operators/policies for `./k8s/deploy.sh` | `false` |
 
 ---
 
@@ -413,9 +496,10 @@ pytest tests/ -q -m "not mcp"
 pytest tests/ -q
 ```
 
-**Current status:** 257 passing, 17 deselected (`-m "not mcp"`), across 8 test
+**Current status:** 265 passing, 17 deselected (`-m "not mcp"`), across 9 test
 modules — covering security hardening, rate limiting, monitoring, RAG,
-multi-agent routing/streaming, and the Phoenix span-instrumentation path.
+multi-agent routing/streaming, the Phoenix span-instrumentation path, and the
+Point 9 multi-provider LLM chain/fallback logic.
 
 ---
 

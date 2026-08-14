@@ -16,8 +16,19 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    # Point 1: TLS via cert-manager (use "selfsigned" for the .local lab)
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Point 3: Rate limiting + WAF
+    nginx.ingress.kubernetes.io/limit-rps: "5"
+    nginx.ingress.kubernetes.io/limit-rpm: "150"
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts:
+        - grafana.llama-agent.local
+      secretName: grafana-tls
   rules:
     - host: grafana.llama-agent.local
       http:

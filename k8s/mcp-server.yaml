@@ -24,8 +24,9 @@ spec:
     spec:
       containers:
         - name: mcp-server
-          image: ravneet231/llama-agent-mcp-server:latest
-          imagePullPolicy: Always
+          # Point 4: pin to an explicit release tag (v7). See k8s/api.yaml note.
+          image: ravneet231/llama-agent-mcp-server:v7
+          imagePullPolicy: IfNotPresent
           command: ["python", "mcp_agents_server.py", "--transport", "sse", "--port", "8001", "--host", "0.0.0.0"]
           ports:
             - containerPort: 8001

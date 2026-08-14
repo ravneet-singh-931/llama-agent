@@ -29,8 +29,35 @@ metadata:
     # NOTE: configuration-snippet intentionally NOT used - it is disabled by
     # default in ingress-nginx (allow-snippet-annotations=false) for security.
     # WebSocket Upgrade/Connection headers are set automatically by ingress-nginx.
+
+    # ---- Point 1: TLS via cert-manager ----
+    # For the local lab (.local) swap to "selfsigned"; for real cloud use
+    # "letsencrypt-prod" (default here) with a public FQDN host.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+
+    # ---- Point 3: Rate limiting (per-client-IP) ----
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-rpm: "300"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "2"
+
+    # ---- Point 3: WAF (ModSecurity + OWASP Core Rule Set) ----
+    # Requires the ingress-nginx controller to be deployed with ModSecurity
+    # enabled (--enable-modsecurity / modsecurity-snippet). On cloud-managed
+    # ingress-nginx enable it in the controller ConfigMap; the annotations
+    # below then turn the rules on for this ingress.
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    nginx.ingress.kubernetes.io/modsecurity-snippet: |
+      SecRuleEngine On
+      SecRequestBodyLimit 10485760
+      SecRequestBodyNoFilesLimit 1048576
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts:
+        - llama-agent.local
+      secretName: llama-agent-tls
   rules:
     - host: llama-agent.local
       http:

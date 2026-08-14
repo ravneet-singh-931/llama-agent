@@ -18,8 +18,20 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # Point 1: TLS via cert-manager (use "selfsigned" for the .local lab)
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Point 3: Rate limiting + WAF
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-rpm: "300"
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts:
+        - llama-agent.local
+      secretName: llama-agent-tls
   rules:
     - host: llama-agent.local
       http:

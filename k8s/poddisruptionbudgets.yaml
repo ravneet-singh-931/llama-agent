@@ -1,0 +1,67 @@
+# ============================================
+# PodDisruptionBudgets (Point 5 + Point 7)
+# ============================================
+# Protect availability during voluntary disruptions (node drains, cluster
+# upgrades). For the multi-replica API, require at least 1 pod up. For the
+# single-replica stateful services, allow disruption (maxUnavailable: 1) so
+# node drains are not blocked — but note that REAL HA for Postgres/Redis/
+# Chroma requires a managed/multi-replica backend (see README "Cloud
+# Hardening" > Managed datastores). A PDB alone does not make a single
+# replica highly available.
+# ============================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: llama-agent-api-pdb
+  namespace: llama-agent
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: llama-agent
+      component: api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres-pdb
+  namespace: llama-agent
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: postgres
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: llama-agent
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: redis
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: chromadb-pdb
+  namespace: llama-agent
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: chromadb
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mcp-server-pdb
+  namespace: llama-agent
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: llama-agent
+      component: mcp-server

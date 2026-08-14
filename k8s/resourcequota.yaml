@@ -1,0 +1,41 @@
+# ============================================
+# ResourceQuota + LimitRange — namespace guardrails (Point 7)
+# ============================================
+# Caps total consumable resources and pod counts so a runaway workload cannot
+# starve the node. Tune to your node size. LimitRange sets default
+# requests/limits for any container that omits them.
+# ============================================
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: llama-agent-quota
+  namespace: llama-agent
+spec:
+  hard:
+    pods: "40"
+    requests.cpu: "8"
+    requests.memory: 8Gi
+    limits.cpu: "16"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: llama-agent-limitrange
+  namespace: llama-agent
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "2"
+        memory: "2Gi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"

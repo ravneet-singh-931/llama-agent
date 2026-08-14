@@ -87,15 +87,24 @@ class LLMConfig:
     temperature: float = 0.7
     max_tokens: int = 1024
     timeout: int = 60
+    # Point 9: ordered providers to try (e.g. "groq,openai,anthropic").
+    # Groq is appended as the guaranteed fallback if omitted.
+    provider_chain: List[str] = field(default_factory=lambda: ["groq"])
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
         api_key = get_secret("GROQ_API_KEY", default=os.getenv("GROQ_API_KEY", ""))
+        chain = [
+            p.strip().lower()
+            for p in os.getenv("LLM_PROVIDER_CHAIN", "groq").split(",")
+            if p.strip()
+        ] or ["groq"]
         return cls(
             api_key=api_key,
             model=os.getenv("LLM_MODEL", cls.model),
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1024")),
+            provider_chain=chain,
         )
 
 
