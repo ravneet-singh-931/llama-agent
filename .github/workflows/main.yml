@@ -284,22 +284,37 @@ jobs:
     name: "\U0001F3AA Deploy to Staging"
     needs: docker
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && secrets.KUBE_CONFIG != ''
+    # NOTE: `secrets` is NOT allowed in `if` expressions (GitHub rejects the
+    # workflow). Gate the deploy on a check step that sets an output instead.
+    if: github.ref == 'refs/heads/main'
     environment: staging
 
     steps:
       - name: "\U0001F4E5 Checkout code"
         uses: actions/checkout@v4
 
+      - name: "\U00002705 Check deploy is configured"
+        id: gate
+        run: |
+          if [ -n "${{ secrets.KUBE_CONFIG }}" ] && [ -n "${{ secrets.DOCKER_USERNAME }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "KUBE_CONFIG / DOCKER_USERNAME not set — cloud deploy skipped."
+          fi
+
       - name: "\U0001F527 Set up kubectl"
+        if: steps.gate.outputs.enabled == 'true'
         uses: azure/setup-kubectl@v4
 
       - name: "\U0001F512 Configure kubeconfig"
+        if: steps.gate.outputs.enabled == 'true'
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
 
       - name: "\U0001F680 Deploy core manifests"
+        if: steps.gate.outputs.enabled == 'true'
         run: |
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/postgres.yaml k8s/redis.yaml k8s/chromadb.yaml
@@ -310,6 +325,7 @@ jobs:
           kubectl apply -f k8s/postgres-backup-cronjob.yaml k8s/poddisruptionbudgets.yaml k8s/api-hpa.yaml k8s/resourcequota.yaml k8s/networkpolicy.yaml
 
       - name: "\u23F3 Wait for rollout"
+        if: steps.gate.outputs.enabled == 'true'
         run: |
           kubectl -n llama-agent rollout status deployment/llama-agent-api --timeout=300s
           kubectl -n llama-agent rollout status deployment/llama-agent-mcp-server --timeout=300s
@@ -321,22 +337,35 @@ jobs:
     name: "\U0001F3ED Deploy to Production"
     needs: deploy-staging
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && secrets.KUBE_CONFIG != ''
+    if: github.ref == 'refs/heads/main'
     environment: production
 
     steps:
       - name: "\U0001F4E5 Checkout code"
         uses: actions/checkout@v4
 
+      - name: "\U00002705 Check deploy is configured"
+        id: gate
+        run: |
+          if [ -n "${{ secrets.KUBE_CONFIG }}" ] && [ -n "${{ secrets.DOCKER_USERNAME }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "KUBE_CONFIG / DOCKER_USERNAME not set — cloud deploy skipped."
+          fi
+
       - name: "\U0001F527 Set up kubectl"
+        if: steps.gate.outputs.enabled == 'true'
         uses: azure/setup-kubectl@v4
 
       - name: "\U0001F512 Configure kubeconfig"
+        if: steps.gate.outputs.enabled == 'true'
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
 
       - name: "\U0001F680 Deploy core manifests"
+        if: steps.gate.outputs.enabled == 'true'
         run: |
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/postgres.yaml k8s/redis.yaml k8s/chromadb.yaml
@@ -347,6 +376,7 @@ jobs:
           kubectl apply -f k8s/postgres-backup-cronjob.yaml k8s/poddisruptionbudgets.yaml k8s/api-hpa.yaml k8s/resourcequota.yaml k8s/networkpolicy.yaml
 
       - name: "\u23F3 Wait for rollout"
+        if: steps.gate.outputs.enabled == 'true'
         run: |
           kubectl -n llama-agent rollout status deployment/llama-agent-api --timeout=300s
           kubectl -n llama-agent rollout status deployment/llama-agent-mcp-server --timeout=300s
