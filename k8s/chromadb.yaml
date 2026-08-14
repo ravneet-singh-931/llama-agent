@@ -1,0 +1,89 @@
+# ============================================
+# ChromaDB Server — shared vector store for ALL API replicas
+# ============================================
+# The API runs 2+ replicas. A pod-local ChromaDB (PersistentClient) meant
+# each replica had its own index, so a document indexed on replica A was
+# invisible to search on replica B. Running ChromaDB as a single shared
+# server (and pointing the API at it via CHROMA_SERVER_URL) gives every
+# replica the SAME semantic index. ClusterIP only — never exposed outside
+# the cluster (matches the self-hosted lab-grade security posture).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chromadb
+  namespace: llama-agent
+  labels:
+    app: chromadb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chromadb
+  template:
+    metadata:
+      labels:
+        app: chromadb
+    spec:
+      containers:
+        - name: chromadb
+          image: chromadb/chroma:latest
+          # Serve on all interfaces and persist to the mounted PVC.
+          command: ["chroma", "run", "--host", "0.0.0.0", "--port", "8000", "--path", "/chroma/chroma"]
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          startupProbe:
+            tcpSocket:
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: chromadb-data
+              mountPath: /chroma
+      volumes:
+        - name: chromadb-data
+          persistentVolumeClaim:
+            claimName: chromadb-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromadb-service
+  namespace: llama-agent
+spec:
+  selector:
+    app: chromadb
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chromadb-pvc
+  namespace: llama-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

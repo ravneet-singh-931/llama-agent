@@ -281,11 +281,39 @@ class FactMemory:
     """
     Stores important facts the agent learns about the user.
     Example: "User's name is Ravneet", "User prefers Python"
+
+    Backend (multi-replica safe):
+    - When REDIS_URL is configured AND reachable, facts live in a shared
+      Redis hash so every API replica sees the same facts. This fixes the
+      bug where remember_fact on replica A was invisible to list_facts on
+      replica B (each pod previously wrote to its own pod-local JSON file).
+    - Otherwise (local dev / CI tests / Redis down) it falls back to the
+      original pod-local JSON file, keeping behavior and the test-suite
+      unchanged.
     """
+
+    REDIS_KEY = "llama:facts"
 
     def __init__(self, facts_file: str = "memory/fact_memory.json"):
         self.facts_file = facts_file
         self.facts = self._load()
+        self.redis = self._init_redis()
+
+    def _init_redis(self):
+        """Connect to Redis if configured; return None (use JSON) otherwise."""
+        redis_url = os.getenv("REDIS_URL")
+        if not redis_url:
+            return None
+        try:
+            import redis
+            client = redis.from_url(
+                redis_url, decode_responses=True, socket_connect_timeout=2
+            )
+            client.ping()
+            return client
+        except Exception as e:
+            print(f"[FACTS] Redis unavailable, using local JSON file: {e}")
+            return None
 
     def _load(self) -> Dict:
         if os.path.exists(self.facts_file):
@@ -306,32 +334,67 @@ class FactMemory:
             with open(self.facts_file, 'w', encoding='utf-8') as f:
                 json.dump(self.facts, f, indent=2, ensure_ascii=True)
 
+    def _read_all(self) -> Dict:
+        """Return the canonical fact dict (Redis when available, else local)."""
+        if self.redis is not None:
+            try:
+                raw = self.redis.hgetall(self.REDIS_KEY)
+                result = {}
+                for k, v in raw.items():
+                    try:
+                        result[k] = json.loads(v)
+                    except (json.JSONDecodeError, TypeError):
+                        # Tolerate plain-string values written by older code.
+                        result[k] = {"value": v, "timestamp": ""}
+                self.facts = result  # keep local mirror in sync
+                return result
+            except Exception as e:
+                print(f"[FACTS] Redis read failed, using local mirror: {e}")
+                return self.facts
+        return self.facts
+
     def remember(self, key: str, value: str):
         """Remember a fact"""
-        self.facts[key] = {
-            "value": value,
-            "timestamp": datetime.now().isoformat()
-        }
+        entry = {"value": value, "timestamp": datetime.now().isoformat()}
+        self.facts[key] = entry
         self._save()
+        if self.redis is not None:
+            try:
+                self.redis.hset(self.REDIS_KEY, key, json.dumps(entry))
+            except Exception as e:
+                print(f"[FACTS] Redis write failed (kept local): {e}")
 
     def recall(self, key: str) -> str:
         """Recall a fact"""
+        if self.redis is not None:
+            try:
+                raw = self.redis.hget(self.REDIS_KEY, key)
+                if raw:
+                    try:
+                        return json.loads(raw)["value"]
+                    except (json.JSONDecodeError, TypeError):
+                        return raw
+            except Exception:
+                pass
         if key in self.facts:
             return self.facts[key]["value"]
         return f"I don't remember anything about '{key}'"
 
     def get_all_facts(self) -> Dict:
         """Get all stored facts"""
-        return {k: v["value"] for k, v in self.facts.items()}
+        all_facts = self._read_all()
+        return {k: v["value"] for k, v in all_facts.items()}
 
     def get_context_string(self) -> str:
         """Get all facts as a string for the AI to read"""
-        if not self.facts:
+        all_facts = self._read_all()
+        if not all_facts:
             return "No facts stored yet."
 
         context = "Things I remember about the user:\n"
-        for key, data in self.facts.items():
-            context += f"- {key}: {data['value']}\n"
+        for key, data in all_facts.items():
+            value = data["value"] if isinstance(data, dict) else data
+            context += f"- {key}: {value}\n"
         return context
 
     def forget(self, key: str):
@@ -339,8 +402,18 @@ class FactMemory:
         if key in self.facts:
             del self.facts[key]
             self._save()
+        if self.redis is not None:
+            try:
+                self.redis.hdel(self.REDIS_KEY, key)
+            except Exception as e:
+                print(f"[FACTS] Redis delete failed: {e}")
 
     def clear(self):
         """Clear all facts"""
         self.facts = {}
         self._save()
+        if self.redis is not None:
+            try:
+                self.redis.delete(self.REDIS_KEY)
+            except Exception as e:
+                print(f"[FACTS] Redis clear failed: {e}")

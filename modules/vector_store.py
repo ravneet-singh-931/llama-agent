@@ -34,27 +34,34 @@ class VectorStore:
     - "Can I get my money back?" matches "Refund policy"
     """
     
-    def __init__(self, persist_directory: str = "data/chromadb"):
+    def __init__(self, persist_directory: str = "data/chromadb", client=None):
         """
         Initialize the vector store.
-        
+
         Args:
-            persist_directory: Where to save the database on disk.
-                              Data survives restarts.
+            persist_directory: Where to save the database on disk (used only
+                               when no shared client is supplied).
+            client: Optional pre-built ChromaDB client. When provided (e.g. a
+                    shared HttpClient pointing at a ChromaDB server), the store
+                    is shared across all API replicas instead of being
+                    pod-local.
         """
         import chromadb
         from chromadb.config import Settings
-        
-        # Create directory if it doesn't exist
-        os.makedirs(persist_directory, exist_ok=True)
-        
-        # Create ChromaDB client with persistence
-        self.client = chromadb.PersistentClient(
-            path=persist_directory,
-            settings=Settings(
-                anonymized_telemetry=False,  # Don't send usage data
-            ),
-        )
+
+        if client is not None:
+            self.client = client
+        else:
+            # Create directory if it doesn't exist
+            os.makedirs(persist_directory, exist_ok=True)
+
+            # Create ChromaDB client with persistence
+            self.client = chromadb.PersistentClient(
+                path=persist_directory,
+                settings=Settings(
+                    anonymized_telemetry=False,  # Don't send usage data
+                ),
+            )
         
         # Get or create a collection (like a table in a database)
         # This collection stores all document chunks + their embeddings
@@ -296,13 +303,35 @@ class KeywordStore:
 
 def get_vector_store(persist_directory: str = "data/chromadb"):
     """
-    Factory function: returns VectorStore if ChromaDB is installed,
-    otherwise returns KeywordStore as fallback.
+    Factory function: returns a VectorStore backed by ChromaDB.
+
+    - If CHROMA_SERVER_URL is set, uses a shared ChromaDB *server*
+      (HttpClient) so every API replica reads/writes the SAME vector
+      index. This fixes the multi-replica bug where one replica had
+      indexed documents that another replica could not search.
+    - Otherwise falls back to a local PersistentClient (pod-local).
+    - Falls back to KeywordStore if ChromaDB isn't installed at all.
     """
     try:
         import chromadb
-        return VectorStore(persist_directory)
     except ImportError:
         print("[WARN] ChromaDB not installed. Using keyword search fallback.")
         print("       Install: pip install chromadb")
         return KeywordStore()
+
+    server_url = os.environ.get("CHROMA_SERVER_URL")
+    if server_url:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(server_url)
+            host = parsed.hostname or "localhost"
+            port = parsed.port or 8000
+            client = chromadb.HttpClient(host=host, port=port)
+            client.heartbeat()  # verify the server is reachable
+            print(f"[OK] VectorStore using shared ChromaDB server at {server_url}")
+            return VectorStore(persist_directory, client=client)
+        except Exception as e:
+            print(f"[WARN] ChromaDB server at {server_url} unavailable ({e}); "
+                  f"falling back to local PersistentClient")
+
+    return VectorStore(persist_directory)

@@ -66,6 +66,10 @@ spec:
               value: production
             - name: USE_OPTIMIZED_RAG
               value: "true"
+            # Shared ChromaDB server so every API replica uses the SAME
+            # vector index (otherwise each pod has its own pod-local index).
+            - name: CHROMA_SERVER_URL
+              value: http://chromadb-service:8000
             # K8s injects PHOENIX_PORT as "tcp://<IP>:<PORT>" because the
             # "phoenix" Service exists; the phoenix client needs an integer.
             - name: PHOENIX_PORT

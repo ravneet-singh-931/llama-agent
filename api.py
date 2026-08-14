@@ -236,6 +236,13 @@ async def lifespan(app: FastAPI):
     # store, so any user can ask the agents to read their uploaded files.
     from modules.agent_tools import set_document_store
     set_document_store(app.state.rag)
+    # Share the SAME instances with the ReAct agent module so its
+    # document/fact tools (read_document, search_documents, list_documents,
+    # remember_fact, ...) operate on the cross-replica shared store, not the
+    # module-level SimpleRAG()/FactMemory() it created at import time.
+    import llama_agent1 as _llama_agent1
+    _llama_agent1.rag = app.state.rag
+    _llama_agent1.facts = app.state.facts
     # Real agent-team usage tracking (populated by chat dispatches and MCP
     # tool calls below). Reset on restart, like the other in-memory stats.
     app.state.agent_stats = {"handled": {}, "last_used": {}}
