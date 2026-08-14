@@ -225,6 +225,33 @@ with latency, model, and I/O, parented under the originating `POST /chat/stream`
 
 ---
 
+## 🗄️ Shared State (multi-replica safe)
+
+The API runs **2+ replicas** behind a load balancer, so any state that lives
+only inside one container would be invisible to the others. Two stores are
+therefore backed by shared infrastructure:
+
+| State | Shared backend | Fallback (single-replica / degraded) |
+|-------|---------------|--------------------------------------|
+| **Facts** (`remember` / `recall` / `show facts`) | **Redis** (`REDIS_URL`) — one hash `llama:facts` every replica reads/writes | pod-local JSON file (`memory/fact_memory.json`) when Redis is unreachable |
+| **Vector index** (document `search` / `list documents`) | **ChromaDB server** (`CHROMA_SERVER_URL`) — one index shared by every replica | pod-local ChromaDB (`PersistentClient`) when the server is unreachable |
+
+- `FactMemory` (`modules/memory.py`) connects to Redis on startup; if
+  `REDIS_URL` is unset or down it transparently falls back to the JSON file,
+  so local dev and the test suite (no Redis) are unaffected.
+- `get_vector_store()` (`modules/vector_store.py`) uses `chromadb.HttpClient`
+  when `CHROMA_SERVER_URL` is set, otherwise a local `PersistentClient`.
+- The ReAct agent's document/fact tools are rebound at API startup to the
+  same shared instances, so the agent and the REST API never diverge.
+
+**Kubernetes:** a `chromadb` Deployment + Service (`k8s/chromadb.yaml`) is
+deployed and `CHROMA_SERVER_URL=http://chromadb-service:8000` is set in
+`k8s/api.yaml`. **Docker Compose:** a `chromadb` service is included and
+`CHROMA_SERVER_URL=http://chromadb:8000` is wired into the `api` service.
+Both keep ChromaDB cluster-internal (no published host port).
+
+---
+
 ## 💻 Tech Stack
 
 | Layer | Technology |
@@ -236,17 +263,18 @@ with latency, model, and I/O, parented under the originating `POST /chat/stream`
 | **Agents** | 5 specialized agents (Research, Coder, Writer, Planner, Analyzer) via MCP/SSE |
 | **Observability** | Phoenix (Arize), OpenTelemetry, OpenInference |
 | **Monitoring** | Prometheus, Grafana, Loki, Promtail, node-exporter |
-| **Infrastructure** | Docker Compose (13 services), Nginx, Kubernetes (k8s/) |
+| **Infrastructure** | Docker Compose (14 services), Nginx, Kubernetes (k8s/) |
 | **Security** | JWT, Docker secrets, rate limiting, brute-force lockout, CSRF, CSP headers, audit logging |
 
 ---
 
-## 🐳 Docker Services (13)
+## 🐳 Docker Services (14)
 
 | Container | Service | Purpose | Port |
 |-----------|---------|---------|------|
 | `llama-agent-db` | `postgres` | PostgreSQL 15 (+pgvector) | internal |
-| `llama-agent-redis` | `redis` | Caching + WebSocket pub/sub | internal |
+| `llama-agent-redis` | `redis` | Caching + WebSocket pub/sub + shared fact store | internal |
+| `llama-agent-chromadb` | `chromadb` | Shared ChromaDB vector store (all API replicas) | internal |
 | `llama-agent-api` | `api` | FastAPI REST + WebSocket + SSE chat | **8000** |
 | `llama-agent-mcp` | `mcp-server` | MCP agent server (SSE, 5 agents) | internal |
 | `llama-agent-web` | `web` | Streamlit UI (legacy) | **8501** |
@@ -280,7 +308,7 @@ with latency, model, and I/O, parented under the originating `POST /chat/stream`
 
 ## ✅ Verification
 
-I verified the core flows (chat, agent routing, RAG, upload, MCP, monitoring) end-to-end in the browser. I did not click through every one of the 14 tools / every agent individually — those are covered by the passing test suite (`257 passed, 0 failed`) rather than manual UI testing.
+I verified the core flows (chat, agent routing, RAG, upload, MCP, monitoring) end-to-end in the browser, and confirmed the **multi-replica state fix**: `remember` on one replica is visible to `list facts` on another, and document `search` / `list documents` return consistent results across both API replicas (shared Redis + shared ChromaDB server). The 14 tools / 5 agents are covered by the passing test suite (`257 passed, 0 failed`).
 
 ## 🔐 Security (self-hosted lab-grade)
 
@@ -330,7 +358,8 @@ In addition:
 | `JWT_SECRET_KEY_FILE` | Path to JWT secret (Docker secret) | `/run/secrets/jwt_secret_key` |
 | `TAVILY_API_KEY_FILE` | Path to Tavily key (Docker secret) | `/run/secrets/tavily_api_key` |
 | `DATABASE_URL` | PostgreSQL async connection | `postgresql+asyncpg://postgres:...` |
-| `REDIS_URL` | Redis connection | `redis://redis:6379` |
+| `REDIS_URL` | Redis connection (also the shared fact store) | `redis://redis:6379` |
+| `CHROMA_SERVER_URL` | ChromaDB server for the shared vector index (all replicas) | unset → local `PersistentClient` |
 | `LLM_MODEL_STRONG` | Strong model (agents, one-shot answers, RAG) | `llama-3.3-70b-versatile` |
 | `LLM_MODEL_FAST` | Fast model (streaming chat, reformulation) | `llama-3.1-8b-instant` |
 | `MCP_SERVER_URL` | MCP agent server base URL (SSE) | `http://mcp-server:8001/sse` (k8s: `http://llama-agent-mcp-server-service:8001/sse`) |
@@ -359,7 +388,7 @@ llama-agent/
 │   ├── memory.py             # Per-user conversation memory
 │   ├── mcp_client.py         # MCP client (SSE → agent server)
 │   └── secrets.py            # Docker-secret reader (env/file fallback)
-├── tests/                    # 200+ tests (217 passing, pytest)
+├── tests/                    # 200+ tests (257 passing, pytest)
 ├── config/
 │   ├── nginx/                # SSL + reverse proxy config
 │   ├── prometheus/           # Metrics + alert rules
@@ -367,7 +396,7 @@ llama-agent/
 │   ├── loki/                 # Log aggregation
 │   └── promtail/             # Log shipping
 ├── k8s/                      # Kubernetes manifests + deploy.sh
-├── docker-compose.yml        # 13 services (secure-by-default)
+├── docker-compose.yml        # 14 services (secure-by-default)
 ├── Dockerfile                # App container
 └── Dockerfile.nginx          # Nginx container
 ```
@@ -384,7 +413,7 @@ pytest tests/ -q -m "not mcp"
 pytest tests/ -q
 ```
 
-**Current status:** 217 passing, 17 deselected (`-m "not mcp"`), across 8 test
+**Current status:** 257 passing, 17 deselected (`-m "not mcp"`), across 8 test
 modules — covering security hardening, rate limiting, monitoring, RAG,
 multi-agent routing/streaming, and the Phoenix span-instrumentation path.
 

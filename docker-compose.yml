@@ -8,9 +8,10 @@
 #   docker-compose logs -f grafana          (watch Grafana logs)
 #   docker-compose down                     (stop everything)
 #
-# Services: 13 total
+# Services: 14 total
 #   - postgres       (database)
-#   - redis          (caching)
+#   - redis          (caching + shared fact memory)
+#   - chromadb       (shared vector store for all api replicas)
 #   - api            (FastAPI REST + WebSocket)
 #   - web            (Streamlit UI)
 #   - mcp-server     (Model Context Protocol agent server)
@@ -69,6 +70,35 @@ services:
       - backend
 
   # =============================================
+  # 2b. ChromaDB Server (shared vector store)
+  # =============================================
+  # Shared semantic-search index for ALL api replicas. Without this each api
+  # container keeps its own pod-local index and a document indexed on one
+  # replica is invisible to search on another. Mirrors the k8s chromadb
+  # Deployment. Cluster-internal only (no published host ports).
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: llama-agent-chromadb
+    restart: unless-stopped
+    # NOTE: the chromadb/chroma image already sets `chroma` as its entrypoint,
+    # so the Compose `command` is appended to it (unlike k8s `command`, which
+    # replaces the entrypoint). We pass `run ...` only — not `chroma run ...`.
+    command: ["run", "--host", "0.0.0.0", "--port", "8000", "--path", "/chroma/chroma"]
+    volumes:
+      - chromadb_data:/chroma
+    healthcheck:
+      # The chromadb/chroma image is minimal (no python/curl/wget), so use a
+      # bash /dev/tcp probe against the server port instead of an HTTP client.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # Grace period for first-boot embedding model download
+      start_period: 60s
+    networks:
+      - backend
+
+  # =============================================
   # 3. REST API (FastAPI + Swagger UI + Metrics)
   # =============================================
   api:
@@ -99,6 +129,10 @@ services:
       # free-tier 70b daily quota is upgraded or resets.
       - LLM_MODEL_STRONG=llama-3.3-70b-versatile
       - LLM_MODEL_FAST=llama-3.1-8b-instant
+      # Shared ChromaDB server so every api replica uses the SAME vector
+      # index (otherwise each container has its own pod-local index and
+      # search on one replica can't see documents indexed on another).
+      - CHROMA_SERVER_URL=http://chromadb:8000
     secrets:
       - groq_api_key
       - jwt_secret_key
@@ -108,6 +142,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      chromadb:
         condition: service_healthy
     volumes:
       - ./uploads:/app/uploads
@@ -386,6 +422,7 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  chromadb_data:
   prometheus_data:
   grafana_data:
   loki_data:
