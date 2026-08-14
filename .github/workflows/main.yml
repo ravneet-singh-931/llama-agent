@@ -264,6 +264,18 @@ jobs:
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new
 
+      - name: "Build and push Frontend image"
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: ${{ secrets.DOCKER_USERNAME != '' }}
+          tags: |
+            ravneet231/llama-agent-frontend:latest
+            ravneet231/llama-agent-frontend:v7
+            ravneet231/llama-agent-frontend:${{ github.sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new
+
       - name: "\U0001F504 Rotate cache"
         if: always()
         run: |
@@ -276,8 +288,9 @@ jobs:
   # Real cloud deploy. Skipped unless a base64 KUBE_CONFIG secret is set in
   # the repo (so the pipeline stays green for forks without a cluster). The
   # cluster must already have: the pinned :v7 images (built above), cert-manager
-  # + External Secrets Operator installed (if used), and the runtime Secrets
-  # (app-secrets / db-secrets) created via ESO or manually. Core manifests
+  # + External Secrets Operator installed (if used). The deploy jobs now create
+  # the runtime Secrets/ConfigMap (db-secrets, app-secrets, grafana-secret,
+  # monitoring-auth, grafana dashboard) from repo secrets. Core manifests
   # only are applied here; operator/optional manifests (cert-manager.yaml,
   # external-secrets.yaml, oauth2-proxy*.yaml) are applied out-of-band.
   deploy-staging:
@@ -312,6 +325,31 @@ jobs:
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: "Create runtime Secrets"
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          kubectl -n llama-agent create secret generic db-secrets \
+            --from-literal=username='${{ secrets.DB_USERNAME }}' \
+            --from-literal=password='${{ secrets.DB_PASSWORD }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n llama-agent create secret generic app-secrets \
+            --from-literal=database-url='${{ secrets.DATABASE_URL }}' \
+            --from-literal=redis-url='${{ secrets.REDIS_URL }}' \
+            --from-literal=groq-api-key='${{ secrets.GROQ_API_KEY }}' \
+            --from-literal=jwt-secret-key='${{ secrets.JWT_SECRET_KEY }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n llama-agent create secret generic grafana-secret \
+            --from-literal=admin-password='${{ secrets.GRAFANA_ADMIN_PASSWORD }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+          GRAFANA_PW='${{ secrets.GRAFANA_ADMIN_PASSWORD }}'
+          HTPASSWD="admin:$(openssl passwd -apr1 "$GRAFANA_PW")"
+          kubectl -n llama-agent create secret generic monitoring-auth \
+            --from-literal=auth="$HTPASSWD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n llama-agent create configmap grafana-dashboard-llama-agent \
+            --from-file=llama-agent.json=config/grafana/dashboards/llama-agent.json \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: "\U0001F680 Deploy core manifests"
         if: steps.gate.outputs.enabled == 'true'
@@ -363,6 +401,31 @@ jobs:
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: "Create runtime Secrets"
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          kubectl -n llama-agent create secret generic db-secrets \
+            --from-literal=username='${{ secrets.DB_USERNAME }}' \
+            --from-literal=password='${{ secrets.DB_PASSWORD }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n llama-agent create secret generic app-secrets \
+            --from-literal=database-url='${{ secrets.DATABASE_URL }}' \
+            --from-literal=redis-url='${{ secrets.REDIS_URL }}' \
+            --from-literal=groq-api-key='${{ secrets.GROQ_API_KEY }}' \
+            --from-literal=jwt-secret-key='${{ secrets.JWT_SECRET_KEY }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n llama-agent create secret generic grafana-secret \
+            --from-literal=admin-password='${{ secrets.GRAFANA_ADMIN_PASSWORD }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+          GRAFANA_PW='${{ secrets.GRAFANA_ADMIN_PASSWORD }}'
+          HTPASSWD="admin:$(openssl passwd -apr1 "$GRAFANA_PW")"
+          kubectl -n llama-agent create secret generic monitoring-auth \
+            --from-literal=auth="$HTPASSWD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n llama-agent create configmap grafana-dashboard-llama-agent \
+            --from-file=llama-agent.json=config/grafana/dashboards/llama-agent.json \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: "\U0001F680 Deploy core manifests"
         if: steps.gate.outputs.enabled == 'true'

@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: ravneet231/llama-agent:latest
+          image: ravneet231/llama-agent:v7
           imagePullPolicy: IfNotPresent
           command: ["streamlit", "run", "app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
           ports:
