@@ -1886,7 +1886,7 @@ async def chat(
                     if followup_query:
                         response = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, followup_query, rag), timeout=DOWNSTREAM_TIMEOUT)
                         query_type = "document_question"
-                    elif any(g in lower_input for g in greetings):
+                    elif any(g in request.message.lower() for g in greetings):
                         response = "Hello! How can I help you today?"
                     else:
                         # Try routing through multi-agent system for specialized tasks
