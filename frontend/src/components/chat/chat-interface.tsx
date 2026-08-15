@@ -5,6 +5,8 @@ import { motion } from "framer-motion";
 import { Bot, MessageSquare } from "lucide-react";
 import { ChatMessageBubble } from "./chat-message";
 import { ChatInput } from "./chat-input";
+import { DsaControlPanel } from "./DsaControlPanel";
+import { ReasoningView } from "./ReasoningView";
 import { useChatStore } from "@/store/chat-store";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
@@ -14,6 +16,7 @@ export function ChatInterface() {
     isStreaming,
     sendMessage,
     cancelStream,
+    reasoning,
   } = useChatStore();
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -66,6 +69,8 @@ export function ChatInterface() {
 
       {/* Messages */}
       <div className="flex-1 overflow-hidden">
+        <DsaControlPanel />
+        <ReasoningView events={reasoning} />
         {messages.length === 0 ? (
           <div className="flex h-full items-center justify-center">
             <motion.div

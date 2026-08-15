@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { motion } from "framer-motion";
 import { User, Bot, Code, FileText, Search, Workflow } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -40,7 +41,10 @@ interface ChatMessageProps {
   isStreaming?: boolean;
 }
 
-export function ChatMessageBubble({ message, isStreaming }: ChatMessageProps) {
+export const ChatMessageBubble = memo(function ChatMessageBubble({
+  message,
+  isStreaming,
+}: ChatMessageProps) {
   const isUser = message.role === "user";
 
   if (isUser) {
@@ -117,4 +121,4 @@ export function ChatMessageBubble({ message, isStreaming }: ChatMessageProps) {
       </div>
     </motion.div>
   );
-}
+});

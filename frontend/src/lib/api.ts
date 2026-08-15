@@ -1,46 +1,42 @@
-// In production builds NEXT_PUBLIC_API_URL="/api" so all calls go through
-// Nginx (same-origin, no CORS). In local dev it stays http://localhost:8000.
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// All API calls go through the same-origin proxy (NEXT_PUBLIC_API_URL defaults
+// to "/api", which Next.js rewrites to the FastAPI backend). Because the calls
+// are same-origin, the HttpOnly auth cookies set by the backend are sent
+// automatically - we never touch tokens from JavaScript (no localStorage, no
+// XSS-token-theft surface).
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
+
+// SSE event types streamed by /chat/stream that are NOT plain text tokens.
+const SSE_EVENT_TYPES = new Set([
+  "config",
+  "reasoning",
+  "agent_start",
+  "agent_done",
+  "final",
+  "tool",
+]);
+
+export interface DsaOptions {
+  use_critic?: boolean;
+  use_reflection?: boolean;
+  use_parallel?: boolean;
+  agent?: string;
+}
+
+export interface StreamEvent {
+  type: string;
+  [key: string]: unknown;
+}
 
 class ApiClient {
-  private token: string | null = null;
-
-  constructor() {
-    if (typeof window !== "undefined") {
-      this.token = localStorage.getItem("access_token");
-    }
-  }
-
-  setToken(token: string | null) {
-    this.token = token;
-    if (typeof window !== "undefined") {
-      if (token) {
-        localStorage.setItem("access_token", token);
-      } else {
-        localStorage.removeItem("access_token");
-        localStorage.removeItem("refresh_token");
-      }
-    }
-  }
-
-  getToken(): string | null {
-    return this.token;
-  }
-
-  private headers(): Record<string, string> {
-    const h: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (this.token) {
-      h["Authorization"] = `Bearer ${this.token}`;
-    }
-    return h;
-  }
-
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown
+  ): Promise<T> {
     const res = await fetch(`${API_BASE}${path}`, {
       method,
-      headers: this.headers(),
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
@@ -50,24 +46,29 @@ class ApiClient {
     return res.json();
   }
 
-  // Auth
+  // Auth (cookies are set by the backend; nothing to store client-side)
   async login(username: string, password: string) {
-    const data = await this.request<{
-      access_token: string;
-      refresh_token: string;
-      token_type: string;
-    }>("POST", "/auth/login", { username, password });
-    this.setToken(data.access_token);
-    return data;
+    return this.request<{ status: string; user?: unknown }>(
+      "POST",
+      "/auth/login",
+      { username, password }
+    );
   }
 
   async register(username: string, email: string, password: string) {
-    const data = await this.request<{
-      access_token: string;
-      refresh_token: string;
-    }>("POST", "/auth/register", { username, email, password });
-    this.setToken(data.access_token);
-    return data;
+    return this.request<{ status: string; user?: unknown }>(
+      "POST",
+      "/auth/register",
+      { username, email, password }
+    );
+  }
+
+  async logout() {
+    try {
+      await this.request("POST", "/auth/logout");
+    } catch {
+      // Even if the server call fails, the local session is cleared by the store.
+    }
   }
 
   async getMe() {
@@ -86,31 +87,42 @@ class ApiClient {
     }>("POST", "/chat", { message });
   }
 
-  // Streaming chat via SSE
+  // Streaming chat via SSE. `options` carries the DSA feature toggles from the
+  // control panel; `onEvent` receives structured events (config / reasoning /
+  // agent_start / agent_done) so the UI can render a live reasoning view.
   chatStream(
     message: string,
     onToken: (token: string) => void,
     onDone: () => void,
     onError: (err: Error) => void,
-    conversationId?: string | null
+    conversationId?: string | null,
+    options?: DsaOptions | null,
+    onEvent?: (event: StreamEvent) => void
   ): AbortController {
     const controller = new AbortController();
     const url = `${API_BASE}/chat/stream`;
 
+    const body: Record<string, unknown> = conversationId
+      ? { message, conversation_id: conversationId }
+      : { message };
+    if (options) {
+      for (const [k, v] of Object.entries(options)) {
+        if (v !== undefined && v !== null) body[k] = v;
+      }
+    }
+
     fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
-      },
-      body: JSON.stringify(
-        conversationId ? { message, conversation_id: conversationId } : { message }
-      ),
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
       signal: controller.signal,
     })
       .then(async (response) => {
         if (!response.ok) {
-          const err = await response.json().catch(() => ({ detail: "Stream error" }));
+          const err = await response
+            .json()
+            .catch(() => ({ detail: "Stream error" }));
           onError(new Error(err.detail || `HTTP ${response.status}`));
           return;
         }
@@ -131,16 +143,28 @@ class ApiClient {
           buffer = lines.pop() || "";
 
           for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = line.slice(6);
-              if (data.trim() === "[DONE]") {
-                onDone();
-                return;
-              }
-              // Unescape newlines
-              const text = data.replace(/\\n/g, "\n");
-              onToken(text);
+            if (!line.startsWith("data: ")) continue;
+            const data = line.slice(6);
+            if (data.trim() === "[DONE]") {
+              onDone();
+              return;
             }
+            // Structured SSE event vs. plain text token.
+            const trimmed = data.trim();
+            if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+              try {
+                const parsed = JSON.parse(trimmed) as StreamEvent;
+                if (parsed && SSE_EVENT_TYPES.has(parsed.type)) {
+                  onEvent?.(parsed);
+                  continue;
+                }
+              } catch {
+                // Not JSON - fall through to treat as a text token.
+              }
+            }
+            // Unescape newlines (the backend escapes \r\n in tokens).
+            const text = data.replace(/\\n/g, "\n");
+            onToken(text);
           }
         }
         onDone();
@@ -164,7 +188,9 @@ class ApiClient {
   }
 
   async recall(key: string) {
-    return this.request<{ key: string; value: string }>("POST", "/recall", { key });
+    return this.request<{ key: string; value: string }>("POST", "/recall", {
+      key,
+    });
   }
 
   async deleteFact(key: string) {
@@ -240,9 +266,7 @@ class ApiClient {
     formData.append("file", file);
     const res = await fetch(`${API_BASE}/documents/upload`, {
       method: "POST",
-      headers: this.token
-        ? { Authorization: `Bearer ${this.token}` }
-        : {},
+      credentials: "include",
       body: formData,
     });
     if (!res.ok) {
@@ -260,7 +284,6 @@ class ApiClient {
     );
   }
 
-  // Ask a question about uploaded documents and get a clean AI-written answer
   async askDocuments(query: string) {
     return this.request<{ query: string; answer: string }>(
       "POST",
@@ -333,14 +356,21 @@ class ApiClient {
     }>("GET", "/health");
   }
 
-  // WebSocket
-  getWsUrl(userId: string): string {
-    if (API_BASE.startsWith("http")) {
-      // Local dev: ws://localhost:8000/ws/{user_id}
-      return `${API_BASE.replace(/^http/, "ws")}/ws/${userId}?token=${this.token || ""}`;
+  // WebSocket: fetch a short-lived single-use ticket, then connect with it
+  // (the JWT is never placed in the URL). Returns a same-origin ws/wss URL.
+  async getWsUrl(userId: string): Promise<string> {
+    let ticket = "";
+    try {
+      const res = await this.request<{ ticket: string }>("POST", "/ws/ticket");
+      ticket = res.ticket;
+    } catch {
+      ticket = "";
     }
-    // Production (same-origin via Nginx): wss://localhost/ws/{user_id}
-    return `/ws/${userId}?token=${this.token || ""}`;
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    const base = `${proto}://${window.location.host}`;
+    return ticket
+      ? `${base}/ws/${userId}?ticket=${encodeURIComponent(ticket)}`
+      : `${base}/ws/${userId}`;
   }
 }
 

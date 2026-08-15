@@ -11,13 +11,17 @@ Features:
 """
 
 import asyncio
+import heapq
+import json
 import logging
 import os
 import re
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, List, Dict
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
 from fastapi import (
@@ -49,6 +53,8 @@ from modules.auth import (
     user_manager,
     jwt_manager,
     authenticate_ws_token,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    REFRESH_TOKEN_EXPIRE_DAYS,
 )
 from modules.websocket import get_ws_handler, MessageType, WSMessage
 
@@ -72,6 +78,7 @@ from modules.security_hardening import (
     get_security_headers,
     get_client_ip,
     sanitize_input,
+    detect_prompt_injection,
 )
 
 # Enterprise monitoring (alerts, business metrics, cost tracking, SLA)
@@ -90,6 +97,201 @@ from modules.cicd_improvements import feature_flags
 _log = logging.getLogger("llama_agent.api")
 
 
+# ---------------------------------------------------------------------------
+# Shared, replica-safe state helpers (Redis-backed, in-memory fallback)
+#
+# `agent_stats` and `doc_followup` are kept in app.state for speed but mirrored
+# to Redis so every API replica sees the same values. This fixes P0 #2: the
+# previous design stored them only in-process, so brute-force/agent stats and
+# doc-follow-up anchors were invisible across replicas behind a load balancer.
+# All Redis access is best-effort and falls back to the in-process copy if
+# Redis is unavailable, so behaviour is unchanged when Redis is down.
+# ---------------------------------------------------------------------------
+_AGENT_STATS_KEY = "llama:agent_stats"
+_DOC_FOLLOWUP_KEY = "llama:doc_followup"
+
+
+async def _load_shared_dict(key: str, default: dict) -> dict:
+    try:
+        from modules import redis_store
+        val = await redis_store.get_json(key)
+        if isinstance(val, dict):
+            return val
+    except Exception:
+        pass
+    return default
+
+
+async def _save_shared_dict(key: str, value: dict) -> None:
+    try:
+        from modules import redis_store
+        await redis_store.set_json(key, value, ttl=86400)
+    except Exception:
+        pass
+
+
+# Lazy singleton Groq client (P2 #7): avoid rebuilding the client on every
+# document question.
+_groq_client = None
+
+
+def _get_groq_client(api_key: str):
+    global _groq_client
+    if _groq_client is None:
+        from multi_agent import InstrumentedGroqClient
+        _groq_client = InstrumentedGroqClient(api_key=api_key)
+    return _groq_client
+
+
+# ============ P2 #8: downstream timeouts + MCP circuit breaker ============
+# Bound worst-case latency on external dependencies (ChromaDB, MCP server, Groq)
+# so a slow/hung dependency can never hang a request indefinitely. Sync calls
+# are moved off the event loop with asyncio.to_thread before being bounded by
+# asyncio.wait_for.
+
+DOWNSTREAM_TIMEOUT = float(os.getenv("DOWNSTREAM_TIMEOUT", "30"))
+MCP_TIMEOUT = float(os.getenv("MCP_TIMEOUT", "25"))
+AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "60"))
+# Hard cap on a single /chat/stream response. The agent streaming loops are
+# synchronous generators (they block the event loop per chunk), so we cannot
+# wrap them in asyncio.wait_for without breaking the SSE yield protocol. Instead
+# we enforce a total stream duration: if it is exceeded we stop emitting and
+# close the stream cleanly instead of streaming forever.
+STREAM_MAX_DURATION = float(os.getenv("STREAM_MAX_DURATION", "300"))
+
+# Minimal in-process circuit breaker for the external MCP server. After
+# MCP_FAILURE_THRESHOLD consecutive failures it opens for MCP_CIRCUIT_COOLDOWN
+# seconds, failing fast with 503 instead of hanging on a dead dependency.
+_MCP_FAILURES = 0
+_MCP_OPEN_UNTIL = 0.0
+MCP_FAILURE_THRESHOLD = 3
+MCP_CIRCUIT_COOLDOWN = 30.0
+
+
+def _mcp_circuit_open() -> bool:
+    return time.monotonic() < _MCP_OPEN_UNTIL
+
+
+def _mcp_record_failure() -> None:
+    global _MCP_FAILURES, _MCP_OPEN_UNTIL
+    _MCP_FAILURES += 1
+    if _MCP_FAILURES >= MCP_FAILURE_THRESHOLD:
+        _MCP_OPEN_UNTIL = time.monotonic() + MCP_CIRCUIT_COOLDOWN
+        _MCP_FAILURES = 0
+
+
+def _mcp_record_success() -> None:
+    global _MCP_FAILURES
+    _MCP_FAILURES = 0
+
+
+# ============ DSA utilities: heap top-k + bounded LRU cache ============
+
+
+def heap_top_k(items, key=lambda x: x, k: int = 5):
+    """Return the k items with the largest ``key`` value in O(n log k).
+
+    Uses a min-heap of size k, so it scales far better than a full sort when
+    n >> k (e.g. ranking hundreds of retrieved chunks down to the top few).
+    """
+    if k <= 0:
+        return []
+    heap = []
+    for it in items:
+        v = key(it)
+        if len(heap) < k:
+            heapq.heappush(heap, (v, it))
+        elif v > heap[0][0]:
+            heapq.heapreplace(heap, (v, it))
+    # Min-heap -> return largest-first.
+    return [it for _, it in sorted(heap, reverse=True)]
+
+
+class BoundedLRUCache:
+    """Bounded LRU cache with optional TTL.
+
+    Evicts the least-recently-used entry when full and treats entries older
+    than ``ttl`` seconds as misses. Used to cache repeated document answers so
+    identical questions skip the LLM call without growing memory unbounded.
+    """
+
+    def __init__(self, maxsize: int = 256, ttl: float = 600.0):
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._store: "OrderedDict[str, tuple]" = OrderedDict()
+
+    def get(self, key: str):
+        if key not in self._store:
+            return None
+        val, ts = self._store[key]
+        if self.ttl and (time.monotonic() - ts) > self.ttl:
+            del self._store[key]
+            return None
+        self._store.move_to_end(key)
+        return val
+
+    def put(self, key: str, val) -> None:
+        if key in self._store:
+            self._store.move_to_end(key)
+        self._store[key] = (val, time.monotonic())
+        while len(self._store) > self.maxsize:
+            self._store.popitem(last=False)
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(key) is not None
+
+
+# Fast in-memory LRU for repeated document questions (exact-match, TTL-bounded).
+_doc_answer_cache = BoundedLRUCache(maxsize=256, ttl=600)
+
+
+def _match_fact_question(all_facts: Dict, message: str):
+    """Return (key, value) for a stored fact referenced in `message`.
+
+    Uses a token inverted index so lookup is O(n_tokens + candidates) instead
+    of the original O(F*n) linear scan over every fact per message. Only facts
+    whose key shares a token with the message are candidate-matched. Returns
+    (None, None) when no fact is referenced.
+    """
+    lower_input = (message or "").lower()
+    if not any(p in lower_input for p in ("what", "know", "recall", "tell", "remind")):
+        return None, None
+    if not all_facts:
+        return None, None
+    # Build token -> fact-key inverted index (O(F * key_tokens)).
+    index: Dict[str, List[str]] = {}
+    for key in all_facts:
+        for tok in re.findall(r"[a-z0-9]+", key.lower()):
+            index.setdefault(tok, []).append(key)
+    msg_tokens = set(re.findall(r"[a-z0-9]+", lower_input))
+    candidates = set()
+    for tok in msg_tokens:
+        if tok in index:
+            candidates.update(index[tok])
+    for key in candidates:
+        if key.lower() in lower_input:
+            return key, all_facts[key]
+    return None, None
+
+
+def _window_messages(msgs: List[Dict], max_tokens: int = 1500) -> List[Dict]:
+    """Return the most recent messages whose estimated token size fits the
+    budget. Bounds LLM context cost/latency (a token-budget sliding window
+    instead of a fixed last-N messages)."""
+    if not msgs:
+        return []
+    chosen = []
+    total = 0
+    for m in reversed(msgs):
+        est = max(1, len(m.get("content", "")) // 4)
+        if total + est > max_tokens and chosen:
+            break
+        chosen.append(m)
+        total += est
+    chosen.reverse()
+    return chosen
+
+
 # ============ MODELS ============
 
 
@@ -99,6 +301,11 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = "default"
     context: Optional[str] = None
     conversation_id: Optional[str] = None
+    # DSA feature toggles (override server env defaults when provided).
+    use_critic: Optional[bool] = None
+    use_reflection: Optional[bool] = None
+    use_parallel: Optional[bool] = None
+    agent: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -158,15 +365,21 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    """Token response"""
+    """Token response (legacy; cookie auth is preferred for browsers)"""
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
 
 
+class AuthSuccess(BaseModel):
+    """Cookie-based auth success (tokens are set as HttpOnly cookies)"""
+    status: str = "ok"
+    user: Optional[Dict[str, Any]] = None
+
+
 class RefreshRequest(BaseModel):
-    """Refresh token request"""
-    refresh_token: str
+    """Refresh token request (refresh token may also arrive as a cookie)"""
+    refresh_token: Optional[str] = None
 
 
 # ============ APP LIFETIME ============
@@ -194,8 +407,10 @@ def _run_db_health_check() -> Dict:
             conn.close()
     except ImportError:
         return {"status": "unavailable", "error": "psycopg2 not installed"}
-    except Exception as e:
-        return {"status": "unavailable", "error": str(e)}
+    except Exception:
+        # Never leak raw DB exception details (host/credentials) on a health
+        # endpoint; the failure is logged server-side via the caller's handler.
+        return {"status": "unavailable", "error": "database health check failed"}
 
 
 @asynccontextmanager
@@ -478,9 +693,58 @@ async def health_check():
 # ============ AUTH ENDPOINTS ============
 
 
-@app.post("/auth/register", response_model=TokenResponse)
-async def register(request: Request, body: RegisterRequest):
-    """Register a new user"""
+def _set_auth_cookies(
+    response: Response, access_token: str, refresh_token: str, request: Request = None
+) -> None:
+    """Set the access + refresh tokens as HttpOnly, SameSite cookies.
+
+    `secure` is enabled ONLY when the client actually reached the API over
+    HTTPS. We read the scheme from the ingress's X-Forwarded-Proto /
+    X-Forwarded-Scheme header (or the request URL) rather than guessing from
+    ENVIRONMENT: a deployment can run with ENVIRONMENT=production behind an
+    HTTP-only ingress (e.g. local *.local hosts, no cert-manager), and a Secure
+    cookie there would be rejected by the browser, silently breaking login.
+    The frontend talks to the API same-origin (via the Nginx/Next proxy), so
+    `samesite="lax"` is sufficient and avoids the cross-site Secure requirement.
+    """
+    is_https = False
+    if request is not None:
+        proto = request.headers.get("x-forwarded-proto") or request.headers.get(
+            "x-forwarded-scheme"
+        )
+        if proto:
+            is_https = proto.split(",")[0].strip().lower() == "https"
+        if not is_https and request.url.scheme == "https":
+            is_https = True
+    secure = is_https
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        path="/",
+    )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    for key in ("access_token", "refresh_token"):
+        response.delete_cookie(key, path="/")
+
+
+@app.post("/auth/register", response_model=AuthSuccess)
+async def register(request: Request, response: Response, body: RegisterRequest):
+    """Register a new user (tokens issued as HttpOnly cookies)"""
     client_ip = get_client_ip(request)
     try:
         result = await user_manager.register(
@@ -492,22 +756,20 @@ async def register(request: Request, body: RegisterRequest):
         # Enterprise: audit registration success
         audit_logger.log_registration(body.username, client_ip, success=True)
         business_metrics.record_feature_usage("user_registration")
-        return TokenResponse(
-            access_token=result["access_token"],
-            refresh_token=result["refresh_token"],
-        )
+        _set_auth_cookies(response, result["access_token"], result["refresh_token"], request)
+        return AuthSuccess(status="ok", user=result["user"])
     except HTTPException as e:
         # Enterprise: audit registration failure
         audit_logger.log_registration(body.username, client_ip, success=False, reason=str(e.detail))
         raise
     except Exception as e:
         audit_logger.log_registration(body.username, client_ip, success=False, reason=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/auth/login", response_model=TokenResponse)
-async def login(request: Request, body: LoginRequest):
-    """Login with username/email and password"""
+@app.post("/auth/login", response_model=AuthSuccess)
+async def login(request: Request, response: Response, body: LoginRequest):
+    """Login with username/email and password (tokens issued as HttpOnly cookies)"""
     client_ip = get_client_ip(request)
     
     # Enterprise: brute-force protection (per IP and per username)
@@ -535,10 +797,8 @@ async def login(request: Request, body: LoginRequest):
         brute_force.record_success(client_ip)
         brute_force.record_success(body.username)
         audit_logger.log_login_attempt(body.username, client_ip, success=True)
-        return TokenResponse(
-            access_token=result["access_token"],
-            refresh_token=result["refresh_token"],
-        )
+        _set_auth_cookies(response, result["access_token"], result["refresh_token"], request)
+        return AuthSuccess(status="ok", user=result["user"])
     except HTTPException as e:
         # Enterprise: record failure + audit
         brute_force.record_failure(client_ip)
@@ -554,22 +814,31 @@ async def login(request: Request, body: LoginRequest):
         brute_force.record_failure(client_ip)
         brute_force.record_failure(body.username)
         audit_logger.log_login_attempt(body.username, client_ip, success=False, reason=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/auth/refresh", response_model=TokenResponse)
-async def refresh_token(request: RefreshRequest):
-    """Get new access token using refresh token"""
+@app.post("/auth/refresh", response_model=AuthSuccess)
+async def refresh_token(request: Request, response: Response, body: RefreshRequest):
+    """Get new access token using a refresh token (cookie or body)"""
+    refresh = body.refresh_token or request.cookies.get("refresh_token")
+    if not refresh:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
     try:
-        result = await user_manager.refresh_token(request.refresh_token)
-        return TokenResponse(
-            access_token=result["access_token"],
-            refresh_token=request.refresh_token,  # Keep same refresh token
-        )
+        result = await user_manager.refresh_token(refresh)
+        # Keep the same refresh token (it is still valid); only rotate access.
+        _set_auth_cookies(response, result["access_token"], refresh, request)
+        return AuthSuccess(status="ok")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/auth/logout")
+async def logout(response: Response):
+    """Clear the auth cookies (client-side session termination)"""
+    _clear_auth_cookies(response)
+    return {"status": "ok"}
 
 
 @app.get("/auth/me")
@@ -581,30 +850,84 @@ async def get_me(user = Depends(get_current_user)):
 # ============ WEBSOCKET ENDPOINT ============
 
 
+# ---------------------------------------------------------------------------
+# WebSocket auth tickets
+#
+# The browser should NOT put the JWT in the WS URL (?token=...) because that
+# leaks it via proxy logs, browser history and the Referer header. Instead the
+# frontend fetches a short-lived, single-use ticket from /ws/ticket (a normal
+# authenticated HTTP call) and connects with ?ticket=<ticket>. Tickets are
+# kept in-memory (per-process; fine for a single API replica; use Redis in a
+# multi-replica deployment) and are consumed on first use.
+# ---------------------------------------------------------------------------
+_ws_tickets: Dict[str, Dict[str, Any]] = {}
+_WS_TICKET_TTL = 60  # seconds
+
+
+def _issue_ws_ticket(user: Dict[str, Any]) -> Dict[str, Any]:
+    ticket = str(uuid.uuid4())
+    _ws_tickets[ticket] = {
+        "user_id": str(user["id"]),
+        "username": user.get("username", "Anonymous"),
+        "exp": time.monotonic() + _WS_TICKET_TTL,
+        "used": False,
+    }
+    return {"ticket": ticket, "expires_in": _WS_TICKET_TTL}
+
+
+def _consume_ws_ticket(ticket: str) -> Optional[Dict[str, Any]]:
+    record = _ws_tickets.pop(ticket, None)
+    if record is None:
+        return None
+    if record["used"] or time.monotonic() > record["exp"]:
+        return None
+    record["used"] = True
+    return record
+
+
+@app.post("/ws/ticket")
+async def ws_ticket(user=Depends(get_current_user)):
+    """Issue a short-lived, single-use WebSocket auth ticket.
+
+    The frontend calls this over HTTPS, then connects to the WebSocket with
+    `?ticket=<ticket>` instead of embedding the JWT in the URL.
+    """
+    return _issue_ws_ticket(user)
+
+
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     user_id: str,
     token: str = "",
+    ticket: str = "",
 ):
     """
     WebSocket endpoint for real-time chat
 
-    Connect: ws://localhost:8000/ws/{user_id}?token=<JWT>
+    Connect: wss://<host>/ws/{user_id}?ticket=<ticket>
 
-    Enterprise auth (frontend already sends `token`):
-    - No token / empty token  -> anonymous connection (backwards compatible)
-    - Valid access token      -> connected under the caller's REAL identity
-                                 (username from the JWT, user_id from the JWT;
-                                 path user_id is NOT trusted)
-    - Invalid/expired token   -> connection rejected (HTTP 403 / WS 1008)
+    Enterprise auth (prefer `ticket` over `token`):
+    - No token / ticket      -> anonymous connection (backwards compatible)
+    - Valid ticket           -> connected under the ticket's REAL identity
+    - Valid access token     -> connected under the caller's REAL identity
+                                  (username from the JWT, user_id from the JWT;
+                                  path user_id is NOT trusted)
+    - Invalid/expired ticket/token -> connection rejected (WS 1008)
 
     Messages (JSON):
     - Send: {"type": "chat", "data": {"content": "Hello!"}}
     - Receive: {"type": "response", "data": {"content": "Hi there!"}}
     """
     username = "Anonymous"
-    if token:
+    if ticket:
+        record = _consume_ws_ticket(ticket)
+        if not record:
+            await websocket.close(code=1008, reason="Invalid or expired ticket")
+            return
+        user_id = record["user_id"]
+        username = record["username"]
+    elif token:
         user = await authenticate_ws_token(token)
         if not user:
             # Fail closed: never accept a spoofed identity or bad token
@@ -764,31 +1087,112 @@ RECENCY_KEYWORDS = [
 ]
 
 
+class AhoCorasick:
+    """Aho-Corasick multi-pattern matcher for efficient intent routing.
+
+    Builds a trie of all routing keywords (lowercased) with failure links so a
+    single O(text) scan finds every keyword occurrence. Replaces the previous
+    O(patterns * text) linear ``any(kw in message)`` scans in route_multi_agent
+    and makes adding new trigger phrases O(1) at build time.
+    """
+
+    def __init__(self):
+        self._next = [{}]
+        self._fail = [0]
+        self._out = [set()]
+        self._patterns = []
+        self._built = False
+
+    def add(self, pattern: str, payload) -> None:
+        pattern = pattern.lower()
+        node = 0
+        for ch in pattern:
+            nxt = self._next[node]
+            if ch not in nxt:
+                nxt[ch] = len(self._next)
+                self._next.append({})
+                self._fail.append(0)
+                self._out.append(set())
+            node = nxt[ch]
+        idx = len(self._patterns)
+        self._patterns.append((pattern, payload))
+        self._out[node].add(idx)
+        self._built = False
+
+    def build(self) -> None:
+        from collections import deque
+        q = deque()
+        for ch, nxt in self._next[0].items():
+            self._fail[nxt] = 0
+            q.append(nxt)
+        while q:
+            r = q.popleft()
+            for ch, s in self._next[r].items():
+                q.append(s)
+                f = self._fail[r]
+                while f and ch not in self._next[f]:
+                    f = self._fail[f]
+                self._fail[s] = self._next[f].get(ch, 0)
+                self._out[s] |= self._out[self._fail[s]]
+        self._built = True
+
+    def find(self, text: str):
+        """Yield (pattern, payload, end_index) for every match in text."""
+        if not self._built:
+            self.build()
+        text = text.lower()
+        node = 0
+        for i, ch in enumerate(text):
+            while node and ch not in self._next[node]:
+                node = self._fail[node]
+            node = self._next[node].get(ch, 0)
+            for idx in self._out[node]:
+                pattern, payload = self._patterns[idx]
+                yield pattern, payload, i
+
+    def find_payloads(self, text: str):
+        """Return the set of distinct payloads matched anywhere in text."""
+        return {payload for _, payload, _ in self.find(text)}
+
+
+# Build the routing automaton once from the keyword groups above.
+_ROUTING_AC = AhoCorasick()
+for _kw in CODE_KEYWORDS:
+    _ROUTING_AC.add(_kw, "coder")
+for _kw in WRITER_KEYWORDS:
+    _ROUTING_AC.add(_kw, "writer")
+for _kw in PLANNER_KEYWORDS:
+    _ROUTING_AC.add(_kw, "planner")
+for _kw in ANALYZER_KEYWORDS:
+    _ROUTING_AC.add(_kw, "analyzer")
+for _kw in RESEARCH_KEYWORDS:
+    _ROUTING_AC.add(_kw, "research")
+for _kw in RECENCY_KEYWORDS:
+    _ROUTING_AC.add(_kw, "research")
+_ROUTING_AC.build()
+
+# Priority when several agent types match (highest priority first).
+_ROUTING_PRIORITY = ("coder", "writer", "planner", "analyzer", "research")
+
+
 def route_multi_agent(message: str):
     """Return (use_multi_agent, agent_type) for a message.
 
-    Checks @Agent prefix first (e.g. '@Research Agent ...'), then
-    keyword-based routing, then falls back to the general ReAct agent.
+    Checks @Agent prefix first (e.g. '@Research Agent ...'), then routes via the
+    Aho-Corasick keyword automaton (all matches collected, highest-priority
+    agent wins), then falls back to the general ReAct agent.
     """
-    task_lower = message.lower()
-
     # @Agent prefix: explicit routing
     agent_type, _ = detect_agent_prefix(message)
     if agent_type is not None:
         return True, agent_type
 
-    if any(kw in task_lower for kw in CODE_KEYWORDS):
-        return True, "coder"
-    if any(kw in task_lower for kw in WRITER_KEYWORDS):
-        return True, "writer"
-    if any(kw in task_lower for kw in PLANNER_KEYWORDS):
-        return True, "planner"
-    if any(kw in task_lower for kw in ANALYZER_KEYWORDS):
-        return True, "analyzer"
-    if any(kw in task_lower for kw in RESEARCH_KEYWORDS):
-        return True, "research"
-    if any(kw in task_lower for kw in RECENCY_KEYWORDS):
-        return True, "research"
+    matched = _ROUTING_AC.find_payloads(message.lower())
+    if not matched:
+        return False, "research"
+    for agent in _ROUTING_PRIORITY:
+        if agent in matched:
+            return True, agent
     return False, "research"
 
 
@@ -805,13 +1209,18 @@ _MCP_TOOL_TO_AGENT = {
 }
 
 
-def _record_agent_usage(agent_keys) -> None:
-    """Increment real task counters + last-used timestamps for agent keys."""
+async def _record_agent_usage(agent_keys) -> None:
+    """Increment real task counters + last-used timestamps for agent keys.
+
+    Mirrored to Redis so all replicas share the same counters (P0 #2).
+    """
     stats = getattr(app.state, "agent_stats", None)
     if stats is None:
-        return
-    handled = stats.setdefault("handled", {})
-    last_used = stats.setdefault("last_used", {})
+        stats = {"handled": {}, "last_used": {}}
+        app.state.agent_stats = stats
+    shared = await _load_shared_dict(_AGENT_STATS_KEY, {"handled": {}, "last_used": {}})
+    handled = shared.setdefault("handled", {})
+    last_used = shared.setdefault("last_used", {})
     # UTC-aware so the frontend can compute relative times correctly
     now = datetime.now(timezone.utc).isoformat()
     for key in agent_keys:
@@ -819,6 +1228,36 @@ def _record_agent_usage(agent_keys) -> None:
             continue
         handled[key] = handled.get(key, 0) + 1
         last_used[key] = now
+    # Keep the in-process mirror in sync for single-replica speed.
+    stats["handled"] = handled
+    stats["last_used"] = last_used
+    await _save_shared_dict(_AGENT_STATS_KEY, shared)
+
+
+async def run_agents_parallel(agent_keys, task: str, orchestrator) -> Dict[str, str]:
+    """Run multiple specialist agents concurrently and return {agent: result}.
+
+    Each agent's synchronous ``execute`` runs in its own thread so the calls
+    truly overlap (parallel LLM fan-out instead of sequential). Per-agent
+    timeouts (AGENT_TIMEOUT) and per-agent error isolation mean one slow/failed
+    agent never blocks or aborts the others.
+    """
+    async def _run(key: str):
+        agent = orchestrator.agents[key]
+        return await asyncio.wait_for(
+            asyncio.to_thread(agent.execute, task), timeout=AGENT_TIMEOUT
+        )
+
+    results = await asyncio.gather(
+        *(_run(k) for k in agent_keys), return_exceptions=True
+    )
+    out: Dict[str, str] = {}
+    for k, r in zip(agent_keys, results):
+        if isinstance(r, Exception):
+            out[k] = f"⚠️ {k.title()} agent error: {r}"
+        else:
+            out[k] = r
+    return out
 
 
 def _default_conversation_id(user_id: str) -> str:
@@ -893,7 +1332,7 @@ async def _with_context(message: str, memory, user_id: str, conversation_id: str
     if msgs is None:
         context = memory.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
     else:
-        recent = msgs[-5:]
+        recent = _window_messages(msgs)
         if not recent:
             context = "No conversation history yet."
         else:
@@ -1052,28 +1491,32 @@ def is_doc_follow_up(message: str, last_doc_query: str) -> bool:
     return any(p in m for p in _DOC_FOLLOWUP_PHRASES)
 
 
-def _get_doc_followup() -> Dict[str, str]:
-    """Lazily-created per-conversation doc-follow-up anchors."""
-    anchors = getattr(app.state, "doc_followup", None)
-    if anchors is None:
-        anchors = {}
-        app.state.doc_followup = anchors
-    return anchors
+async def _get_doc_followup() -> Dict[str, str]:
+    """Lazily-loaded, replica-shared per-conversation doc-follow-up anchors."""
+    shared = await _load_shared_dict(_DOC_FOLLOWUP_KEY, {})
+    app.state.doc_followup = shared
+    return shared
 
 
-def _set_doc_followup(conversation_id: str, message: str) -> None:
-    """Remember that this conversation last asked a document question."""
-    _get_doc_followup()[conversation_id] = message
+async def _set_doc_followup(conversation_id: str, message: str) -> None:
+    """Remember that this conversation last asked a document question.
+
+    Mirrored to Redis so follow-ups route correctly on any replica (P0 #2).
+    """
+    shared = await _load_shared_dict(_DOC_FOLLOWUP_KEY, {})
+    shared[conversation_id] = message
+    app.state.doc_followup = shared
+    await _save_shared_dict(_DOC_FOLLOWUP_KEY, shared)
 
 
-def _doc_followup_query(conversation_id: str, message: str) -> str:
+async def _doc_followup_query(conversation_id: str, message: str) -> str:
     """RAG query for a follow-up message, or "" if it is not a follow-up.
 
     Combines the original document question with the new message so the
     retriever still finds the right chunks ("summarize the CRM file
     what about the pricing column?").
     """
-    last = _get_doc_followup().get(conversation_id, "")
+    last = (await _get_doc_followup()).get(conversation_id, "")
     if is_doc_follow_up(message, last):
         return f"{last} {message}".strip()
     return ""
@@ -1334,6 +1777,33 @@ def _compare_documents(query: str, files, rag, client) -> str:
         return f"Could not compare the documents right now: {e}"
 
 
+def _retrieve_context(rag, query: str, top_k: int = 6) -> str:
+    """Retrieve the top-k most relevant chunks for a query, ranked with a heap.
+
+    Uses ``rag.search`` (scored chunks) + ``heap_top_k`` for O(n log k) ranking,
+    then formats the context. Falls back to ``rag.get_context`` (which returns
+    all documents when nothing matches) if ``search`` is unavailable or empty,
+    preserving the prior behavior exactly.
+    """
+    try:
+        chunks = rag.search(query, top_k=top_k * 3)
+    except Exception:
+        chunks = []
+    if not chunks:
+        try:
+            return rag.get_context(query, top_k=top_k)
+        except Exception:
+            return ""
+    top = heap_top_k(chunks, key=lambda c: c.get("relevance_score", 0), k=top_k)
+    context = "Relevant document excerpts:\n\n"
+    for c in top:
+        context += (
+            f"--- Source: {c.get('file', '?')} (chunk {c.get('chunk_index', '?')}) ---\n"
+            f"{c.get('content', '')}\n\n"
+        )
+    return context
+
+
 def answer_from_documents(query: str, rag) -> str:
     """Answer a question about uploaded documents with a CLEAN, LLM-written
     answer (instead of dumping raw chunk JSON / excerpts).
@@ -1358,13 +1828,19 @@ def answer_from_documents(query: str, rag) -> str:
         label = "document" if len(files) == 1 else "documents"
         return f"You have {len(files)} uploaded {label}:\n{listing}"
 
-    # Semantic Cache: serve a cached answer if one exists (skips the LLM call)
-    cached = rag.get_cached_answer(query)
+    # Fast in-memory LRU (exact-match, TTL-bounded) - checked before the LLM.
+    cached = _doc_answer_cache.get(query)
     if cached:
         return cached
 
+    # Semantic Cache: serve a cached answer if one exists (skips the LLM call)
+    cached = rag.get_cached_answer(query)
+    if cached:
+        _doc_answer_cache.put(query, cached)
+        return cached
+
     try:
-        context = rag.get_context(query)
+        context = _retrieve_context(rag, query)
     except Exception:
         context = ""
     if not context or context == "No documents have been uploaded.":
@@ -1377,7 +1853,7 @@ def answer_from_documents(query: str, rag) -> str:
     api_key = os.environ.get("GROQ_API_KEY", "") or get_secret("GROQ_API_KEY", default="")
     if not api_key:
         return context
-    client = InstrumentedGroqClient(api_key=api_key)
+    client = _get_groq_client(api_key)
 
     # Multi-document comparison: retrieve per document and answer with a
     # comparison instead of a single mixed context.
@@ -1392,7 +1868,7 @@ def answer_from_documents(query: str, rag) -> str:
         reformulated = _reformulate_doc_query(query, context, client)
         if reformulated and reformulated.lower() != query.strip().lower():
             try:
-                context2 = rag.get_context(reformulated)
+                context2 = _retrieve_context(rag, reformulated)
             except Exception:
                 context2 = ""
             if context2 and context2 != context and "No documents" not in context2:
@@ -1401,9 +1877,11 @@ def answer_from_documents(query: str, rag) -> str:
                 combined = context if context2 in context else context + "\n\n" + context2
                 answer = _ask_doc_question(client, reformulated, combined)
                 rag.cache_answer(query, answer)
+                _doc_answer_cache.put(query, answer)
                 return answer
 
     rag.cache_answer(query, first)
+    _doc_answer_cache.put(query, first)
     return first
 
 
@@ -1442,6 +1920,16 @@ async def chat(
             get_client_ip(http_request),
             f"chat message contained potentially dangerous content",
         )
+
+    # Prompt-injection detection (audit only, non-blocking). The structural
+    # defense lives in the agent modules (PROMPT_INJECTION_GUARD + delimiters);
+    # here we just flag attempts so they show up in the audit trail.
+    if detect_prompt_injection(request.message):
+        audit_logger.log_suspicious_activity(
+            "prompt_injection_attempt",
+            get_client_ip(http_request),
+            "chat message matched a prompt-injection pattern",
+        )
     
     try:
         # Check for special commands
@@ -1450,17 +1938,17 @@ async def chat(
             # Support "my name is X" format
             name_match = _NAME_PATTERN.search(content)
             if name_match:
-                facts.remember("user's name", name_match.group(1))
+                facts.remember("user's name", name_match.group(1), user_id=user_id)
                 response = f"✅ Remembered: your name is {name_match.group(1)}"
             elif "=" in content:
                 key, value = content.split("=", 1)
-                facts.remember(key.strip(), value.strip())
+                facts.remember(key.strip(), value.strip(), user_id=user_id)
                 response = f"✅ Remembered: {key.strip()} = {value.strip()}"
             else:
                 # Support "X is Y" format (e.g. "favorite color is blue")
                 is_match = _IS_PATTERN.search(content)
                 if is_match:
-                    facts.remember(is_match.group(1).strip(), is_match.group(2).strip())
+                    facts.remember(is_match.group(1).strip(), is_match.group(2).strip(), user_id=user_id)
                     response = f"✅ Remembered: {is_match.group(1).strip()} = {is_match.group(2).strip()}"
                 else:
                     response = "Usage: remember key = value, or say 'my name is X', or 'X is Y'."
@@ -1470,14 +1958,14 @@ async def chat(
             # "recall my name" → look up "user's name"
             if _NAME_PATTERN.search(key) or key.lower() in ("my name", "my name please"):
                 key = "user's name"
-            value = facts.recall(key)
+            value = facts.recall(key, user_id=user_id)
             if value:
                 response = f"✅ {key}: {value}"
             else:
                 response = f"I don't remember anything about '{key}'."
         
         elif request.message.lower() == "show facts":
-            all_facts = facts.get_all_facts()
+            all_facts = facts.get_all_facts(user_id=user_id)
             if all_facts:
                 response = "\n".join(f"- {k}: {v}" for k, v in all_facts.items())
             else:
@@ -1485,12 +1973,12 @@ async def chat(
         
         elif request.message.lower().startswith("search "):
             query = request.message[7:].strip()
-            response = rag.get_context(query)
+            response = await asyncio.wait_for(asyncio.to_thread(rag.get_context, query), timeout=DOWNSTREAM_TIMEOUT)
         
         elif detected_name:
             # Name memory: "my name is X" stores the user's name as a fact so
             # it survives across conversations and can be recalled later.
-            facts.remember("user's name", detected_name)
+            facts.remember("user's name", detected_name, user_id=user_id)
             response = f"Nice to meet you, **{detected_name}**! I've remembered your name."
             query_type = "name_introduction"
         
@@ -1499,7 +1987,7 @@ async def chat(
             # multi-agent routing in the else-branch below, which would
             # otherwise treat "what is my name?" (matches "what is") as a
             # research task and answer with a generic essay instead.
-            stored_name = facts.recall("user's name")
+            stored_name = facts.recall("user's name", user_id=user_id)
             if "don't remember" in stored_name.lower():
                 response = "I don't know your name yet. Tell me by saying something like \"My name is ...\""
             else:
@@ -1508,17 +1996,12 @@ async def chat(
         
         else:
             # Check if user is asking about a stored fact
-            all_facts = facts.get_all_facts()
-            lower_input = request.message.lower()
-            
+            all_facts = facts.get_all_facts(user_id=user_id)
+            fact_key, fact_value = _match_fact_question(all_facts, request.message)
             fact_answered = False
-            for key, value in all_facts.items():
-                key_lower = key.lower()
-                if (key_lower in lower_input and 
-                    any(phrase in lower_input for phrase in ["what", "know", "recall", "tell", "remind"])):
-                    response = f"Your {key} is **{value}**."
-                    fact_answered = True
-                    break
+            if fact_key is not None:
+                response = f"Your {fact_key} is **{fact_value}**."
+                fact_answered = True
             
             if not fact_answered:
                 # Simple greeting handler - bypass agent for simple messages
@@ -1526,19 +2009,19 @@ async def chat(
                 if is_document_question(request.message, rag):
                     # Clean answers about uploaded documents (RAG retrieval +
                     # LLM summary) instead of dumping raw chunks.
-                    response = answer_from_documents(request.message, rag)
+                    response = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, request.message, rag), timeout=DOWNSTREAM_TIMEOUT)
                     query_type = "document_question"
                     # Anchor this conversation so later messages like
                     # "what about the pricing column?" route back here.
-                    _set_doc_followup(conversation_id, request.message)
+                    await _set_doc_followup(conversation_id, request.message)
                 else:
                     # Doc-aware follow-up: message continues an earlier
                     # document question in this conversation.
-                    followup_query = _doc_followup_query(conversation_id, request.message)
+                    followup_query = await _doc_followup_query(conversation_id, request.message)
                     if followup_query:
-                        response = answer_from_documents(followup_query, rag)
+                        response = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, followup_query, rag), timeout=DOWNSTREAM_TIMEOUT)
                         query_type = "document_question"
-                    elif any(g in lower_input for g in greetings):
+                    elif any(g in request.message.lower() for g in greetings):
                         response = "Hello! How can I help you today?"
                     else:
                         # Try routing through multi-agent system for specialized tasks
@@ -1553,19 +2036,37 @@ async def chat(
                             # the clean task, not the routing directive.
                             _, clean_message = detect_agent_prefix(request.message)
                             task = await _with_context(clean_message, memory, user_id, conversation_id)
-                            response = orchestrator.agents[agent_type].execute(task)
-                            _record_agent_usage([agent_type])
+                            # Parallel LLM fan-out: when the message matches several
+                            # specialist intents, run all matched agents concurrently
+                            # (each in its own thread) and combine their answers,
+                            # instead of running them one-by-one.
+                            matched = _ROUTING_AC.find_payloads(request.message.lower())
+                            if len(matched) > 1:
+                                parallel = await run_agents_parallel(sorted(matched), task, orchestrator)
+                                response = "\n\n".join(
+                                    f"**{k.title()} Agent:**\n{v}" for k, v in parallel.items()
+                                )
+                                await _record_agent_usage(sorted(matched))
+                            else:
+                                response = await asyncio.wait_for(
+                                    asyncio.to_thread(orchestrator.agents[agent_type].execute, task),
+                                    timeout=AGENT_TIMEOUT,
+                                )
+                                await _record_agent_usage([agent_type])
                         else:
                             # Fall back to general ReAct agent (it injects this
                             # conversation's recent history + facts internally, so
                             # follow-ups about earlier messages work).
                             from llama_agent1 import run_agent
-                            response = await run_agent(
-                                request.message,
-                                memory=memory,
-                                facts=facts,
-                                user_id=user_id,
-                                conversation_id=conversation_id,
+                            response = await asyncio.wait_for(
+                                run_agent(
+                                    request.message,
+                                    memory=memory,
+                                    facts=facts,
+                                    user_id=user_id,
+                                    conversation_id=conversation_id,
+                                ),
+                                timeout=AGENT_TIMEOUT,
                             )
         
         # Calculate response time
@@ -1579,7 +2080,7 @@ async def chat(
         
         # Enterprise monitoring: business metrics + SLA + alert sweep
         business_metrics.record_question(
-            user_id=request.user_id,
+            user_id=user_id,
             success=True,
             response_time=elapsed,
             query_type=query_type,
@@ -1600,12 +2101,12 @@ async def chat(
         elapsed = (datetime.now() - start_time).total_seconds()
         sla_monitor.record_error("agent_error", str(e))
         business_metrics.record_question(
-            user_id=request.user_id,
+            user_id=user_id,
             success=False,
             response_time=elapsed,
             query_type="error",
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ STREAMING CHAT (SSE) ============
@@ -1630,6 +2131,44 @@ async def chat_stream(
     conversation_id = request.conversation_id or _default_conversation_id(user_id)
 
     async def event_generator():
+        # Hard cap on total stream duration (see STREAM_MAX_DURATION). The agent
+        # streaming loops below are synchronous generators, so we check elapsed
+        # time between yielded chunks and stop cleanly if the cap is exceeded.
+        start = time.monotonic()
+
+        # Resolve DSA feature config (request overrides server env defaults).
+        # Surfaced to the UI as a `config` SSE event so the control panel and
+        # the live reasoning view stay in sync with what actually ran.
+        critic = (
+            request.use_critic
+            if request.use_critic is not None
+            else (os.getenv("AGENT_CRITIQUE", "1") == "1")
+        )
+        reflect = (
+            request.use_reflection
+            if request.use_reflection is not None
+            else (os.getenv("AGENT_REFLECT", "1") == "1")
+        )
+        parallel = (
+            request.use_parallel
+            if request.use_parallel is not None
+            else True
+        )
+        agent_override = request.agent
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "config",
+                    "critic": critic,
+                    "reflection": reflect,
+                    "parallel": parallel,
+                    "agent": agent_override,
+                }
+            )
+            + "\n\n"
+        )
+
         # Helper: record the assistant reply, emit it, then signal stream end.
         async def done(text: str):
             await _persist_message(user_id, conversation_id, "assistant", text)
@@ -1642,7 +2181,7 @@ async def chat_stream(
             await _persist_message(user_id, conversation_id, "user", request.message)
             if "=" in content:
                 key, value = content.split("=", 1)
-                facts.remember(key.strip(), value.strip())
+                facts.remember(key.strip(), value.strip(), user_id=user_id)
                 reply = f"✅ Remembered: {key.strip()} = {value.strip()}"
             else:
                 reply = "Usage: remember key = value"
@@ -1653,14 +2192,14 @@ async def chat_stream(
         elif request.message.lower().startswith("recall "):
             key = request.message[7:].strip()
             await _persist_message(user_id, conversation_id, "user", request.message)
-            result = facts.recall(key)
+            result = facts.recall(key, user_id=user_id)
             async for chunk in done(result):
                 yield chunk
             return
 
         elif request.message.lower() == "show facts":
             await _persist_message(user_id, conversation_id, "user", request.message)
-            all_facts = facts.get_all_facts()
+            all_facts = facts.get_all_facts(user_id=user_id)
             result = "\n".join(f"- {k}: {v}" for k, v in all_facts.items()) if all_facts else "No facts stored."
             async for chunk in done(result):
                 yield chunk
@@ -1669,7 +2208,7 @@ async def chat_stream(
         elif request.message.lower().startswith("search "):
             query = request.message[7:].strip()
             await _persist_message(user_id, conversation_id, "user", request.message)
-            result = rag.get_context(query)
+            result = await asyncio.wait_for(asyncio.to_thread(rag.get_context, query), timeout=DOWNSTREAM_TIMEOUT)
             async for chunk in done(result):
                 yield chunk
             return
@@ -1681,7 +2220,7 @@ async def chat_stream(
         detected_name = extract_name_from_message(request.message)
         if detected_name:
             await _persist_message(user_id, conversation_id, "user", request.message)
-            facts.remember("user's name", detected_name)
+            facts.remember("user's name", detected_name, user_id=user_id)
             reply = f"Nice to meet you, **{detected_name}**! I've remembered your name."
             async for chunk in done(reply):
                 yield chunk
@@ -1689,7 +2228,7 @@ async def chat_stream(
 
         if is_name_question(request.message):
             await _persist_message(user_id, conversation_id, "user", request.message)
-            stored_name = facts.recall("user's name")
+            stored_name = facts.recall("user's name", user_id=user_id)
             if "don't remember" in stored_name.lower():
                 reply = "I don't know your name yet. Tell me by saying something like \"My name is ...\""
             else:
@@ -1699,35 +2238,32 @@ async def chat_stream(
             return
 
         # Check facts
-        all_facts = facts.get_all_facts()
-        lower_input = request.message.lower()
-        for key, value in all_facts.items():
-            key_lower = key.lower()
-            if (key_lower in lower_input and
-                any(phrase in lower_input for phrase in ["what", "know", "recall", "tell", "remind"])):
-                await _persist_message(user_id, conversation_id, "user", request.message)
-                reply = f"Your {key} is **{value}**."
-                async for chunk in done(reply):
-                    yield chunk
-                return
+        all_facts = facts.get_all_facts(user_id=user_id)
+        fact_key, fact_value = _match_fact_question(all_facts, request.message)
+        if fact_key is not None:
+            await _persist_message(user_id, conversation_id, "user", request.message)
+            reply = f"Your {fact_key} is **{fact_value}**."
+            async for chunk in done(reply):
+                yield chunk
+            return
 
         # Clean answers about uploaded documents (RAG + LLM summary)
         if is_document_question(request.message, rag):
             await _persist_message(user_id, conversation_id, "user", request.message)
-            result = answer_from_documents(request.message, rag)
+            result = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, request.message, rag), timeout=DOWNSTREAM_TIMEOUT)
             # Anchor this conversation so later messages like
             # "what about the pricing column?" route back here.
-            _set_doc_followup(conversation_id, request.message)
+            await _set_doc_followup(conversation_id, request.message)
             async for chunk in done(result):
                 yield chunk
             return
 
         # Doc-aware follow-up: message continues an earlier document
         # question in this conversation (e.g. "and the pricing column?").
-        followup_query = _doc_followup_query(conversation_id, request.message)
+        followup_query = await _doc_followup_query(conversation_id, request.message)
         if followup_query:
             await _persist_message(user_id, conversation_id, "user", request.message)
-            result = answer_from_documents(followup_query, rag)
+            result = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, followup_query, rag), timeout=DOWNSTREAM_TIMEOUT)
             async for chunk in done(result):
                 yield chunk
             return
@@ -1744,13 +2280,30 @@ async def chat_stream(
             # earlier messages work.
             await _persist_message(user_id, conversation_id, "user", request.message)
             orchestrator = MultiAgentOrchestrator()
+            # Honor an explicit agent selection from the UI control panel.
+            if agent_override and agent_override in orchestrator.agents:
+                agent_type = agent_override
             # Strip @Agent prefix so the agent sees the clean task.
             _, clean_message = detect_agent_prefix(request.message)
             task = await _with_context(clean_message, memory, user_id, conversation_id)
             agent = orchestrator.agents[agent_type]
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "reasoning",
+                        "stage": "route",
+                        "content": f"Routing to {agent.name} agent",
+                    }
+                )
+                + "\n\n"
+            )
             full = ""
             try:
                 for event in agent.execute_stream(task):
+                    if time.monotonic() - start > STREAM_MAX_DURATION:
+                        yield f"data: {escape_sse(f'⚠️ Stream timed out after {int(STREAM_MAX_DURATION)}s.')}\n\n"
+                        break
                     if event.get("type") == "tool":
                         yield f"data: {escape_sse(event['content'])}\n\n"
                     else:
@@ -1759,11 +2312,36 @@ async def chat_stream(
             except Exception as e:
                 full = f"⚠️ Error from {agent_type} agent: {e}"
                 yield f"data: {escape_sse(full)}\n\n"
+            # DSA: critic pass on the produced answer (when enabled).
+            if critic and full and not full.startswith("⚠️"):
+                try:
+                    note = orchestrator.agents["analyzer"].critique(task, full)
+                    if note:
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {"type": "reasoning", "stage": "critic", "content": note}
+                            )
+                            + "\n\n"
+                        )
+                except Exception:
+                    pass
             await _persist_message(user_id, conversation_id, "assistant", full)
             yield "data: [DONE]\n\n"
         else:
             # Stream from general ReAct agent (it reads + writes the SAME memory
             # instances, so the response is saved to this user's conversation).
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "reasoning",
+                        "stage": "route",
+                        "content": "Llama Agent is thinking",
+                    }
+                )
+                + "\n\n"
+            )
             full_response = ""
             for token in run_agent_stream(
                 request.message,
@@ -1772,6 +2350,9 @@ async def chat_stream(
                 user_id=user_id,
                 conversation_id=conversation_id,
             ):
+                if time.monotonic() - start > STREAM_MAX_DURATION:
+                    yield f"data: {escape_sse(f'⚠️ Stream timed out after {int(STREAM_MAX_DURATION)}s.')}\n\n"
+                    break
                 full_response += token
                 yield f"data: {escape_sse(token)}\n\n"
             # The agent already wrote both messages to the JSON memory store;
@@ -1793,55 +2374,63 @@ async def chat_stream(
 
 
 def escape_sse(text: str) -> str:
-    """Escape text for SSE (replace newlines)."""
-    return text.replace("\n", "\\n")
+    """Escape text for SSE.
+
+    SSE data lines must not contain raw CR/LF (they would break the
+    line framing). Escape both so multi-line tokens stream safely.
+    """
+    return text.replace("\r", "\\r").replace("\n", "\\n")
 
 
 # ============ FACTS ENDPOINTS ============
 
 
 @app.post("/remember")
-async def remember_fact(request: RememberRequest):
+async def remember_fact(request: RememberRequest, user = Depends(optional_auth)):
     """Remember a fact"""
     try:
         facts = app.state.facts
-        facts.remember(request.key, request.value)
+        user_id = str(user["id"]) if user else "guest"
+        facts.remember(request.key, request.value, user_id=user_id)
         return {"status": "success", "message": f"Remembered: {request.key} = {request.value}"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/recall")
-async def recall_fact(request: RecallRequest):
+async def recall_fact(request: RecallRequest, user = Depends(optional_auth)):
     """Recall a fact"""
     try:
         facts = app.state.facts
-        value = facts.recall(request.key)
+        user_id = str(user["id"]) if user else "guest"
+        value = facts.recall(request.key, user_id=user_id)
         return {"key": request.key, "value": value}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/facts")
-async def list_facts():
+async def list_facts(user = Depends(optional_auth)):
     """List all facts"""
     try:
         facts = app.state.facts
-        all_facts = facts.get_all_facts()
+        user_id = str(user["id"]) if user else "guest"
+        all_facts = facts.get_all_facts(user_id=user_id)
         return {"facts": all_facts}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.delete("/facts/{key}")
-async def delete_fact(key: str):
+async def delete_fact(key: str, user = Depends(optional_auth)):
     """Delete a fact"""
     try:
         facts = app.state.facts
-        facts.forget(key)
+        user_id = str(user["id"]) if user else "guest"
+        facts.forget(key, user_id=user_id)
         return {"status": "success", "message": f"Deleted: {key}"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ DOCUMENTS ENDPOINTS ============
@@ -1877,7 +2466,7 @@ async def read_document(file_path: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/documents/upload")
@@ -1933,7 +2522,7 @@ async def upload_document(file: UploadFile = File(...), user: Optional[Dict] = D
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/documents/search")
@@ -1941,10 +2530,10 @@ async def search_documents(request: SearchRequest):
     """Search documents (raw retrieval, for power users)"""
     try:
         rag = app.state.rag
-        results = rag.search(request.query, top_k=request.top_k)
+        results = await asyncio.wait_for(asyncio.to_thread(rag.search, request.query, top_k=request.top_k), timeout=DOWNSTREAM_TIMEOUT)
         return {"query": request.query, "results": results}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/documents/ask")
@@ -1953,10 +2542,10 @@ async def ask_documents(request: SearchRequest):
     answer (instead of raw chunk JSON)."""
     try:
         rag = app.state.rag
-        answer = answer_from_documents(request.query, rag)
+        answer = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, request.query, rag), timeout=DOWNSTREAM_TIMEOUT)
         return {"query": request.query, "answer": answer}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/documents")
@@ -1967,19 +2556,22 @@ async def list_documents():
         docs = rag.list_documents()
         return {"documents": docs}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ MEMORY ENDPOINTS ============
 
 
 @app.get("/memory")
-async def get_memory(user = Depends(optional_auth)):
+async def get_memory(
+    user = Depends(optional_auth),
+    limit: int = 50,
+):
     """Get conversation memory (scoped to the current user)"""
     try:
         memory = app.state.memory
         user_id = str(user["id"]) if user else "guest"
-        recent = memory.get_recent(20, user_id=user_id)
+        recent = memory.get_recent(min(max(1, limit), 200), user_id=user_id)
         stats = memory.get_stats()
         conversations = await _list_conversations_for(user_id, memory)
         return {
@@ -1988,7 +2580,7 @@ async def get_memory(user = Depends(optional_auth)):
             "conversations": conversations,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.delete("/memory")
@@ -2000,13 +2592,13 @@ async def clear_memory(user = Depends(optional_auth)):
         facts = app.state.facts
         user_id = str(user["id"]) if user else "guest"
         memory.clear(user_id=user_id)
-        facts.clear()
+        facts.clear(user_id=user_id)
         # Clear the durable store + caches too so the sidebar matches.
         await pg_store.clear_user(user_id)
         await redis_store.invalidate_user(user_id)
         return {"status": "success", "message": f"Memory cleared for {user_id}"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ CONVERSATION ENDPOINTS ============
@@ -2016,8 +2608,12 @@ async def clear_memory(user = Depends(optional_auth)):
 
 
 @app.get("/conversations")
-async def list_conversations(user = Depends(optional_auth)):
-    """List the current user's conversations (newest first).
+async def list_conversations(
+    user = Depends(optional_auth),
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List the current user's conversations (newest first), paginated.
 
     Read path: Redis cache -> PostgreSQL (durable store) -> JSON memory store.
     Legacy memory conversations are merged in so pre-mirror history is shown.
@@ -2026,9 +2622,17 @@ async def list_conversations(user = Depends(optional_auth)):
         memory = app.state.memory
         user_id = str(user["id"]) if user else "guest"
         convs = await _list_conversations_for(user_id, memory)
-        return {"conversations": convs}
+        total = len(convs)
+        limit = max(1, min(limit, 200))
+        offset = max(0, offset)
+        return {
+            "conversations": convs[offset:offset + limit],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/conversations/{conversation_id}")
@@ -2061,7 +2665,7 @@ async def get_conversation(conversation_id: str, user = Depends(optional_auth)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class CreateConversationRequest(BaseModel):
@@ -2085,7 +2689,7 @@ async def create_conversation(request: CreateConversationRequest = None,
         await redis_store.invalidate_user(user_id)
         return conv
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.delete("/conversations/{conversation_id}")
@@ -2105,7 +2709,7 @@ async def delete_conversation(conversation_id: str, user = Depends(optional_auth
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ METRICS ENDPOINTS ============
@@ -2129,7 +2733,7 @@ async def get_metrics_json():
         
         return {"health": health, "metrics": metrics}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/monitoring/dashboard")
@@ -2152,7 +2756,7 @@ async def monitoring_dashboard():
         }
         return dashboard
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/agents/stats")
@@ -2164,7 +2768,7 @@ async def agent_team_stats(user = Depends(optional_auth)):
     live performance monitor. Nothing is simulated.
     """
     try:
-        stats = getattr(app.state, "agent_stats", {})
+        stats = await _load_shared_dict(_AGENT_STATS_KEY, {"handled": {}, "last_used": {}})
         handled = stats.get("handled", {})
         last_used = stats.get("last_used", {})
         health = app.state.monitor.get_health()
@@ -2187,7 +2791,7 @@ async def agent_team_stats(user = Depends(optional_auth)):
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/tools")
@@ -2233,7 +2837,7 @@ async def mcp_status(user = Depends(optional_auth)):
     except Exception as e:
         raise HTTPException(
             status_code=503,
-            detail=f"MCP server unreachable at {MCP_SERVER_URL}: {e}",
+            detail="MCP server unreachable",
         )
 
 
@@ -2251,12 +2855,23 @@ async def mcp_tool_call(request: MCPToolRequest, user = Depends(optional_auth)):
     # Track real usage for the Agent Team dashboard (team_status runs no agent)
     agent_keys = _MCP_TOOL_TO_AGENT.get(request.name)
     if agent_keys:
-        _record_agent_usage(agent_keys)
+        await _record_agent_usage(agent_keys)
     app.state.monitor.track_request()
+    if _mcp_circuit_open():
+        raise HTTPException(status_code=503, detail="MCP server temporarily unavailable")
     try:
-        return await call_mcp_tool(request.name, request.arguments)
+        result = await asyncio.wait_for(
+            call_mcp_tool(request.name, request.arguments), timeout=MCP_TIMEOUT
+        )
+        _mcp_record_success()
+        return result
+    except asyncio.TimeoutError:
+        _mcp_record_failure()
+        app.state.monitor.track_error()
+        raise HTTPException(status_code=504, detail="MCP tool call timed out")
     except HTTPException:
         raise
     except Exception as e:
+        _mcp_record_failure()
         app.state.monitor.track_error()
-        raise HTTPException(status_code=502, detail=f"MCP tool call failed: {e}")
+        raise HTTPException(status_code=502, detail="MCP tool call failed")

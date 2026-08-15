@@ -13,6 +13,8 @@ import math
 import operator
 import os
 import re
+import time
+import uuid
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -268,10 +270,15 @@ import threading
 
 class SimpleRateLimiter:
     """
-    Simple in-memory rate limiter.
-    For production, use Redis-based rate limiting.
+    Rate limiter with an in-memory fallback and optional Redis backing.
+
+    When REDIS_URL is configured AND reachable, request counts live in Redis so
+    the limit is enforced across all API replicas (a single in-process limiter
+    can be bypassed by hitting a different pod). Falls back to the in-memory
+    store when Redis is unavailable (degraded single-process mode, identical to
+    the original behavior).
     """
-    
+
     def __init__(
         self,
         requests_per_minute: int = 60,
@@ -281,41 +288,88 @@ class SimpleRateLimiter:
         self.requests_per_hour = requests_per_hour
         self._requests = defaultdict(list)
         self._lock = threading.Lock()
-    
+        self._redis = None
+        self._redis_checked = False
+
+    def _get_redis(self):
+        """Lazily connect to Redis (best-effort). Returns client or None."""
+        if self._redis_checked:
+            return self._redis
+        self._redis_checked = True
+        redis_url = os.getenv("REDIS_URL")
+        if not redis_url:
+            return None
+        try:
+            import redis
+            client = redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=2)
+            client.ping()
+            self._redis = client
+        except Exception:
+            self._redis = None
+        return self._redis
+
     def _cleanup(self, key: str):
-        """Remove old entries"""
+        """Remove old entries (in-memory path)"""
         now = datetime.now()
         cutoff_minute = now - timedelta(minutes=1)
         cutoff_hour = now - timedelta(hours=1)
-        
+
         self._requests[key] = [
             ts for ts in self._requests[key]
             if ts > cutoff_hour
         ]
-    
+
     def is_rate_limited(self, key: str) -> Tuple[bool, str]:
         """
         Check if a key (e.g., IP address, user ID) is rate limited.
-        
+
         Returns:
             (is_limited, message)
         """
+        r = self._get_redis()
+        if r is not None:
+            try:
+                return self._is_rate_limited_redis(r, key)
+            except Exception:
+                # Redis error -> fall back to in-memory so the service keeps
+                # working (degraded, per-process limiting only).
+                pass
+        return self._is_rate_limited_memory(key)
+
+    def _is_rate_limited_redis(self, r, key: str) -> Tuple[bool, str]:
+        now = time.time()
+        zkey = f"ratelimit:{key}"
+        member = f"{now}:{uuid.uuid4().hex}"
+        pipe = r.pipeline()
+        pipe.zremrangebyscore(zkey, 0, now - 3600)  # drop entries older than 1h
+        pipe.zadd(zkey, {member: now})
+        pipe.expire(zkey, 3600)
+        pipe.zcard(zkey)                  # total requests in the last hour
+        pipe.zcount(zkey, now - 60, now)  # requests in the last minute
+        _, _, _, hour_count, minute_count = pipe.execute()
+        if minute_count > self.requests_per_minute:
+            return True, f"Rate limit: {self.requests_per_minute} requests per minute"
+        if hour_count > self.requests_per_hour:
+            return True, f"Rate limit: {self.requests_per_hour} requests per hour"
+        return False, ""
+
+    def _is_rate_limited_memory(self, key: str) -> Tuple[bool, str]:
         with self._lock:
             self._cleanup(key)
             now = datetime.now()
             cutoff_minute = now - timedelta(minutes=1)
             cutoff_hour = now - timedelta(hours=1)
-            
+
             # Count requests in last minute
             recent_minute = sum(1 for ts in self._requests[key] if ts > cutoff_minute)
             if recent_minute >= self.requests_per_minute:
                 return True, f"Rate limit: {self.requests_per_minute} requests per minute"
-            
+
             # Count requests in last hour
             recent_hour = len(self._requests[key])
             if recent_hour >= self.requests_per_hour:
                 return True, f"Rate limit: {self.requests_per_hour} requests per hour"
-            
+
             # Record this request
             self._requests[key].append(now)
             return False, ""

@@ -25,11 +25,22 @@ Architecture:
 import streamlit as st
 import streamlit.components.v1 as components
 import asyncio
+import json
+import logging
 import os
 import sys
 import uuid
 import tempfile
 from datetime import datetime
+
+logging.basicConfig(level=logging.INFO)
+_logger = logging.getLogger("app")
+
+# Bounds + timeouts (defense against abuse / premature timeouts).
+_APP_CHAT_MAX = int(os.getenv("APP_CHAT_MAX", "10000"))
+# Must be >= the MCP server's per-tool backstop (MCP_TOOL_TIMEOUT, default 120s)
+# so multi-agent collaborations are not cut off early by the Streamlit layer.
+_MCP_CALL_TIMEOUT = float(os.getenv("MCP_CALL_TIMEOUT", "180"))
 
 # Synchronous PostgreSQL connections (no async needed in Streamlit)
 import psycopg2
@@ -142,9 +153,10 @@ def _db_get_or_create_user(username: str, email: str, password: str):
             )
             conn.commit()
             return {"id": user_id, "username": username}, None
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        return None, str(e)
+        _logger.exception("User registration failed")
+        return None, "Registration failed. Please try again."
     finally:
         conn.close()
 
@@ -302,7 +314,7 @@ def _run_async(coro):
             finally:
                 loop.close()
         future = pool.submit(_target)
-        return future.result(timeout=60)
+        return future.result(timeout=_MCP_CALL_TIMEOUT)
 
 
 def connect_mcp():
@@ -689,8 +701,9 @@ async def process_message(user_input: str, doc_context: str = "", force_agent: s
         memory.add_message("assistant", str(result))
         return str(result), agent
 
-    except Exception as e:
-        return f"Error: {str(e)}", None
+    except Exception:
+        _logger.exception("process_message failed")
+        return "⚠️ Sorry, I couldn't process that request. Please try again.", None
 
 
 def _route_command(user_input: str) -> str:
@@ -793,16 +806,20 @@ def main():
         return
 
     # ---- LOGGED IN: show chat ----
-    display_sidebar()
+    try:
+        display_sidebar()
 
-    st.title("Llama Agent")
+        st.title("Llama Agent")
 
-    if st.session_state.get("chat_mode") == "websocket":
-        st.markdown("*Real-time chat via WebSocket (multi-user, live updates)*")
-        _render_websocket_chat()
-    else:
-        st.markdown("*AI Agent with Memory, RAG, and a Multi-Agent Team via MCP*")
-        _render_standard_chat()
+        if st.session_state.get("chat_mode") == "websocket":
+            st.markdown("*Real-time chat via WebSocket (multi-user, live updates)*")
+            _render_websocket_chat()
+        else:
+            st.markdown("*AI Agent with Memory, RAG, and a Multi-Agent Team via MCP*")
+            _render_standard_chat()
+    except Exception:
+        _logger.exception("Unhandled error in chat UI")
+        st.error("⚠️ Something went wrong while rendering the chat. Please refresh the page.")
 
 
 def _render_standard_chat():
@@ -819,6 +836,10 @@ def _render_standard_chat():
 
     # Chat input
     if prompt := st.chat_input("Ask me anything..."):
+        # Bound input size to contain token cost / abuse.
+        if len(prompt) > _APP_CHAT_MAX:
+            st.warning(f"Message is too long (max {_APP_CHAT_MAX} characters). Please shorten it.")
+            return
         # Add user message
         timestamp = datetime.now().strftime("%H:%M:%S")
         st.session_state.messages.append({
@@ -1032,8 +1053,8 @@ def _render_websocket_chat():
     </div>
 
     <script>
-        const WS_URL = "{ws_url}";
-        const USER_ID = "{user_id}";
+        const WS_URL = {json.dumps(ws_url)};
+        const USER_ID = {json.dumps(user_id)};
         let ws = null;
         let reconnectTimer = null;
 

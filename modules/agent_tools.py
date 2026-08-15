@@ -310,7 +310,7 @@ def run_tool_rounds(client, model: str, messages: List[dict],
                     messages.append({
                         "role": "tool",
                         "tool_call_id": f"call_t{i}",
-                        "content": str(result),
+                        "content": f"<<UNTRUSTED_DATA>>\n{result}\n<</UNTRUSTED_DATA>>",
                     })
                 continue
             # Narration-only frame ("I'll search for the latest news...")
@@ -361,7 +361,7 @@ def run_tool_rounds(client, model: str, messages: List[dict],
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": str(result),
+                "content": f"<<UNTRUSTED_DATA>>\n{result}\n<</UNTRUSTED_DATA>>",
             })
 
     # Iteration cap reached without a final answer.
