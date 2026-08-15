@@ -367,23 +367,32 @@ class BaseAgent:
         yield from _tokens(stream)
     
     def think(self, task: str) -> str:
-        """Think about a task"""
+        """Think about a task (user input is treated as untrusted data)."""
         messages = [
-            {"role": "system", "content": f"You are {self.name}, a {self.role}. Think step by step."},
-            {"role": "user", "content": task}
+            {"role": "system", "content": (
+                f"You are {self.name}, a {self.role}. Think step by step.\n\n"
+                + PROMPT_INJECTION_GUARD
+            )},
+            {"role": "user", "content": f"<<UNTRUSTED_DATA>>\n{task}\n<</UNTRUSTED_DATA>>"}
         ]
-        
-        response = self._chat(messages)
-        
-        return response.choices[0].message.content
+        try:
+            response = self._chat(messages)
+            return response.choices[0].message.content or ""
+        except Exception:
+            return ""
     
     def execute(self, task: str) -> str:
         """Execute a task"""
         raise NotImplementedError
     
     def remember(self, key: str, value: str):
-        """Remember something"""
+        """Remember something (memory is capped to bound growth per instance)."""
         self.memory.append({"key": key, "value": value, "timestamp": datetime.now().isoformat()})
+        # Keep only the most recent entries so a long-lived agent instance can't
+        # grow its in-memory log without bound.
+        max_items = int(os.getenv("AGENT_MEMORY_MAX", "200"))
+        if len(self.memory) > max_items:
+            self.memory = self.memory[-max_items:]
     
     def recall(self, key: str) -> Optional[str]:
         """Recall something"""
@@ -575,97 +584,113 @@ class MultiAgentOrchestrator:
         self.task_history: List[Dict] = []
     
     def route_task(self, task: str) -> str:
-        """Route a task to the appropriate agent"""
-        
-        # Analyze which agent should handle this task
-        routing_prompt = f"""Given this task: "{task}"
+        """Route a task to the appropriate agent.
 
-Which agent should handle it?
-- research: For gathering information, facts, research
-- coder: For writing code, debugging, programming
-- writer: For writing content, articles, text
-- analyzer: For analyzing data, patterns, insights
-- planner: For creating plans, strategies, steps
+        The user task is treated as untrusted data even inside the routing
+        prompt, and routing failures degrade gracefully to the research agent
+        instead of raising.
+        """
+        # The task is delimited as untrusted data so a user cannot inject
+        # routing instructions into the prompt.
+        routing_prompt = (
+            "Given this task, decide which specialist should handle it.\n"
+            "Respond with ONLY the agent name "
+            "(research/coder/writer/analyzer/planner).\n\n"
+            "Task:\n<<UNTRUSTED_DATA>>\n" + task + "\n<</UNTRUSTED_DATA>>"
+        )
 
-Respond with ONLY the agent name (research/coder/writer/analyzer/planner)."""
-        
         # Use Groq to determine routing (cheap helper call -> fast tier).
         # Through the instrumented client so the routing call also shows up
         # as a GroqLLM.* span in Phoenix.
-        client = InstrumentedGroqClient(api_key=os.getenv("GROQ_API_KEY"))
-        response = client.chat.completions.create(
-            model=resolve_model("fast"),
-            messages=[
-                {"role": "system", "content": "You are a task router."},
-                {"role": "user", "content": routing_prompt}
-            ],
-            max_tokens=20
-        )
-        
-        agent_name = response.choices[0].message.content.strip().lower()
-        
-        # Map to agent
-        agent_mapping = {
-            "research": "research",
-            "coder": "coder",
-            "writer": "writer",
-            "analyzer": "analyzer",
-            "planner": "planner"
-        }
-        
-        agent_key = agent_mapping.get(agent_name, "research")
+        agent_key = "research"  # safe default if routing fails
+        try:
+            client = InstrumentedGroqClient(api_key=os.getenv("GROQ_API_KEY"))
+            response = client.chat.completions.create(
+                model=resolve_model("fast"),
+                messages=[
+                    {"role": "system", "content": "You are a task router."},
+                    {"role": "user", "content": routing_prompt}
+                ],
+                max_tokens=20
+            )
+            agent_name = (getattr(response.choices[0].message, "content", "") or "").strip().lower()
+            agent_mapping = {
+                "research": "research",
+                "coder": "coder",
+                "writer": "writer",
+                "analyzer": "analyzer",
+                "planner": "planner",
+            }
+            agent_key = agent_mapping.get(agent_name, "research")
+        except Exception:
+            # Routing call failed (rate limit / network) - fall back to research.
+            agent_key = "research"
+
         agent = self.agents[agent_key]
-        
+
         # Execute task
         result = agent.execute(task)
-        
-        # Log task
+
+        # Log task (history is capped to bound growth per orchestrator instance)
         self.task_history.append({
             "task": task,
             "agent": agent.name,
             "result_preview": result[:200],
             "timestamp": datetime.now().isoformat()
         })
-        
+        max_hist = int(os.getenv("ORCH_HISTORY_MAX", "200"))
+        if len(self.task_history) > max_hist:
+            self.task_history = self.task_history[-max_hist:]
+
         return f"🤖 **{agent.name}** handled this task:\n\n{result}"
     
     def collaborate(self, task: str) -> str:
-        """Multiple agents collaborate on a complex task"""
-        
+        """Multiple agents collaborate on a complex task.
+
+        Each agent step is isolated: a failure in one step yields a degraded
+        placeholder instead of aborting the whole collaboration. Agent outputs
+        are passed to later steps as untrusted data to contain any injected
+        content that slipped through an earlier step.
+        """
         results = {}
-        
+
+        def _safe_execute(key: str, prompt: str) -> str:
+            try:
+                return self.agents[key].execute(prompt)
+            except Exception:
+                return f"[The {key} agent could not complete this step.]"
+
         # Step 1: Planner creates a plan
-        plan = self.agents["planner"].execute(f"Create a plan for: {task}")
+        plan = _safe_execute("planner", f"Create a plan for: {task}")
         results["plan"] = plan
-        
+
         # Step 2: Research agent gathers info
-        research = self.agents["research"].execute(f"Research for this task: {task}")
+        research = _safe_execute("research", f"Research for this task: {task}")
         results["research"] = research
-        
+
         # Step 3: If coding needed, coder writes code
         if any(word in task.lower() for word in ["code", "program", "function", "script"]):
-            code = self.agents["coder"].execute(f"Write code for: {task}")
-            results["code"] = code
-        
+            results["code"] = _safe_execute("coder", f"Write code for: {task}")
+
         # Step 4: If content needed, writer writes
         if any(word in task.lower() for word in ["write", "content", "article", "document"]):
-            content = self.agents["writer"].execute(f"Write content for: {task}")
-            results["content"] = content
-        
-        # Step 5: Analyzer reviews everything
-        analysis = self.agents["analyzer"].execute(
-            f"Analyze these results and provide summary:\n"
-            f"Plan: {plan[:500]}\n"
-            f"Research: {research[:500]}"
+            results["content"] = _safe_execute("writer", f"Write content for: {task}")
+
+        # Step 5: Analyzer reviews everything. Plan/research are agent-produced
+        # text, so delimit them as untrusted data before feeding to the analyzer.
+        analysis = _safe_execute(
+            "analyzer",
+            "Analyze these results and provide a summary:\n"
+            "Plan:\n<<UNTRUSTED_DATA>>\n" + plan[:500] + "\n<</UNTRUSTED_DATA>>\n\n"
+            "Research:\n<<UNTRUSTED_DATA>>\n" + research[:500] + "\n<</UNTRUSTED_DATA>>"
         )
         results["analysis"] = analysis
-        
+
         # Combine results
         final_result = "🎯 **Multi-Agent Collaboration Result:**\n\n"
-        
         for key, value in results.items():
             final_result += f"### {key.title()}:\n{value}\n\n---\n\n"
-        
+
         return final_result
     
     def get_team_status(self) -> str:
