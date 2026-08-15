@@ -36,6 +36,12 @@ from mcp.server.transport_security import TransportSecuritySettings
 # Import our multi-agent system
 from multi_agent import MultiAgentOrchestrator
 from modules.secrets import get_secret
+from modules.security_hardening import detect_prompt_injection
+import logging
+from concurrent.futures import ThreadPoolExecutor
+
+logging.basicConfig(level=logging.INFO)
+_logger = logging.getLogger("mcp_agents_server")
 
 # Load GROQ_API_KEY from Docker secret file or env var
 _groq_key = get_secret("GROQ_API_KEY", default=os.getenv("GROQ_API_KEY", ""))
@@ -84,6 +90,76 @@ def _orchestrator():
     return MultiAgentOrchestrator()
 
 
+# ============ INPUT VALIDATION + SAFE EXECUTION (Tier-1 hardening) ============
+
+# Bound task size to contain token cost / abuse; reject empty input.
+_MCP_TASK_MAX = int(os.getenv("MCP_TASK_MAX", "10000"))
+# Backstop timeout so a hung upstream call can never wedge an MCP tool call.
+_MCP_TOOL_TIMEOUT = float(os.getenv("MCP_TOOL_TIMEOUT", "120"))
+_tool_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcp-tool")
+
+
+def _guard_task(task) -> str:
+    """Validate and normalize an incoming task; raise ValueError if invalid."""
+    if not isinstance(task, str) or not task.strip():
+        raise ValueError("task must be a non-empty string")
+    if len(task) > _MCP_TASK_MAX:
+        raise ValueError(f"task is too long (max {_MCP_TASK_MAX} characters)")
+    return task
+
+
+def _audit_injection(task: str) -> None:
+    """Defense-in-depth: log (do not block) detected injection attempts.
+
+    The agents already delimit untrusted data and scan hand-offs, so this is
+    purely an observability signal, matching api.py's audit-only posture.
+    """
+    if detect_prompt_injection(task):
+        _logger.warning("Potential prompt-injection detected in MCP task input")
+
+
+def _run_with_timeout(func):
+    """Run func in a worker thread; return a safe message on timeout/error.
+
+    The submitted task keeps running until the underlying call finishes (the
+    Groq SDK has its own timeout), so this is a backstop, not a hard cancel.
+    """
+    fut = _tool_executor.submit(func)
+    try:
+        return fut.result(timeout=_MCP_TOOL_TIMEOUT)
+    except TimeoutError:
+        return ("⚠️ The request timed out. Please try a shorter or simpler task, "
+                "or split it into smaller requests.")
+    except Exception:
+        return "⚠️ The agent could not complete that request right now. Please try again."
+
+
+def _execute_agent(key: str, task: str) -> str:
+    agent = _orchestrator().agents[key]
+    result = agent.execute(task)
+    return f"**{agent.name}** handled this task:\n\n{result}"
+
+
+def _run_agent(key: str, task: str) -> str:
+    """Execute one agent with validation, injection audit, and safe error masking."""
+    try:
+        _guard_task(task)
+    except ValueError as e:
+        return f"⚠️ {e}"
+    _audit_injection(task)
+    return _run_with_timeout(lambda: _execute_agent(key, task))
+
+
+def _run_collaborate(task: str) -> str:
+    """Run multi-agent collaboration with validation and safe error masking."""
+    try:
+        _guard_task(task)
+    except ValueError as e:
+        return f"⚠️ {e}"
+    _audit_injection(task)
+    return _run_with_timeout(lambda: _orchestrator().collaborate(task))
+
+
 @mcp.tool()
 def research_agent(task: str) -> str:
     """
@@ -101,9 +177,7 @@ def research_agent(task: str) -> str:
     Returns:
         Comprehensive research findings
     """
-    agent = _orchestrator().agents["research"]
-    result = agent.execute(task)
-    return f"**Research Agent** handled this task:\n\n{result}"
+    return _run_agent("research", task)
 
 
 @mcp.tool()
@@ -124,9 +198,7 @@ def coder_agent(task: str) -> str:
     Returns:
         Working code with comments and examples
     """
-    agent = _orchestrator().agents["coder"]
-    result = agent.execute(task)
-    return f"**Coder Agent** handled this task:\n\n{result}"
+    return _run_agent("coder", task)
 
 
 @mcp.tool()
@@ -147,9 +219,7 @@ def writer_agent(task: str) -> str:
     Returns:
         Well-structured, engaging content
     """
-    agent = _orchestrator().agents["writer"]
-    result = agent.execute(task)
-    return f"**Writer Agent** handled this task:\n\n{result}"
+    return _run_agent("writer", task)
 
 
 @mcp.tool()
@@ -170,9 +240,7 @@ def analyzer_agent(task: str) -> str:
     Returns:
         Thorough analysis with insights and recommendations
     """
-    agent = _orchestrator().agents["analyzer"]
-    result = agent.execute(task)
-    return f"**Analyzer Agent** handled this task:\n\n{result}"
+    return _run_agent("analyzer", task)
 
 
 @mcp.tool()
@@ -193,9 +261,7 @@ def planner_agent(task: str) -> str:
     Returns:
         Detailed, actionable plan with steps and timeline
     """
-    agent = _orchestrator().agents["planner"]
-    result = agent.execute(task)
-    return f"**Planner Agent** handled this task:\n\n{result}"
+    return _run_agent("planner", task)
 
 
 @mcp.tool()
@@ -214,8 +280,7 @@ def collaborate(task: str) -> str:
     Returns:
         Combined results from Planner, Research, Coder, Writer, and Analyzer agents
     """
-    result = _orchestrator().collaborate(task)
-    return result
+    return _run_collaborate(task)
 
 
 @mcp.tool()
@@ -231,7 +296,10 @@ def team_status() -> str:
     Returns:
         Status of all 5 agents with task counts
     """
-    return _orchestrator().get_team_status()
+    try:
+        return _orchestrator().get_team_status()
+    except Exception:
+        return "⚠️ Could not retrieve team status right now."
 
 
 if __name__ == "__main__":
