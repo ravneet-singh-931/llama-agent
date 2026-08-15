@@ -78,7 +78,10 @@ class LocalEmbedder:
     def embed(self, text: str) -> List[float]:
         vec = [0.0] * self.dim
         for tok in self._tokens(text):
-            h = int(hashlib.md5(tok.encode("utf-8")).hexdigest(), 16) % self.dim
+            # MD5 is used only as a stable hashing vectorizer bucket, never for
+            # security (no secrets/signatures) -> mark usedforsecurity=False so
+            # Bandit (B324) and reviewers know this is intentional.
+            h = int(hashlib.md5(tok.encode("utf-8"), usedforsecurity=False).hexdigest(), 16) % self.dim
             vec[h] += 1.0
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
         return [v / norm for v in vec]
