@@ -84,6 +84,11 @@ echo "⏳ Waiting for infrastructure..."
 kubectl wait --for=condition=ready pod -l app=postgres -n $NAMESPACE --timeout=120s
 kubectl wait --for=condition=ready pod -l app=redis -n $NAMESPACE --timeout=120s
 
+# Deploy ChromaDB (shared vector store for all API replicas)
+echo "Deploying ChromaDB (shared vector store)..."
+kubectl apply -f k8s/chromadb.yaml
+kubectl wait --for=condition=ready pod -l app=chromadb -n $NAMESPACE --timeout=120s
+
 # Deploy observability (Phoenix must exist before API/web/mcp so the
 # "phoenix" Service is present; app pods rely on http://phoenix:6006)
 echo "🔭 Deploying Phoenix (observability)..."

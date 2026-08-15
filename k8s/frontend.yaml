@@ -1,7 +1,7 @@
 # ============================================
 # Next.js Frontend Deployment + Service
 # Image must be built with: NEXT_PUBLIC_API_URL=/api
-# (docker build --build-arg NEXT_PUBLIC_API_URL=/api -t ravneet231/llama-agent-frontend:latest ./frontend)
+# (docker build --build-arg NEXT_PUBLIC_API_URL=/api -t ravneet231/llama-agent-frontend:v7 ./frontend)
 # ============================================
 apiVersion: apps/v1
 kind: Deployment
@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: ravneet231/llama-agent-frontend:latest
+          image: ravneet231/llama-agent-frontend:v7
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
