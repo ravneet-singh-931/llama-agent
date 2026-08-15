@@ -693,16 +693,30 @@ async def health_check():
 # ============ AUTH ENDPOINTS ============
 
 
-def _set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+def _set_auth_cookies(
+    response: Response, access_token: str, refresh_token: str, request: Request = None
+) -> None:
     """Set the access + refresh tokens as HttpOnly, SameSite cookies.
 
-    `secure` is only enabled in production (HTTPS). In development the API is
-    served over HTTP, so a Secure cookie would be rejected by the browser and
-    login would silently fail. The frontend talks to the API same-origin (via
-    the Nginx/Next proxy), so `samesite="lax"` is sufficient and avoids the
-    cross-site Secure-cookie requirement.
+    `secure` is enabled ONLY when the client actually reached the API over
+    HTTPS. We read the scheme from the ingress's X-Forwarded-Proto /
+    X-Forwarded-Scheme header (or the request URL) rather than guessing from
+    ENVIRONMENT: a deployment can run with ENVIRONMENT=production behind an
+    HTTP-only ingress (e.g. local *.local hosts, no cert-manager), and a Secure
+    cookie there would be rejected by the browser, silently breaking login.
+    The frontend talks to the API same-origin (via the Nginx/Next proxy), so
+    `samesite="lax"` is sufficient and avoids the cross-site Secure requirement.
     """
-    secure = _environment == "production"
+    is_https = False
+    if request is not None:
+        proto = request.headers.get("x-forwarded-proto") or request.headers.get(
+            "x-forwarded-scheme"
+        )
+        if proto:
+            is_https = proto.split(",")[0].strip().lower() == "https"
+        if not is_https and request.url.scheme == "https":
+            is_https = True
+    secure = is_https
     response.set_cookie(
         key="access_token",
         value=access_token,
@@ -742,7 +756,7 @@ async def register(request: Request, response: Response, body: RegisterRequest):
         # Enterprise: audit registration success
         audit_logger.log_registration(body.username, client_ip, success=True)
         business_metrics.record_feature_usage("user_registration")
-        _set_auth_cookies(response, result["access_token"], result["refresh_token"])
+        _set_auth_cookies(response, result["access_token"], result["refresh_token"], request)
         return AuthSuccess(status="ok", user=result["user"])
     except HTTPException as e:
         # Enterprise: audit registration failure
@@ -783,7 +797,7 @@ async def login(request: Request, response: Response, body: LoginRequest):
         brute_force.record_success(client_ip)
         brute_force.record_success(body.username)
         audit_logger.log_login_attempt(body.username, client_ip, success=True)
-        _set_auth_cookies(response, result["access_token"], result["refresh_token"])
+        _set_auth_cookies(response, result["access_token"], result["refresh_token"], request)
         return AuthSuccess(status="ok", user=result["user"])
     except HTTPException as e:
         # Enterprise: record failure + audit
@@ -812,7 +826,7 @@ async def refresh_token(request: Request, response: Response, body: RefreshReque
     try:
         result = await user_manager.refresh_token(refresh)
         # Keep the same refresh token (it is still valid); only rotate access.
-        _set_auth_cookies(response, result["access_token"], refresh)
+        _set_auth_cookies(response, result["access_token"], refresh, request)
         return AuthSuccess(status="ok")
     except HTTPException:
         raise
