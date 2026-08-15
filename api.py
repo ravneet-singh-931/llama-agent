@@ -75,6 +75,7 @@ from modules.security_hardening import (
     get_security_headers,
     get_client_ip,
     sanitize_input,
+    detect_prompt_injection,
 )
 
 # Enterprise monitoring (alerts, business metrics, cost tracking, SLA)
@@ -1794,6 +1795,16 @@ async def chat(
             "unsanitized_input",
             get_client_ip(http_request),
             f"chat message contained potentially dangerous content",
+        )
+
+    # Prompt-injection detection (audit only, non-blocking). The structural
+    # defense lives in the agent modules (PROMPT_INJECTION_GUARD + delimiters);
+    # here we just flag attempts so they show up in the audit trail.
+    if detect_prompt_injection(request.message):
+        audit_logger.log_suspicious_activity(
+            "prompt_injection_attempt",
+            get_client_ip(http_request),
+            "chat message matched a prompt-injection pattern",
         )
     
     try:

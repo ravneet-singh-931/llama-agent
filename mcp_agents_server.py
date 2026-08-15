@@ -77,8 +77,11 @@ mcp = FastMCP(
     ),
 )
 
-# Create a shared orchestrator (initialized once when server starts)
-orchestrator = MultiAgentOrchestrator()
+# Fresh orchestrator per call: agent memory / task history must never be
+# shared across MCP sessions (multi-tenant isolation). The previous module-level
+# singleton leaked one user's task history and "remembered" state to others.
+def _orchestrator():
+    return MultiAgentOrchestrator()
 
 
 @mcp.tool()
@@ -98,7 +101,7 @@ def research_agent(task: str) -> str:
     Returns:
         Comprehensive research findings
     """
-    agent = orchestrator.agents["research"]
+    agent = _orchestrator().agents["research"]
     result = agent.execute(task)
     return f"**Research Agent** handled this task:\n\n{result}"
 
@@ -121,7 +124,7 @@ def coder_agent(task: str) -> str:
     Returns:
         Working code with comments and examples
     """
-    agent = orchestrator.agents["coder"]
+    agent = _orchestrator().agents["coder"]
     result = agent.execute(task)
     return f"**Coder Agent** handled this task:\n\n{result}"
 
@@ -144,7 +147,7 @@ def writer_agent(task: str) -> str:
     Returns:
         Well-structured, engaging content
     """
-    agent = orchestrator.agents["writer"]
+    agent = _orchestrator().agents["writer"]
     result = agent.execute(task)
     return f"**Writer Agent** handled this task:\n\n{result}"
 
@@ -167,7 +170,7 @@ def analyzer_agent(task: str) -> str:
     Returns:
         Thorough analysis with insights and recommendations
     """
-    agent = orchestrator.agents["analyzer"]
+    agent = _orchestrator().agents["analyzer"]
     result = agent.execute(task)
     return f"**Analyzer Agent** handled this task:\n\n{result}"
 
@@ -190,7 +193,7 @@ def planner_agent(task: str) -> str:
     Returns:
         Detailed, actionable plan with steps and timeline
     """
-    agent = orchestrator.agents["planner"]
+    agent = _orchestrator().agents["planner"]
     result = agent.execute(task)
     return f"**Planner Agent** handled this task:\n\n{result}"
 
@@ -211,7 +214,7 @@ def collaborate(task: str) -> str:
     Returns:
         Combined results from Planner, Research, Coder, Writer, and Analyzer agents
     """
-    result = orchestrator.collaborate(task)
+    result = _orchestrator().collaborate(task)
     return result
 
 
@@ -228,7 +231,7 @@ def team_status() -> str:
     Returns:
         Status of all 5 agents with task counts
     """
-    return orchestrator.get_team_status()
+    return _orchestrator().get_team_status()
 
 
 if __name__ == "__main__":

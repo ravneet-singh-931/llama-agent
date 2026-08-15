@@ -4,10 +4,14 @@ Now with: Memory, RAG, Web Search, Monitoring, Logging
 """
 
 import asyncio
+import hashlib
 import os
 import datetime
 import math
+import threading
 import time
+from collections import OrderedDict
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Sequence
 
 try:
@@ -38,6 +42,15 @@ from modules.monitoring import AgentLogger, PerformanceMonitor
 from modules.secrets import get_secret
 from modules.security import safe_math_eval
 from modules.model_tiers import resolve_model
+from modules.security_hardening import PROMPT_INJECTION_GUARD
+
+# OpenTelemetry tracer for agent-level spans (best-effort; degrades to a no-op
+# tracer when Phoenix/OTel isn't configured, e.g. the CLI).
+try:
+    from opentelemetry import trace as _otel_trace
+    _AGENT_TRACER = _otel_trace.get_tracer("llama-agent")
+except Exception:  # nosec B112
+    _AGENT_TRACER = None
 
 import contextvars
 
@@ -51,6 +64,82 @@ _current_conversation_id = contextvars.ContextVar("current_conversation_id", def
 # connection can hang the streaming path forever.
 GROQ_TIMEOUT = float(os.getenv("GROQ_TIMEOUT", "60"))
 GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "2"))
+
+# Bound for the synchronous agent.run() call (mirrors api.py's AGENT_TIMEOUT so
+# the CLI path and the web path use the same limit instead of a magic 60s).
+AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "60"))
+
+# ---- run_agent result cache + single-flight -------------------------------
+# Bounded LRU of recent ReAct answers keyed by a hash of the full prompt (which
+# already embeds per-user facts/context, so the cache stays per-user). A short
+# TTL avoids serving stale answers after facts change. The in-flight map
+# coalesces concurrent identical requests into a single LLM run.
+_RUN_CACHE: "OrderedDict[str, str]" = OrderedDict()
+_RUN_CACHE_TTL: Dict[str, float] = {}
+_RUN_CACHE_MAX = int(os.getenv("AGENT_CACHE_MAX", "256"))
+_RUN_CACHE_TTL_SECONDS = float(os.getenv("AGENT_CACHE_TTL", "60"))
+_run_cache_lock = threading.Lock()
+_inflight: Dict[str, "asyncio.Future"] = {}
+_inflight_lock = threading.Lock()
+
+
+def _run_cache_get(key: str):
+    with _run_cache_lock:
+        if key not in _RUN_CACHE:
+            return None
+        if time.time() - _RUN_CACHE_TTL.get(key, 0) > _RUN_CACHE_TTL_SECONDS:
+            _RUN_CACHE.pop(key, None)
+            _RUN_CACHE_TTL.pop(key, None)
+            return None
+        _RUN_CACHE.move_to_end(key)
+        return _RUN_CACHE[key]
+
+
+def _run_cache_put(key: str, value: str):
+    with _run_cache_lock:
+        _RUN_CACHE[key] = value
+        _RUN_CACHE_TTL[key] = time.time()
+        _RUN_CACHE.move_to_end(key)
+        while len(_RUN_CACHE) > _RUN_CACHE_MAX:
+            old, _ = _RUN_CACHE.popitem(last=False)
+            _RUN_CACHE_TTL.pop(old, None)
+
+
+def _budget_context_string(mem, user_id, conversation_id, max_tokens: int = 2000) -> str:
+    """Token-budgeted conversation context (mirrors api.py's _window_messages).
+
+    Replaces the fixed n=5 turn window so long conversations can't blow the
+    context window or spike cost: keep as many recent turns as fit in
+    max_tokens (approx 4 chars/token) instead of a hard turn count.
+    """
+    try:
+        msgs = mem.get_messages(user_id=user_id, conversation_id=conversation_id)
+    except Exception:  # nosec B112
+        msgs = []
+    if not msgs:
+        return "No conversation history yet."
+    kept = []
+    used = 0
+    for m in reversed(msgs):
+        content = (m.get("content") or "")[:200]  # parity with get_context_string cap
+        t = len(content) // 4 + 1
+        if used + t > max_tokens and kept:
+            break
+        used += t
+        kept.append((m.get("role", "user"), content))
+    kept.reverse()
+    lines = ["Recent conversation history:"]
+    for role, content in kept:
+        r = "User" if role == "user" else "Assistant"
+        lines.append(f"{r}: {content}")
+    return "\n".join(lines)
+
+
+def _span_cm(name: str, user_id: str, conversation_id: str):
+    """Context manager yielding an OTel span (or a null context)."""
+    if _AGENT_TRACER is None:
+        return nullcontext()
+    return _AGENT_TRACER.start_as_current_span(name)
 
 # ===================== SETUP =====================
 load_dotenv()
@@ -308,21 +397,57 @@ def get_agent_health() -> str:
 
 # ===================== CREATE TOOLS =====================
 
+class GuardedTool(FunctionTool):
+    """Wraps a FunctionTool so its string output is marked as untrusted data.
+
+    PROMPT_INJECTION_GUARD tells the model to treat tool results as data, not
+    instructions; delimiting the output makes that explicit and contains any
+    injection that arrives through retrieved documents or search results.
+    """
+
+    def __init__(self, base: "FunctionTool"):
+        # Reuse the wrapped tool's function + name/description so the tool
+        # schema is preserved exactly.
+        super().__init__(
+            fn=base.fn,
+            name=base.metadata.name,
+            description=base.metadata.description,
+        )
+        self._base = base
+
+    def call(self, *args, **kwargs):
+        return self._guard(self._base.call(*args, **kwargs))
+
+    async def acall(self, *args, **kwargs):
+        return self._guard(await self._base.acall(*args, **kwargs))
+
+    @staticmethod
+    def _guard(output):
+        if hasattr(output, "content") and isinstance(output.content, str):
+            output.content = (
+                f"<<UNTRUSTED_DATA>>\n{output.content}\n<</UNTRUSTED_DATA>>"
+            )
+            return output
+        if isinstance(output, str):
+            return f"<<UNTRUSTED_DATA>>\n{output}\n<</UNTRUSTED_DATA>>"
+        return output
+
+
 tools = [
-    FunctionTool.from_defaults(fn=calculator, name="calculator", description="Mathematical calculations"),
-    FunctionTool.from_defaults(fn=get_current_datetime, name="get_datetime", description="Get current date and time"),
-    FunctionTool.from_defaults(fn=text_analyzer, name="text_analyzer", description="Analyze text statistics"),
-    FunctionTool.from_defaults(fn=unit_converter, name="unit_converter", description="Convert between units"),
-    FunctionTool.from_defaults(fn=string_operations, name="string_operations", description="String operations"),
-    FunctionTool.from_defaults(fn=remember_fact, name="remember_fact", description="Remember an important fact"),
-    FunctionTool.from_defaults(fn=recall_fact, name="recall_fact", description="Recall a stored fact"),
-    FunctionTool.from_defaults(fn=list_facts, name="list_facts", description="List all stored facts"),
-    FunctionTool.from_defaults(fn=read_document, name="read_document", description="Read and load a document"),
-    FunctionTool.from_defaults(fn=search_documents, name="search_documents", description="Search loaded documents"),
-    FunctionTool.from_defaults(fn=list_documents, name="list_documents", description="List loaded documents"),
-    FunctionTool.from_defaults(fn=get_memory_stats, name="get_memory_stats", description="Get memory statistics"),
-    FunctionTool.from_defaults(fn=clear_memory, name="clear_memory", description="Clear all memory"),
-    FunctionTool.from_defaults(fn=get_agent_health, name="get_agent_health", description="Get agent health stats"),
+    GuardedTool(FunctionTool.from_defaults(fn=calculator, name="calculator", description="Mathematical calculations")),
+    GuardedTool(FunctionTool.from_defaults(fn=get_current_datetime, name="get_datetime", description="Get current date and time")),
+    GuardedTool(FunctionTool.from_defaults(fn=text_analyzer, name="text_analyzer", description="Analyze text statistics")),
+    GuardedTool(FunctionTool.from_defaults(fn=unit_converter, name="unit_converter", description="Convert between units")),
+    GuardedTool(FunctionTool.from_defaults(fn=string_operations, name="string_operations", description="String operations")),
+    GuardedTool(FunctionTool.from_defaults(fn=remember_fact, name="remember_fact", description="Remember an important fact")),
+    GuardedTool(FunctionTool.from_defaults(fn=recall_fact, name="recall_fact", description="Recall a stored fact")),
+    GuardedTool(FunctionTool.from_defaults(fn=list_facts, name="list_facts", description="List all stored facts")),
+    GuardedTool(FunctionTool.from_defaults(fn=read_document, name="read_document", description="Read and load a document")),
+    GuardedTool(FunctionTool.from_defaults(fn=search_documents, name="search_documents", description="Search loaded documents")),
+    GuardedTool(FunctionTool.from_defaults(fn=list_documents, name="list_documents", description="List loaded documents")),
+    GuardedTool(FunctionTool.from_defaults(fn=get_memory_stats, name="get_memory_stats", description="Get memory statistics")),
+    GuardedTool(FunctionTool.from_defaults(fn=clear_memory, name="clear_memory", description="Clear all memory")),
+    GuardedTool(FunctionTool.from_defaults(fn=get_agent_health, name="get_agent_health", description="Get agent health stats")),
 ]
 
 # ===================== CREATE AGENT =====================
@@ -332,7 +457,8 @@ GENERAL_SYSTEM_PROMPT = (
     "text analysis, unit conversion, memory, and document search. "
     "Always respond in English. Be concise and direct: answer the question, "
     "show code when asked, and skip verbose introductions, filler, redundant "
-    "headings, and marketing language."
+    "headings, and marketing language.\n\n"
+    + PROMPT_INJECTION_GUARD
 )
 
 agent = ReActAgent(
@@ -354,9 +480,9 @@ async def run_agent(user_input: str, memory: Optional[Any] = None,
     _current_user_id.set(user_id)
     _current_conversation_id.set(conversation_id)
 
-    # Session memory: give the agent the last few turns of THIS conversation
-    # so it can answer follow-ups like "and what about my first question?".
-    context = mem.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
+    # Session memory: token-budgeted context (mirrors api.py's _window_messages)
+    # so long conversations can't blow the context window or spike cost.
+    context = _budget_context_string(mem, user_id, conversation_id)
     fact_context = fact_store.get_context_string()
 
     # Log the interaction
@@ -364,29 +490,83 @@ async def run_agent(user_input: str, memory: Optional[Any] = None,
     start_time = time.time()
 
     # Build the prompt: user message + recent conversation + known facts.
-    prompt = user_input
+    # Conversation history and stored facts are user-controlled, so they are
+    # delimited as untrusted data to contain prompt-injection attempts.
+    prompt = f"<<UNTRUSTED_DATA>>\n{user_input}\n<</UNTRUSTED_DATA>>"
     if context and "No conversation history yet." not in context:
-        prompt = f"Recent conversation context:\n{context}\n\nUser: {user_input}"
+        prompt = (
+            f"Recent conversation context:\n"
+            f"<<UNTRUSTED_DATA>>\n{context}\n<</UNTRUSTED_DATA>>\n\nUser: {prompt}"
+        )
     if fact_context and "No facts stored yet." not in fact_context:
-        prompt = f"{prompt}\n\n{fact_context}"
-    
-    try:
-        # agent.run() is synchronous (verified), so run it in a worker thread
-        # and bound it with a timeout rather than awaiting it directly.
-        output = await asyncio.wait_for(asyncio.to_thread(agent.run, prompt), timeout=60)
-        result = str(output)
-        
-        # Log success (persistence is handled by the caller)
+        prompt = (
+            f"{prompt}\n\nKnown facts:\n"
+            f"<<UNTRUSTED_DATA>>\n{fact_context}\n<</UNTRUSTED_DATA>>"
+        )
+
+    # Response cache + single-flight: serve a recent identical answer without a
+    # second LLM call, and coalesce concurrent identical requests into one run.
+    cache_key = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    cached = _run_cache_get(cache_key)
+    if cached is not None:
+        elapsed = time.time() - start_time
+        logger.log_interaction(user_input, cached, [], elapsed)
+        return cached
+
+    with _span_cm("run_agent", user_id, conversation_id) as span:
+        if span is not None and hasattr(span, "set_attribute"):
+            span.set_attribute("user.id", user_id)
+            span.set_attribute("conversation.id", conversation_id)
+        result = await _run_agent_compute(prompt, cache_key, start_time, user_input)
+    return result
+
+
+async def _run_agent_compute(prompt: str, cache_key: str,
+                             start_time: float, user_input: str) -> str:
+    """Execute the ReAct run with timeout, caching, and single-flight coalescing."""
+    loop = asyncio.get_running_loop()
+    with _inflight_lock:
+        fut = _inflight.get(cache_key)
+        owner = fut is None
+        if owner:
+            fut = loop.create_future()
+            _inflight[cache_key] = fut
+
+    if owner:
+        try:
+            # agent.run() is synchronous (verified), so run it in a worker
+            # thread and bound it with AGENT_TIMEOUT rather than awaiting it.
+            output = await asyncio.wait_for(
+                asyncio.to_thread(agent.run, prompt), timeout=AGENT_TIMEOUT
+            )
+            result = str(output)
+            _run_cache_put(cache_key, result)
+            if not fut.cancelled():
+                fut.set_result(result)
+        except Exception as e:
+            elapsed = time.time() - start_time
+            monitor.track_error()
+            logger.log_error(e, context=f"User input: {user_input}")
+            # Never leak internal error details to the caller.
+            result = "Error: something went wrong. Please try again."
+            if not fut.cancelled():
+                fut.set_result(result)
+        finally:
+            with _inflight_lock:
+                _inflight.pop(cache_key, None)
         elapsed = time.time() - start_time
         logger.log_interaction(user_input, result, [], elapsed)
-        
         return result
-        
-    except Exception as e:
-        elapsed = time.time() - start_time
-        monitor.track_error()
-        logger.log_error(e, context=f"User input: {user_input}")
-        return f"Error: {str(e)}"
+
+    # Not the owner: wait for the in-flight request to finish and reuse its
+    # (already cached) result instead of running the LLM a second time.
+    try:
+        result = await fut
+    except Exception:
+        result = "Error: something went wrong. Please try again."
+    elapsed = time.time() - start_time
+    logger.log_interaction(user_input, result, [], elapsed)
+    return result
 
 
 # ===================== STREAMING AGENT =====================
@@ -403,30 +583,33 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
     _current_user_id.set(user_id)
     _current_conversation_id.set(conversation_id)
 
-    # Build messages with context (scoped to this user's conversation)
-    context = mem.get_context_string(n=5, user_id=user_id, conversation_id=conversation_id)
+    # Token-budgeted context (mirrors run_agent / api.py _window_messages).
+    context = _budget_context_string(mem, user_id, conversation_id)
     fact_context = fact_store.get_context_string()
     system_prompt = (
         "You are Llama Agent, a helpful AI assistant with tools for math, "
         "text analysis, unit conversion, memory, and document search. "
         "Always respond in English. Be concise and direct: answer the question, "
         "show code when asked, and skip verbose introductions, filler, "
-        "redundant headings, and marketing language."
+        "redundant headings, and marketing language.\n\n"
+        + PROMPT_INJECTION_GUARD
     )
 
     messages = [
         {"role": "system", "content": system_prompt},
     ]
 
-    if context:
-        messages.append({"role": "user", "content": f"Previous context:\n{context}"})
+    # Conversation history and stored facts are user-controlled, so delimit
+    # them as untrusted data to contain prompt-injection attempts.
+    if context and "No conversation history yet." not in context:
+        messages.append({"role": "user", "content": f"Previous context:\n<<UNTRUSTED_DATA>>\n{context}\n<</UNTRUSTED_DATA>>"})
         messages.append({"role": "assistant", "content": "I understand the context."})
 
-    if fact_context:
-        messages.append({"role": "user", "content": fact_context})
+    if fact_context and "No facts stored yet." not in fact_context:
+        messages.append({"role": "user", "content": f"Known facts:\n<<UNTRUSTED_DATA>>\n{fact_context}\n<</UNTRUSTED_DATA>>"})
         messages.append({"role": "assistant", "content": "I'll keep that in mind."})
 
-    messages.append({"role": "user", "content": user_input})
+    messages.append({"role": "user", "content": f"<<UNTRUSTED_DATA>>\n{user_input}\n<</UNTRUSTED_DATA>>"})
 
     # Stream from the llama-index LLM (fast tier) instead of the raw Groq
     # client: the OpenInference llama-index instrumentor only emits
@@ -436,16 +619,18 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
         ChatMessage(role=MessageRole(message["role"]), content=message["content"])
         for message in messages
     ]
-    try:
-        full_response = ""
-        for chunk in stream_llm.stream_chat(llm_messages, max_tokens=2048):
-            token = chunk.text
-            if token:
-                full_response += token
-                yield token
-    except Exception as e:
-        # Never let the stream die silently - yield a readable error instead
-        yield f"\n\n⚠️ Error while generating response: {e}"
+    with _span_cm("run_agent_stream", user_id, conversation_id):
+        try:
+            full_response = ""
+            for chunk in stream_llm.stream_chat(llm_messages, max_tokens=2048):
+                token = chunk.text
+                if token:
+                    full_response += token
+                    yield token
+        except Exception as e:
+            # Never let the stream die silently, and never leak internals.
+            logger.log_error(e, context=f"Streaming user input: {user_input}")
+            yield "\n\n⚠️ Error while generating response. Please try again."
 
     # Save to memory after streaming is done
     mem.add_message("user", user_input, user_id=user_id, conversation_id=conversation_id)

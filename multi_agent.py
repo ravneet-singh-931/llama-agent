@@ -21,6 +21,7 @@ except ImportError:
 from llama_index.core.llms import ChatMessage, MessageRole
 from modules.secrets import get_secret
 from modules.model_tiers import resolve_model, should_fallback
+from modules.security_hardening import PROMPT_INJECTION_GUARD
 
 load_dotenv()
 
@@ -208,8 +209,10 @@ class BaseAgent:
         a graceful fallback so the chat never 500s.
         """
         messages = [
-            {"role": "system", "content": self._system},
-            {"role": "user", "content": self._task_prompt.format(task=task)},
+            {"role": "system", "content": self._system + "\n\n" + PROMPT_INJECTION_GUARD},
+            {"role": "user", "content": self._task_prompt.format(
+                task=f"<<UNTRUSTED_DATA>>\n{task}\n<</UNTRUSTED_DATA>>"
+            )},
         ]
         try:
             final_messages, _events = self._run_tools(messages)
@@ -263,8 +266,10 @@ class BaseAgent:
 
         def _initial_messages():
             return [
-                {"role": "system", "content": self._system},
-                {"role": "user", "content": self._task_prompt.format(task=task)},
+                {"role": "system", "content": self._system + "\n\n" + PROMPT_INJECTION_GUARD},
+                {"role": "user", "content": self._task_prompt.format(
+                    task=f"<<UNTRUSTED_DATA>>\n{task}\n<</UNTRUSTED_DATA>>"
+                )},
             ]
 
         def _tokens(stream):

@@ -6,11 +6,11 @@ This helps you understand how users interact with your agent!
 
 import json
 import os
+import threading
 import time
 import traceback
 from datetime import datetime
 from typing import Dict, List, Optional
-from functools import wraps
 
 
 class AgentLogger:
@@ -30,6 +30,10 @@ class AgentLogger:
         
         # Initialize metrics
         self.metrics = self._load_metrics()
+
+        # Serializes all file I/O in log_interaction/log_error so concurrent
+        # requests can't corrupt or lose each other's writes.
+        self._lock = threading.Lock()
     
     def _load_metrics(self) -> Dict:
         """Load existing metrics"""
@@ -67,43 +71,47 @@ class AgentLogger:
             "response_time": response_time
         }
         
-        # Save to interactions file
-        interactions = []
-        if os.path.exists(self.interactions_file):
-            try:
-                with open(self.interactions_file, 'r') as f:
-                    interactions = json.load(f)
-            except:
-                interactions = []
-        
-        interactions.append(interaction)
-        
-        # Keep only last 1000 interactions
-        if len(interactions) > 1000:
-            interactions = interactions[-1000:]
-        
-        with open(self.interactions_file, 'w', encoding='utf-8') as f:
-            json.dump(interactions, f, indent=2, ensure_ascii=False)
-        
-        # Update metrics
-        self.metrics["total_queries"] += 1
-        self.metrics["response_times"].append(response_time)
-        self.metrics["response_times"] = self.metrics["response_times"][-100:]
-        self.metrics["avg_response_time"] = sum(self.metrics["response_times"]) / len(self.metrics["response_times"])
-        self.metrics["last_seen"] = datetime.now().isoformat()
-        
-        for tool in tools_used:
-            self.metrics["popular_tools"][tool] = self.metrics["popular_tools"].get(tool, 0) + 1
-            self.metrics["total_tool_calls"] += 1
-        
-        self._save_metrics()
-        
-        # Also log to text file
-        self._log_text(f"[{datetime.now()}] User: {user_input[:100]}")
-        self._log_text(f"[{datetime.now()}] Agent: {agent_response[:100]}")
-        self._log_text(f"[{datetime.now()}] Tools: {tools_used}")
-        self._log_text(f"[{datetime.now()}] Time: {response_time:.2f}s")
-        self._log_text("---")
+        # All file I/O is serialized so concurrent requests can't corrupt or
+        # lose each other's interaction/metrics writes (the previous
+        # read-modify-write was not atomic under load).
+        with self._lock:
+            # Save to interactions file
+            interactions = []
+            if os.path.exists(self.interactions_file):
+                try:
+                    with open(self.interactions_file, 'r') as f:
+                        interactions = json.load(f)
+                except:
+                    interactions = []
+            
+            interactions.append(interaction)
+            
+            # Keep only last 1000 interactions
+            if len(interactions) > 1000:
+                interactions = interactions[-1000:]
+            
+            with open(self.interactions_file, 'w', encoding='utf-8') as f:
+                json.dump(interactions, f, indent=2, ensure_ascii=False)
+            
+            # Update metrics
+            self.metrics["total_queries"] += 1
+            self.metrics["response_times"].append(response_time)
+            self.metrics["response_times"] = self.metrics["response_times"][-100:]
+            self.metrics["avg_response_time"] = sum(self.metrics["response_times"]) / len(self.metrics["response_times"])
+            self.metrics["last_seen"] = datetime.now().isoformat()
+            
+            for tool in tools_used:
+                self.metrics["popular_tools"][tool] = self.metrics["popular_tools"].get(tool, 0) + 1
+                self.metrics["total_tool_calls"] += 1
+            
+            self._save_metrics()
+            
+            # Also log to text file
+            self._log_text(f"[{datetime.now()}] User: {user_input[:100]}")
+            self._log_text(f"[{datetime.now()}] Agent: {agent_response[:100]}")
+            self._log_text(f"[{datetime.now()}] Tools: {tools_used}")
+            self._log_text(f"[{datetime.now()}] Time: {response_time:.2f}s")
+            self._log_text("---")
     
     def log_error(self, error: Exception, context: str = ""):
         """Log an error"""
@@ -115,30 +123,33 @@ class AgentLogger:
             "context": context
         }
         
-        # Save to errors file
-        errors = []
-        if os.path.exists(self.errors_file):
-            try:
-                with open(self.errors_file, 'r') as f:
-                    errors = json.load(f)
-            except:
-                errors = []
-        
-        errors.append(error_info)
-        
-        # Keep only last 100 errors
-        if len(errors) > 100:
-            errors = errors[-100:]
-        
-        with open(self.errors_file, 'w', encoding='utf-8') as f:
-            json.dump(errors, f, indent=2)
-        
-        # Update metrics
-        self.metrics["total_errors"] += 1
-        self._save_metrics()
-        
-        # Log to text file
-        self._log_text(f"[{datetime.now()}] ERROR: {type(error).__name__}: {str(error)}")
+        # Serialized with the same lock as log_interaction so the two never
+        # interleave on the shared metrics/error files.
+        with self._lock:
+            # Save to errors file
+            errors = []
+            if os.path.exists(self.errors_file):
+                try:
+                    with open(self.errors_file, 'r') as f:
+                        errors = json.load(f)
+                except:
+                    errors = []
+            
+            errors.append(error_info)
+            
+            # Keep only last 100 errors
+            if len(errors) > 100:
+                errors = errors[-100:]
+            
+            with open(self.errors_file, 'w', encoding='utf-8') as f:
+                json.dump(errors, f, indent=2)
+            
+            # Update metrics
+            self.metrics["total_errors"] += 1
+            self._save_metrics()
+            
+            # Log to text file
+            self._log_text(f"[{datetime.now()}] ERROR: {type(error).__name__}: {str(error)}")
     
     def log_tool_call(self, tool_name: str, input_data: str, output_data: str):
         """Log a tool call"""
@@ -236,16 +247,4 @@ class PerformanceMonitor:
         return f"{hours}h {minutes}m {secs}s"
 
 
-def monitor_decorator(func):
-    """Decorator to monitor function calls"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        try:
-            result = func(*args, **kwargs)
-            elapsed = time.time() - start_time
-            return result
-        except Exception as e:
-            elapsed = time.time() - start_time
-            raise
-    return wrapper
+
