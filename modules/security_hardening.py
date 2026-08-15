@@ -12,11 +12,43 @@ Features:
 import os
 import re
 import time
+import json
 import hashlib
 import secrets
 from typing import Tuple, Optional, Dict, List
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+
+
+# ============ SHARED REDIS (best-effort, multi-replica safe) ============
+
+
+_REDIS_CLIENT = None
+
+
+def _get_redis():
+    """Lazily connect to Redis (best-effort). Returns client or None.
+
+    When REDIS_URL is configured AND reachable, security state (brute-force
+    attempts, audit trail) is shared across all API replicas so protection
+    cannot be bypassed by hitting a different pod. Falls back to in-process
+    state when Redis is unavailable (degraded mode, same as before).
+    """
+    global _REDIS_CLIENT
+    if _REDIS_CLIENT is not None:
+        return _REDIS_CLIENT
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        return None
+    try:
+        import redis
+        client = redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=2)
+        client.ping()
+        _REDIS_CLIENT = client
+        return client
+    except Exception as e:
+        print(f"[SECURITY] Redis unavailable, using in-memory state: {e}")
+        return None
 
 
 # ============ INPUT SANITIZATION ============
@@ -138,16 +170,20 @@ def sanitize_filename(filename: str) -> str:
 # ============ BRUTE FORCE PROTECTION ============
 
 
+BRUTE_FORCE_KEY = "llama:bruteforce"
+
+
 class BruteForceProtection:
     """
     Protects against brute force attacks.
-    
+
     Features:
     - Tracks failed login attempts per IP/username
     - Locks accounts after too many failures
     - Gradual lockout (longer lockout with more failures)
+    - State is shared across replicas via Redis (falls back to in-process)
     """
-    
+
     def __init__(
         self,
         max_attempts: int = 5,
@@ -157,61 +193,82 @@ class BruteForceProtection:
         self.max_attempts = max_attempts
         self.lockout_duration = lockout_duration
         self.increment_multiplier = increment_multiplier
-        
-        # Track attempts: {key: {"count": int, "last_attempt": float, "locked_until": float}}
+
+        # In-process mirror / fallback when Redis is unavailable.
         self.attempts: Dict[str, Dict] = defaultdict(lambda: {
             "count": 0,
             "last_attempt": 0,
             "locked_until": 0,
         })
-    
+
     def _get_key(self, identifier: str, attempt_type: str = "login") -> str:
         """Get storage key for identifier."""
         return f"{attempt_type}:{identifier}"
-    
+
+    def _load(self, key: str) -> Dict:
+        """Load attempt state (Redis when available, else local mirror)."""
+        r = _get_redis()
+        if r is not None:
+            try:
+                raw = r.hget(BRUTE_FORCE_KEY, key)
+                if raw:
+                    return json.loads(raw)
+            except Exception:
+                pass
+        return self.attempts[key]
+
+    def _store(self, key: str, data: Dict) -> None:
+        """Persist attempt state (Redis when available, always keep local mirror)."""
+        self.attempts[key] = data
+        r = _get_redis()
+        if r is not None:
+            try:
+                r.hset(BRUTE_FORCE_KEY, key, json.dumps(data))
+            except Exception as e:
+                print(f"[SECURITY] Redis write failed (kept local): {e}")
+
     def record_failure(self, identifier: str, attempt_type: str = "login") -> None:
         """Record a failed attempt."""
         key = self._get_key(identifier, attempt_type)
-        now = time.time()
-        
-        self.attempts[key]["count"] += 1
-        self.attempts[key]["last_attempt"] = now
-        
+        data = self._load(key)
+        data["count"] += 1
+        data["last_attempt"] = time.time()
+
         # Calculate lockout duration (increases with more failures)
-        failures = self.attempts[key]["count"]
+        failures = data["count"]
         if failures >= self.max_attempts:
             lockout_seconds = self.lockout_duration * (
                 self.increment_multiplier ** (failures - self.max_attempts)
             )
-            self.attempts[key]["locked_until"] = now + lockout_seconds
-    
+            data["locked_until"] = time.time() + lockout_seconds
+        self._store(key, data)
+
     def record_success(self, identifier: str, attempt_type: str = "login") -> None:
         """Record a successful attempt (resets counter)."""
         key = self._get_key(identifier, attempt_type)
-        self.attempts[key]["count"] = 0
-        self.attempts[key]["locked_until"] = 0
-    
+        self._store(key, {"count": 0, "last_attempt": 0, "locked_until": 0})
+
     def is_locked(self, identifier: str, attempt_type: str = "login") -> Tuple[bool, Optional[int]]:
         """
         Check if identifier is locked.
-        
+
         Returns:
             (is_locked, seconds_until_unlock)
         """
         key = self._get_key(identifier, attempt_type)
-        now = time.time()
-        
-        locked_until = self.attempts[key]["locked_until"]
-        if locked_until > now:
-            seconds_left = int(locked_until - now)
+        data = self._load(key)
+        locked_until = data.get("locked_until", 0)
+        if locked_until > time.time():
+            seconds_left = int(locked_until - time.time())
             return True, seconds_left
-        
+
         return False, None
-    
+
     def get_remaining_attempts(self, identifier: str, attempt_type: str = "login") -> int:
         """Get remaining attempts before lockout."""
         key = self._get_key(identifier, attempt_type)
-        return max(0, self.max_attempts - self.attempts[key]["count"])
+        data = self._load(key)
+        return max(0, self.max_attempts - data.get("count", 0))
 
 
 # ============ SECURITY HEADERS ============
@@ -252,10 +309,14 @@ def get_security_headers() -> Dict[str, str]:
 # ============ AUDIT LOGGING ============
 
 
+AUDIT_KEY = "llama:audit"
+AUDIT_MAX_EVENTS = 1000
+
+
 class AuditLogger:
     """
     Logs security-relevant events for auditing.
-    
+
     Events logged:
     - Login attempts (success/failure)
     - Registration attempts
@@ -263,27 +324,42 @@ class AuditLogger:
     - File uploads
     - Rate limit violations
     - Suspicious activity
+
+    The audit trail is mirrored to Redis (shared across replicas) and always
+    appended to a local log file for forensics.
     """
-    
+
     def __init__(self, log_file: str = "logs/audit.log"):
         self.log_file = log_file
         self.events: List[Dict] = []
-        
+
         # Ensure log directory exists
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
-    
+
     def _write_log(self, event: Dict) -> None:
-        """Write event to log file."""
+        """Write event to the local log file, in-memory mirror, and Redis."""
         self.events.append(event)
-        
+        # Bound the in-memory mirror so a long-running pod can't OOM.
+        if len(self.events) > AUDIT_MAX_EVENTS:
+            self.events = self.events[-AUDIT_MAX_EVENTS:]
+
         try:
             with open(self.log_file, "a") as f:
                 f.write(f"{event['timestamp']} | {event['event_type']} | "
-                       f"{event.get('identifier', 'N/A')} | "
-                       f"{event.get('details', '')}\n")
+                        f"{event.get('identifier', 'N/A')} | "
+                        f"{event.get('details', '')}\n")
         except Exception:
             pass  # Don't fail if logging fails
-    
+
+        # Mirror to Redis so every replica shares the same audit trail.
+        r = _get_redis()
+        if r is not None:
+            try:
+                r.rpush(AUDIT_KEY, json.dumps(event))
+                r.ltrim(AUDIT_KEY, -AUDIT_MAX_EVENTS, -1)
+            except Exception as e:
+                print(f"[SECURITY] Redis audit write failed: {e}")
+
     def log_login_attempt(
         self,
         username: str,
@@ -300,7 +376,7 @@ class AuditLogger:
             "details": reason,
         }
         self._write_log(event)
-    
+
     def log_registration(
         self,
         username: str,
@@ -317,7 +393,7 @@ class AuditLogger:
             "details": reason,
         }
         self._write_log(event)
-    
+
     def log_file_upload(
         self,
         filename: str,
@@ -333,7 +409,7 @@ class AuditLogger:
             "details": f"filename={filename}, reason={reason}",
         }
         self._write_log(event)
-    
+
     def log_rate_limit_violation(
         self,
         ip_address: str,
@@ -347,7 +423,7 @@ class AuditLogger:
             "details": f"endpoint={endpoint}",
         }
         self._write_log(event)
-    
+
     def log_suspicious_activity(
         self,
         activity_type: str,
@@ -362,14 +438,25 @@ class AuditLogger:
             "details": f"type={activity_type}, details={details}",
         }
         self._write_log(event)
-    
+
     def get_recent_events(self, hours: int = 24) -> List[Dict]:
-        """Get events from the last N hours."""
+        """Get events from the last N hours (reads the shared Redis trail)."""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        return [
-            e for e in self.events
-            if datetime.fromisoformat(e["timestamp"]) > cutoff
-        ]
+        events: List[Dict] = []
+        r = _get_redis()
+        if r is not None:
+            try:
+                raws = r.lrange(AUDIT_KEY, 0, -1)
+                for raw in raws:
+                    try:
+                        events.append(json.loads(raw))
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+            except Exception:
+                events = list(self.events)
+        else:
+            events = list(self.events)
+        return [e for e in events if datetime.fromisoformat(e["timestamp"]) > cutoff]
 
 
 # ============ CSRF PROTECTION ============

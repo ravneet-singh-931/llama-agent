@@ -353,22 +353,36 @@ class FactMemory:
                 return self.facts
         return self.facts
 
-    def remember(self, key: str, value: str):
-        """Remember a fact"""
-        entry = {"value": value, "timestamp": datetime.now().isoformat()}
-        self.facts[key] = entry
+    @staticmethod
+    def _norm_user(uid):
+        """Normalize anonymous user buckets ('guest'/'default'/None) to 'default'."""
+        if not uid or uid in ("guest", "default"):
+            return "default"
+        return uid
+
+    def _fkey(self, key: str, user_id: str) -> str:
+        """Per-user namespaced storage key so tenants never collide."""
+        return f"{self._norm_user(user_id)}::{key}"
+
+    def remember(self, key: str, value: str, user_id: str = "default"):
+        """Remember a fact under a per-user namespaced key (multi-tenant isolation)."""
+        fk = self._fkey(key, user_id)
+        uid = self._norm_user(user_id)
+        entry = {"value": value, "user_id": uid, "timestamp": datetime.now().isoformat()}
+        self.facts[fk] = entry
         self._save()
         if self.redis is not None:
             try:
-                self.redis.hset(self.REDIS_KEY, key, json.dumps(entry))
+                self.redis.hset(self.REDIS_KEY, fk, json.dumps(entry))
             except Exception as e:
                 print(f"[FACTS] Redis write failed (kept local): {e}")
 
-    def recall(self, key: str) -> str:
-        """Recall a fact"""
+    def recall(self, key: str, user_id: str = "default") -> str:
+        """Recall a fact for a user (defaults to the 'default' tenant)."""
+        fk = self._fkey(key, user_id)
         if self.redis is not None:
             try:
-                raw = self.redis.hget(self.REDIS_KEY, key)
+                raw = self.redis.hget(self.REDIS_KEY, fk)
                 if raw:
                     try:
                         return json.loads(raw)["value"]
@@ -376,44 +390,80 @@ class FactMemory:
                         return raw
             except Exception:
                 pass
+        if fk in self.facts:
+            data = self.facts[fk]
+            return data["value"] if isinstance(data, dict) else data
+        # Backward-compat: legacy unprefixed single-tenant keys.
         if key in self.facts:
-            return self.facts[key]["value"]
+            data = self.facts[key]
+            return data["value"] if isinstance(data, dict) else data
         return f"I don't remember anything about '{key}'"
 
-    def get_all_facts(self) -> Dict:
-        """Get all stored facts"""
+    def get_all_facts(self, user_id: str = None) -> Dict:
+        """Get all stored facts (optionally scoped to one user)."""
         all_facts = self._read_all()
-        return {k: v["value"] for k, v in all_facts.items()}
+        result: Dict = {}
+        for k, v in all_facts.items():
+            if "::" in k:
+                uid, real_key = k.split("::", 1)
+                if user_id is not None and self._norm_user(user_id) != uid:
+                    continue
+            else:
+                real_key = k
+                # Legacy unprefixed facts belong to the 'default' tenant.
+                if user_id is not None and self._norm_user(user_id) != "default":
+                    continue
+            val = v["value"] if isinstance(v, dict) else v
+            result[real_key] = val
+        return result
 
-    def get_context_string(self) -> str:
-        """Get all facts as a string for the AI to read"""
-        all_facts = self._read_all()
+    def get_context_string(self, user_id: str = None) -> str:
+        """Get all facts as a string for the AI to read (optionally scoped)."""
+        all_facts = self.get_all_facts(user_id=user_id)
         if not all_facts:
             return "No facts stored yet."
 
         context = "Things I remember about the user:\n"
-        for key, data in all_facts.items():
-            value = data["value"] if isinstance(data, dict) else data
+        for key, value in all_facts.items():
             context += f"- {key}: {value}\n"
         return context
 
-    def forget(self, key: str):
-        """Forget a specific fact"""
-        if key in self.facts:
-            del self.facts[key]
+    def forget(self, key: str, user_id: str = "default"):
+        """Forget a specific fact for a user (defaults to the 'default' tenant)."""
+        fk = self._fkey(key, user_id)
+        if fk in self.facts:
+            del self.facts[fk]
             self._save()
         if self.redis is not None:
             try:
-                self.redis.hdel(self.REDIS_KEY, key)
+                self.redis.hdel(self.REDIS_KEY, fk)
             except Exception as e:
                 print(f"[FACTS] Redis delete failed: {e}")
 
-    def clear(self):
-        """Clear all facts"""
-        self.facts = {}
+    def clear(self, user_id: str = None):
+        """Clear all facts, or only one user's facts (per-user namespaced keys).
+
+        Scoping by user_id prevents one tenant from wiping every other
+        tenant's facts when facts live in a shared Redis hash.
+        """
+        if user_id is None:
+            self.facts = {}
+            self._save()
+            if self.redis is not None:
+                try:
+                    self.redis.delete(self.REDIS_KEY)
+                except Exception as e:
+                    print(f"[FACTS] Redis clear failed: {e}")
+            return
+        uid = self._norm_user(user_id)
+        prefix = f"{uid}::"
+        keys_to_delete = [k for k in self.facts if k.startswith(prefix)]
+        for k in keys_to_delete:
+            del self.facts[k]
         self._save()
         if self.redis is not None:
             try:
-                self.redis.delete(self.REDIS_KEY)
+                if keys_to_delete:
+                    self.redis.hdel(self.REDIS_KEY, *keys_to_delete)
             except Exception as e:
                 print(f"[FACTS] Redis clear failed: {e}")
