@@ -1062,8 +1062,8 @@ class MultiAgentOrchestrator:
         Each step is isolated: a failure yields a degraded placeholder instead of
         aborting the whole collaboration.
         """
-        critique = os.getenv("AGENT_CRITIQUE", "0") == "1"
-        reflect = os.getenv("AGENT_REFLECT", "0") == "1"
+        critique = os.getenv("AGENT_CRITIQUE", "1") == "1"
+        reflect = os.getenv("AGENT_REFLECT", "1") == "1"
 
         # 4. Plan a DAG; fall back to a sensible default graph on any failure.
         steps = self._plan_dag(task)
@@ -1135,7 +1135,7 @@ class MultiAgentOrchestrator:
           {"type": "final", "content": <combined summary>}
         Steps run in topological order; each agent streams its own tokens.
         """
-        critique = os.getenv("AGENT_CRITIQUE", "0") == "1"
+        critique = os.getenv("AGENT_CRITIQUE", "1") == "1"
 
         steps = self._plan_dag(task)
         if steps is None:
