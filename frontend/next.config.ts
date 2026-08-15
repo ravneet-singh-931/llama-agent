@@ -72,6 +72,12 @@ const nextConfig: NextConfig = {
         source: "/api/:path*",
         destination: `${upstream}/:path*`,
       },
+      {
+        // Same-origin WebSocket proxy so the browser can connect to
+        // wss://<host>/ws/<id>?ticket=<ticket> without cross-origin cookies.
+        source: "/ws/:path*",
+        destination: `${upstream}/ws/:path*`,
+      },
     ];
   },
   // Apply security headers to every route (including proxied /api responses).

@@ -101,6 +101,20 @@ jobs:
           name: security-report
           path: bandit-report.json
 
+      - name: "\U0001F40D Set up Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: "\U0001F50D Audit frontend dependencies (npm audit)"
+        working-directory: frontend
+        continue-on-error: true
+        run: |
+          npm ci
+          # Report high+ severity advisories. Flip continue-on-error to false
+          # once existing advisories are triaged/upgraded to make it a hard gate.
+          npm audit --audit-level=high
+
   # ============================================================
   # JOB 2.5: SECRET LEAK SCAN (SAST - Gitleaks)
   # ============================================================

@@ -10,7 +10,7 @@ interface AuthState {
 
   login: (username: string, password: string) => Promise<boolean>;
   register: (username: string, email: string, password: string) => Promise<boolean>;
-  logout: () => void;
+  logout: () => Promise<void>;
   checkAuth: () => Promise<void>;
 }
 
@@ -24,6 +24,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: true, error: null });
     try {
       await api.login(username, password);
+      // Cookies are set by the backend; fetch the identity via the cookie.
       const me = await api.getMe();
       set({
         user: me.user,
@@ -56,22 +57,17 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  logout: () => {
-    api.setToken(null);
+  logout: async () => {
+    await api.logout();
     set({ user: null, isLoggedIn: false });
   },
 
   checkAuth: async () => {
-    const token = api.getToken();
-    if (!token) {
-      set({ user: null, isLoggedIn: false });
-      return;
-    }
+    // No token in JS - just ask the backend (cookie is sent automatically).
     try {
       const me = await api.getMe();
       set({ user: me.user, isLoggedIn: true });
     } catch {
-      api.setToken(null);
       set({ user: null, isLoggedIn: false });
     }
   },
