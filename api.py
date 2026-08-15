@@ -12,6 +12,7 @@ Features:
 
 import asyncio
 import heapq
+import json
 import logging
 import os
 import re
@@ -52,6 +53,8 @@ from modules.auth import (
     user_manager,
     jwt_manager,
     authenticate_ws_token,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    REFRESH_TOKEN_EXPIRE_DAYS,
 )
 from modules.websocket import get_ws_handler, MessageType, WSMessage
 
@@ -298,6 +301,11 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = "default"
     context: Optional[str] = None
     conversation_id: Optional[str] = None
+    # DSA feature toggles (override server env defaults when provided).
+    use_critic: Optional[bool] = None
+    use_reflection: Optional[bool] = None
+    use_parallel: Optional[bool] = None
+    agent: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -357,15 +365,21 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    """Token response"""
+    """Token response (legacy; cookie auth is preferred for browsers)"""
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
 
 
+class AuthSuccess(BaseModel):
+    """Cookie-based auth success (tokens are set as HttpOnly cookies)"""
+    status: str = "ok"
+    user: Optional[Dict[str, Any]] = None
+
+
 class RefreshRequest(BaseModel):
-    """Refresh token request"""
-    refresh_token: str
+    """Refresh token request (refresh token may also arrive as a cookie)"""
+    refresh_token: Optional[str] = None
 
 
 # ============ APP LIFETIME ============
@@ -679,9 +693,44 @@ async def health_check():
 # ============ AUTH ENDPOINTS ============
 
 
-@app.post("/auth/register", response_model=TokenResponse)
-async def register(request: Request, body: RegisterRequest):
-    """Register a new user"""
+def _set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+    """Set the access + refresh tokens as HttpOnly, SameSite cookies.
+
+    `secure` is only enabled in production (HTTPS). In development the API is
+    served over HTTP, so a Secure cookie would be rejected by the browser and
+    login would silently fail. The frontend talks to the API same-origin (via
+    the Nginx/Next proxy), so `samesite="lax"` is sufficient and avoids the
+    cross-site Secure-cookie requirement.
+    """
+    secure = _environment == "production"
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        path="/",
+    )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    for key in ("access_token", "refresh_token"):
+        response.delete_cookie(key, path="/")
+
+
+@app.post("/auth/register", response_model=AuthSuccess)
+async def register(request: Request, response: Response, body: RegisterRequest):
+    """Register a new user (tokens issued as HttpOnly cookies)"""
     client_ip = get_client_ip(request)
     try:
         result = await user_manager.register(
@@ -693,10 +742,8 @@ async def register(request: Request, body: RegisterRequest):
         # Enterprise: audit registration success
         audit_logger.log_registration(body.username, client_ip, success=True)
         business_metrics.record_feature_usage("user_registration")
-        return TokenResponse(
-            access_token=result["access_token"],
-            refresh_token=result["refresh_token"],
-        )
+        _set_auth_cookies(response, result["access_token"], result["refresh_token"])
+        return AuthSuccess(status="ok", user=result["user"])
     except HTTPException as e:
         # Enterprise: audit registration failure
         audit_logger.log_registration(body.username, client_ip, success=False, reason=str(e.detail))
@@ -706,9 +753,9 @@ async def register(request: Request, body: RegisterRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/auth/login", response_model=TokenResponse)
-async def login(request: Request, body: LoginRequest):
-    """Login with username/email and password"""
+@app.post("/auth/login", response_model=AuthSuccess)
+async def login(request: Request, response: Response, body: LoginRequest):
+    """Login with username/email and password (tokens issued as HttpOnly cookies)"""
     client_ip = get_client_ip(request)
     
     # Enterprise: brute-force protection (per IP and per username)
@@ -736,10 +783,8 @@ async def login(request: Request, body: LoginRequest):
         brute_force.record_success(client_ip)
         brute_force.record_success(body.username)
         audit_logger.log_login_attempt(body.username, client_ip, success=True)
-        return TokenResponse(
-            access_token=result["access_token"],
-            refresh_token=result["refresh_token"],
-        )
+        _set_auth_cookies(response, result["access_token"], result["refresh_token"])
+        return AuthSuccess(status="ok", user=result["user"])
     except HTTPException as e:
         # Enterprise: record failure + audit
         brute_force.record_failure(client_ip)
@@ -758,19 +803,28 @@ async def login(request: Request, body: LoginRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/auth/refresh", response_model=TokenResponse)
-async def refresh_token(request: RefreshRequest):
-    """Get new access token using refresh token"""
+@app.post("/auth/refresh", response_model=AuthSuccess)
+async def refresh_token(request: Request, response: Response, body: RefreshRequest):
+    """Get new access token using a refresh token (cookie or body)"""
+    refresh = body.refresh_token or request.cookies.get("refresh_token")
+    if not refresh:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
     try:
-        result = await user_manager.refresh_token(request.refresh_token)
-        return TokenResponse(
-            access_token=result["access_token"],
-            refresh_token=request.refresh_token,  # Keep same refresh token
-        )
+        result = await user_manager.refresh_token(refresh)
+        # Keep the same refresh token (it is still valid); only rotate access.
+        _set_auth_cookies(response, result["access_token"], refresh)
+        return AuthSuccess(status="ok")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/auth/logout")
+async def logout(response: Response):
+    """Clear the auth cookies (client-side session termination)"""
+    _clear_auth_cookies(response)
+    return {"status": "ok"}
 
 
 @app.get("/auth/me")
@@ -782,30 +836,84 @@ async def get_me(user = Depends(get_current_user)):
 # ============ WEBSOCKET ENDPOINT ============
 
 
+# ---------------------------------------------------------------------------
+# WebSocket auth tickets
+#
+# The browser should NOT put the JWT in the WS URL (?token=...) because that
+# leaks it via proxy logs, browser history and the Referer header. Instead the
+# frontend fetches a short-lived, single-use ticket from /ws/ticket (a normal
+# authenticated HTTP call) and connects with ?ticket=<ticket>. Tickets are
+# kept in-memory (per-process; fine for a single API replica; use Redis in a
+# multi-replica deployment) and are consumed on first use.
+# ---------------------------------------------------------------------------
+_ws_tickets: Dict[str, Dict[str, Any]] = {}
+_WS_TICKET_TTL = 60  # seconds
+
+
+def _issue_ws_ticket(user: Dict[str, Any]) -> Dict[str, Any]:
+    ticket = str(uuid.uuid4())
+    _ws_tickets[ticket] = {
+        "user_id": str(user["id"]),
+        "username": user.get("username", "Anonymous"),
+        "exp": time.monotonic() + _WS_TICKET_TTL,
+        "used": False,
+    }
+    return {"ticket": ticket, "expires_in": _WS_TICKET_TTL}
+
+
+def _consume_ws_ticket(ticket: str) -> Optional[Dict[str, Any]]:
+    record = _ws_tickets.pop(ticket, None)
+    if record is None:
+        return None
+    if record["used"] or time.monotonic() > record["exp"]:
+        return None
+    record["used"] = True
+    return record
+
+
+@app.post("/ws/ticket")
+async def ws_ticket(user=Depends(get_current_user)):
+    """Issue a short-lived, single-use WebSocket auth ticket.
+
+    The frontend calls this over HTTPS, then connects to the WebSocket with
+    `?ticket=<ticket>` instead of embedding the JWT in the URL.
+    """
+    return _issue_ws_ticket(user)
+
+
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     user_id: str,
     token: str = "",
+    ticket: str = "",
 ):
     """
     WebSocket endpoint for real-time chat
 
-    Connect: ws://localhost:8000/ws/{user_id}?token=<JWT>
+    Connect: wss://<host>/ws/{user_id}?ticket=<ticket>
 
-    Enterprise auth (frontend already sends `token`):
-    - No token / empty token  -> anonymous connection (backwards compatible)
-    - Valid access token      -> connected under the caller's REAL identity
-                                 (username from the JWT, user_id from the JWT;
-                                 path user_id is NOT trusted)
-    - Invalid/expired token   -> connection rejected (HTTP 403 / WS 1008)
+    Enterprise auth (prefer `ticket` over `token`):
+    - No token / ticket      -> anonymous connection (backwards compatible)
+    - Valid ticket           -> connected under the ticket's REAL identity
+    - Valid access token     -> connected under the caller's REAL identity
+                                  (username from the JWT, user_id from the JWT;
+                                  path user_id is NOT trusted)
+    - Invalid/expired ticket/token -> connection rejected (WS 1008)
 
     Messages (JSON):
     - Send: {"type": "chat", "data": {"content": "Hello!"}}
     - Receive: {"type": "response", "data": {"content": "Hi there!"}}
     """
     username = "Anonymous"
-    if token:
+    if ticket:
+        record = _consume_ws_ticket(ticket)
+        if not record:
+            await websocket.close(code=1008, reason="Invalid or expired ticket")
+            return
+        user_id = record["user_id"]
+        username = record["username"]
+    elif token:
         user = await authenticate_ws_token(token)
         if not user:
             # Fail closed: never accept a spoofed identity or bad token
@@ -2014,6 +2122,39 @@ async def chat_stream(
         # time between yielded chunks and stop cleanly if the cap is exceeded.
         start = time.monotonic()
 
+        # Resolve DSA feature config (request overrides server env defaults).
+        # Surfaced to the UI as a `config` SSE event so the control panel and
+        # the live reasoning view stay in sync with what actually ran.
+        critic = (
+            request.use_critic
+            if request.use_critic is not None
+            else (os.getenv("AGENT_CRITIQUE", "1") == "1")
+        )
+        reflect = (
+            request.use_reflection
+            if request.use_reflection is not None
+            else (os.getenv("AGENT_REFLECT", "1") == "1")
+        )
+        parallel = (
+            request.use_parallel
+            if request.use_parallel is not None
+            else True
+        )
+        agent_override = request.agent
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "config",
+                    "critic": critic,
+                    "reflection": reflect,
+                    "parallel": parallel,
+                    "agent": agent_override,
+                }
+            )
+            + "\n\n"
+        )
+
         # Helper: record the assistant reply, emit it, then signal stream end.
         async def done(text: str):
             await _persist_message(user_id, conversation_id, "assistant", text)
@@ -2125,10 +2266,24 @@ async def chat_stream(
             # earlier messages work.
             await _persist_message(user_id, conversation_id, "user", request.message)
             orchestrator = MultiAgentOrchestrator()
+            # Honor an explicit agent selection from the UI control panel.
+            if agent_override and agent_override in orchestrator.agents:
+                agent_type = agent_override
             # Strip @Agent prefix so the agent sees the clean task.
             _, clean_message = detect_agent_prefix(request.message)
             task = await _with_context(clean_message, memory, user_id, conversation_id)
             agent = orchestrator.agents[agent_type]
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "reasoning",
+                        "stage": "route",
+                        "content": f"Routing to {agent.name} agent",
+                    }
+                )
+                + "\n\n"
+            )
             full = ""
             try:
                 for event in agent.execute_stream(task):
@@ -2143,11 +2298,36 @@ async def chat_stream(
             except Exception as e:
                 full = f"⚠️ Error from {agent_type} agent: {e}"
                 yield f"data: {escape_sse(full)}\n\n"
+            # DSA: critic pass on the produced answer (when enabled).
+            if critic and full and not full.startswith("⚠️"):
+                try:
+                    note = orchestrator.agents["analyzer"].critique(task, full)
+                    if note:
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {"type": "reasoning", "stage": "critic", "content": note}
+                            )
+                            + "\n\n"
+                        )
+                except Exception:
+                    pass
             await _persist_message(user_id, conversation_id, "assistant", full)
             yield "data: [DONE]\n\n"
         else:
             # Stream from general ReAct agent (it reads + writes the SAME memory
             # instances, so the response is saved to this user's conversation).
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "reasoning",
+                        "stage": "route",
+                        "content": "Llama Agent is thinking",
+                    }
+                )
+                + "\n\n"
+            )
             full_response = ""
             for token in run_agent_stream(
                 request.message,

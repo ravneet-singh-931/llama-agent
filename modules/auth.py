@@ -18,7 +18,7 @@ from functools import wraps
 # JWT for token-based auth
 from jose import JWTError, jwt
 import bcrypt as _bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
 
 # Database
@@ -405,24 +405,31 @@ user_manager = UserManager()
 
 
 async def get_current_user(
+    request: Request = None,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> Dict[str, Any]:
     """
     FastAPI dependency to get current authenticated user
-    
+
+    Accepts either a Bearer token (Authorization header) or an HttpOnly
+    `access_token` cookie (preferred for browser clients so the JWT is never
+    reachable from JavaScript).
+
     Usage:
         @app.get("/protected")
         async def protected_route(user = Depends(get_current_user)):
             return {"user": user}
     """
-    if credentials is None:
+    token = credentials.credentials if credentials else None
+    if not token and request is not None:
+        token = request.cookies.get("access_token")
+    if not token:
         # auto_error=False makes the dependency return None instead of
         # raising 401 when no Authorization header is present
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated"
         )
-    token = credentials.credentials
     payload = jwt_manager.verify_token(token)
     
     if not payload:
@@ -511,16 +518,22 @@ async def authenticate_user(
 
 
 async def optional_auth(
+    request: Request = None,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     api_key: Optional[str] = Depends(api_key_header),
 ) -> Optional[Dict[str, Any]]:
     """
     Optional authentication - returns None if not authenticated
     Use this for endpoints that work with or without auth
+
+    Accepts a Bearer token, an HttpOnly `access_token` cookie, or an API key.
     """
-    # Try JWT token
-    if credentials:
-        payload = jwt_manager.verify_token(credentials.credentials)
+    # Try JWT token (header first, then cookie)
+    token = credentials.credentials if credentials else None
+    if not token and request is not None:
+        token = request.cookies.get("access_token")
+    if token:
+        payload = jwt_manager.verify_token(token)
         if payload:
             user_id = payload.get("sub")
             if user_id:
