@@ -393,8 +393,10 @@ def _run_db_health_check() -> Dict:
             conn.close()
     except ImportError:
         return {"status": "unavailable", "error": "psycopg2 not installed"}
-    except Exception as e:
-        return {"status": "unavailable", "error": str(e)}
+    except Exception:
+        # Never leak raw DB exception details (host/credentials) on a health
+        # endpoint; the failure is logged server-side via the caller's handler.
+        return {"status": "unavailable", "error": "database health check failed"}
 
 
 @asynccontextmanager
@@ -2641,7 +2643,7 @@ async def mcp_status(user = Depends(optional_auth)):
     except Exception as e:
         raise HTTPException(
             status_code=503,
-            detail=f"MCP server unreachable at {MCP_SERVER_URL}: {e}",
+            detail="MCP server unreachable",
         )
 
 
