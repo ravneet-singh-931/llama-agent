@@ -65,8 +65,8 @@ _current_conversation_id = contextvars.ContextVar("current_conversation_id", def
 GROQ_TIMEOUT = float(os.getenv("GROQ_TIMEOUT", "60"))
 GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "2"))
 
-# Bound for the synchronous agent.run() call (mirrors api.py's AGENT_TIMEOUT so
-# the CLI path and the web path use the same limit instead of a magic 60s).
+# Bound for the agent.run() workflow (mirrors api.py's AGENT_TIMEOUT so the CLI
+# path and the web path use the same limit instead of a magic 60s).
 AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "60"))
 
 # ---- run_agent result cache + single-flight -------------------------------
@@ -534,12 +534,14 @@ async def _run_agent_compute(prompt: str, cache_key: str,
 
     if owner:
         try:
-            # agent.run() is synchronous (verified), so run it in a worker
-            # thread and bound it with AGENT_TIMEOUT rather than awaiting it.
-            output = await asyncio.wait_for(
-                asyncio.to_thread(agent.run, prompt), timeout=AGENT_TIMEOUT
-            )
-            result = str(output)
+            # ReActAgent (llama-index workflow agent) returns a WorkflowHandler;
+            # awaiting it runs the async ReAct loop and yields an AgentOutput
+            # whose response.content is the answer text. Run it in the event
+            # loop (NOT a worker thread) and bound it with AGENT_TIMEOUT.
+            handler = agent.run(prompt)
+            output = await asyncio.wait_for(handler, timeout=AGENT_TIMEOUT)
+            # output is an AgentOutput; response.content holds the answer.
+            result = getattr(getattr(output, "response", None), "content", None) or str(output)
             _run_cache_put(cache_key, result)
             if not fut.cancelled():
                 fut.set_result(result)
