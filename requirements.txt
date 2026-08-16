@@ -4,8 +4,8 @@
 
 # --- AI / LLM ---
 groq
-llama-index-core
-llama-index-llms-groq
+llama-index-core==0.14.23
+llama-index-llms-groq==0.5.0
 
 # --- Environment ---
 python-dotenv
@@ -22,7 +22,7 @@ chromadb
 # --- Observability (Phoenix by Arize AI) ---
 arize-phoenix
 opentelemetry-instrumentation-fastapi
-openinference-instrumentation-llama-index
+openinference-instrumentation-llama-index==4.4.5
 
 # --- Data Processing ---
 pandas
