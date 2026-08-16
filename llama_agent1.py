@@ -407,12 +407,25 @@ class GuardedTool(FunctionTool):
 
     def __init__(self, base: "FunctionTool"):
         # Reuse the wrapped tool's function + name/description so the tool
-        # schema is preserved exactly.
-        super().__init__(
+        # schema is preserved exactly. Build a reference tool via
+        # from_defaults (the version-stable public constructor, which accepts
+        # name/description in all llama-index releases), then initialize the
+        # base class from its components. This tolerates llama-index versions
+        # where FunctionTool.__init__ takes `metadata=` instead of
+        # `name=`/`description=`.
+        ref = FunctionTool.from_defaults(
             fn=base.fn,
             name=base.metadata.name,
             description=base.metadata.description,
         )
+        try:
+            super().__init__(fn=ref.fn, metadata=ref.metadata)
+        except TypeError:
+            super().__init__(
+                fn=ref.fn,
+                name=ref.metadata.name,
+                description=ref.metadata.description,
+            )
         self._base = base
 
     def call(self, *args, **kwargs):
