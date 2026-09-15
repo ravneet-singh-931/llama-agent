@@ -1,9 +1,60 @@
-# ============================================
-# Kubernetes Namespace
-# ============================================
+# ============================================================================
+# 📚 LEARNER GUIDE: Kubernetes Namespace — k8s/namespace.yaml
+# ============================================================================
+# WHAT IS A NAMESPACE?
+# --------------------
+# A Namespace is like a "folder" or "project room" inside your Kubernetes
+# cluster. It isolates resources so that `llama-agent` pods, services, and
+# secrets don't collide with other apps (e.g., `default`, `kube-system`).
+#
+# WHY DO WE NEED IT?
+# ------------------
+# - Isolation: All 14 services (api, postgres, redis, etc.) live in
+#   `llama-agent` namespace, not in `default`. This keeps `kubectl get pods`
+#   clean and prevents name clashes.
+# - Security: NetworkPolicies and ResourceQuotas are scoped to a namespace.
+# - Organization: `kubectl get pods -n llama-agent` shows only this app.
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Every other YAML in k8s/ has `namespace: llama-agent` — they all
+#   depend on this file being applied FIRST (`kubectl apply -f k8s/namespace.yaml`).
+# - deploy.sh creates this first before anything else.
+#
+# KUBERNETES CONCEPTS USED:
+# -------------------------
+# - apiVersion: v1 → Core Kubernetes API (Namespace is a core resource)
+# - kind: Namespace → Tells k8s "create a namespace"
+# - metadata.name → The name of the namespace (must be DNS-1123, lowercase)
+# - metadata.labels → Key-value tags for organization/filtering
+#
+# FLOW:
+# -----
+# 1. User runs: kubectl apply -f k8s/namespace.yaml
+# 2. Kubernetes API creates a logical isolation boundary called "llama-agent"
+# 3. All subsequent `kubectl apply -f k8s/*.yaml` place resources inside it
+# 4. Verify: kubectl get ns  → should show `llama-agent` as Active
+# ============================================================================
+
+# apiVersion: Which Kubernetes API group/version to use.
+#   - "v1" is the core API group (for Namespace, Pod, Service, ConfigMap, Secret, PVC)
+#   - Other groups: "apps/v1" for Deployment, "networking.k8s.io/v1" for Ingress
 apiVersion: v1
+
+# kind: What type of resource to create.
+#   - "Namespace" = create an isolation boundary
 kind: Namespace
+
+# metadata: Information ABOUT the resource (not the spec of what it does)
 metadata:
+  # name: The unique name of this namespace.
+  #   - Must be lowercase, alphanumeric + hyphens
+  #   - All other files reference this: `namespace: llama-agent`
+  #   - If you change this, you must change it in EVERY other YAML!
   name: llama-agent
+
+  # labels: Optional key-value tags for filtering/grouping.
+  #   - `app: llama-agent` lets you do: kubectl get ns -l app=llama-agent
+  #   - Useful for GitOps tools (ArgoCD, Flux) to select resources
   labels:
     app: llama-agent

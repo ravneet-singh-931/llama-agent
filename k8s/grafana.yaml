@@ -1,55 +1,99 @@
-# ============================================
-# Grafana - Monitoring dashboards
-# ============================================
-# Service is named "grafana" (host grafana.llama-agent.local via
-# monitoring-ingress.yaml).
+# ============================================================================
+# 📚 LEARNER GUIDE: Grafana — k8s/grafana.yaml (Monitoring Dashboards)
+# ============================================================================
+# WHAT IS GRAFANA?
+# ----------------
+# Grafana is a visualization tool for metrics (from Prometheus) and logs (from Loki).
+# It shows dashboards with graphs, alerts, and stats.
+#   - Prometheus → Grafana: Metrics (CPU, request rate, error rate)
+#   - Loki → Grafana: Logs (searchable, via Promtail)
 #
-# Admin password: a Secret named "grafana-secret" with key
-# "admin-password" is created from secrets/grafana_admin_password.txt
-# (run from repo root, never commit the real file):
-#   kubectl create secret generic grafana-secret -n llama-agent \
-#     --from-file=admin-password=secrets/grafana_admin_password.txt
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 5 resources:
+#   1. ConfigMap `grafana-datasources` → Prometheus + Loki datasource config
+#   2. ConfigMap `grafana-dashboard-provider` → Where to find dashboards
+#   3. Deployment (1 replica, Grafana on port 3000)
+#   4. Service (ClusterIP, DNS: grafana:3000)
+#   5. PVC (2Gi for Grafana data)
 #
-# Provisioning comes from ConfigMaps (datasources + dashboard provider +
-# dashboard JSON). The dashboard ConfigMap is created from the repo file:
-#   kubectl create configmap grafana-dashboard-llama-agent -n llama-agent \
-#     --from-file=llama-agent.json=config/grafana/dashboards/llama-agent.json \
-#     --dry-run=client -o yaml | kubectl apply -f -
+# WHY GRAFANA?
+# ------------
+# - Pre-provisioned dashboard: `config/grafana/dashboards/llama-agent.json`
+# - Shows: Total Requests, Error Rate, Response Time, etc.
+# - Admin login: admin / password from Secret `grafana-secret`
 #
-# Grafana image runs as UID 472; Docker Desktop's hostpath PVCs are
-# root-owned, so we run as root (runAsUser: 0) to allow writes.
+# KUBERNETES CONCEPTS:
+# --------------------
+# - ConfigMap: Stores config files (datasource.yml, dashboard.yml) as volumes
+# - Deployment with volumeMounts (subPath for single file, full mount for dir)
+# - Secret for admin password (mounted as file, not env var)
+# - Service (ClusterIP)
+# - PVC for persistence (dashboards, users)
+# - securityContext: runAsUser 0 (root) because PVC is root-owned on Docker Desktop
+# - Probes on /api/health
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Datasources: http://prometheus:9090 and http://loki:3100 (Service DNS)
+# - Dashboard JSON: ConfigMap `grafana-dashboard-llama-agent` (created by deploy.sh)
+# - Ingress: grafana-ingress.yaml routes grafana.llama-agent.local → Service
+# - SSO: Optional OIDC via oauth2-proxy (env vars with optional:true)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/grafana.yaml
+# 2. Deployment creates Pod with grafana/grafana:10.4.0
+# 3. Pod mounts ConfigMaps (datasources, dashboard provider) and Secret (password)
+# 4. Service creates DNS: grafana → Pod IP
+# 5. Ingress routes grafana.llama-agent.local → Service
+# 6. User opens http://grafana.llama-agent.local → login admin / password
+# 7. Verify: kubectl logs -f deployment/grafana -n llama-agent
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: ConfigMap — Grafana Datasources (Prometheus + Loki)
+# --------------------------------------------------------------------------
+# ConfigMap stores config files that are mounted into Pods as files.
+# This one tells Grafana where to find Prometheus and Loki.
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: grafana-datasources
+  name: grafana-datasources  # ConfigMap name (mounted in Deployment)
   namespace: llama-agent
   labels:
     app: llama-agent
     component: grafana
 data:
+  # datasource.yml: Grafana datasource provisioning file
+  #   - Auto-creates datasources on startup (no manual UI config needed)
   datasource.yml: |
-    # ============================================
     # Grafana Datasources - Auto-provisioned
-    # ============================================
-
     apiVersion: 1
 
     datasources:
       # ---- Prometheus (Metrics) ----
-      - name: Prometheus
-        type: prometheus
-        access: proxy
-        url: http://prometheus:9090
-        isDefault: true
-        editable: true
+      - name: Prometheus  # Datasource name (used in dashboards)
+        type: prometheus  # Type: prometheus
+        access: proxy     # Proxy = Grafana backend proxies requests (secure)
+        url: http://prometheus:9090  # Prometheus Service DNS (ClusterIP)
+        isDefault: true   # Default datasource for dashboards
+        editable: true    # Can edit in UI
 
       # ---- Loki (Logs) ----
       - name: Loki
         type: loki
         access: proxy
-        url: http://loki:3100
+        url: http://loki:3100  # Loki Service DNS
         editable: true
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: ConfigMap — Grafana Dashboard Provider
+# --------------------------------------------------------------------------
+# Tells Grafana where to find dashboard JSON files (mounted from ConfigMap).
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -60,24 +104,25 @@ metadata:
     component: grafana
 data:
   dashboard.yml: |
-    # ============================================
     # Grafana Dashboard Provisioning
-    # ============================================
-
     apiVersion: 1
 
     providers:
-      - name: "Llama Agent Dashboards"
+      - name: "Llama Agent Dashboards"  # Provider name
         orgId: 1
-        folder: "Llama Agent"
-        type: file
-        disableDeletion: false
-        editable: true
-        updateIntervalSeconds: 10
+        folder: "Llama Agent"  # Folder in Grafana UI
+        type: file             # File-based provider
+        disableDeletion: false # Don't delete dashboards if file removed
+        editable: true         # Can edit in UI
+        updateIntervalSeconds: 10  # Check for updates every 10s
         options:
-          path: /var/lib/grafana/dashboards
+          path: /var/lib/grafana/dashboards  # Where dashboard JSONs are mounted
           foldersFromFilesStructure: false
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 3: Deployment — Grafana Pod
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -87,7 +132,7 @@ metadata:
     app: llama-agent
     component: grafana
 spec:
-  replicas: 1
+  replicas: 1  # Single replica (Grafana is stateful, but 1 is fine for lab)
   selector:
     matchLabels:
       app: llama-agent
@@ -100,29 +145,39 @@ spec:
     spec:
       containers:
         - name: grafana
-          image: grafana/grafana:10.4.0
+          image: grafana/grafana:10.4.0  # Grafana version 10.4.0
           ports:
-            - containerPort: 3000
+            - containerPort: 3000  # Grafana default port
               name: http
+
           env:
+            # GF_SERVER_HTTP_PORT: Grafana port (3000)
             - name: GF_SERVER_HTTP_PORT
               value: "3000"
+
+            # GF_SECURITY_ADMIN_USER: Admin username (always "admin")
             - name: GF_SECURITY_ADMIN_USER
               value: "admin"
+
+            # GF_SECURITY_ADMIN_PASSWORD_FILE: Path to password file (from Secret)
+            #   - Mounted at /etc/grafana/secrets/admin-password
+            #   - More secure than env var (not visible in `kubectl describe pod`)
             - name: GF_SECURITY_ADMIN_PASSWORD_FILE
               value: /etc/grafana/secrets/admin-password
+
+            # GF_USERS_ALLOW_SIGN_UP: Disable public sign-up (security)
             - name: GF_USERS_ALLOW_SIGN_UP
               value: "false"
+
+            # GF_SERVER_ROOT_URL: Public URL for Grafana (for redirects, links)
             - name: GF_SERVER_ROOT_URL
               value: "http://grafana.llama-agent.local"
+
             # ---- Point 2: SSO/OIDC for Grafana (scaffold, disabled by default) ----
-            # Flip GF_AUTH_GENERIC_OAUTH_ENABLED to "true" and create the
-            # "oauth2-proxy-secret" Secret (keys: oauth-client-id,
-            # oauth-client-secret, oauth-cookie-secret) with your IdP creds to
-            # activate. The secretKeyRefs are optional:true so Grafana still
-            # starts (OAuth simply inactive) until the Secret exists.
+            # Flip to "true" and create oauth2-proxy-secret to activate SSO
+            # secretKeyRef with optional:true means Pod still starts if Secret doesn't exist
             - name: GF_AUTH_GENERIC_OAUTH_ENABLED
-              value: "false"
+              value: "false"  # Disabled by default (enable via OIDC_ENABLED=true)
             - name: GF_AUTH_GENERIC_OAUTH_NAME
               value: "SSO"
             - name: GF_AUTH_GENERIC_OAUTH_CLIENT_ID
@@ -130,7 +185,7 @@ spec:
                 secretKeyRef:
                   name: oauth2-proxy-secret
                   key: oauth-client-id
-                  optional: true
+                  optional: true  # Don't fail if Secret missing
             - name: GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -147,6 +202,7 @@ spec:
               value: "https://openidconnect.googleapis.com/v1/userinfo"
             - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP
               value: "true"
+
           resources:
             requests:
               memory: "128Mi"
@@ -154,41 +210,57 @@ spec:
             limits:
               memory: "1Gi"
               cpu: "1"
+
+          # securityContext: Run as root (UID 0) because Docker Desktop PVCs are root-owned
+          #   - Grafana image normally runs as UID 472, but can't write to PVC if root-owned
           securityContext:
-            runAsUser: 0
+            runAsUser: 0  # Root (needed for Docker Desktop hostpath)
+
           readinessProbe:
             httpGet:
-              path: /api/health
+              path: /api/health  # Grafana health endpoint
               port: 3000
             initialDelaySeconds: 10
             periodSeconds: 10
+
           livenessProbe:
             httpGet:
               path: /api/health
               port: 3000
             initialDelaySeconds: 30
             periodSeconds: 20
+
           volumeMounts:
+            # Mount Secret as file (password)
             - name: grafana-secret
               mountPath: /etc/grafana/secrets
               readOnly: true
+
+            # Mount ConfigMap datasources as single file (subPath)
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources/datasource.yml
-              subPath: datasource.yml
+              subPath: datasource.yml  # Only this key from ConfigMap
               readOnly: true
+
+            # Mount dashboard provider config
             - name: dashboard-provider
               mountPath: /etc/grafana/provisioning/dashboards/dashboard.yml
               subPath: dashboard.yml
               readOnly: true
+
+            # Mount dashboards directory (from ConfigMap grafana-dashboard-llama-agent)
             - name: dashboards
               mountPath: /var/lib/grafana/dashboards
               readOnly: true
+
+            # Mount PVC for Grafana data (users, preferences)
             - name: data
               mountPath: /var/lib/grafana
+
       volumes:
         - name: grafana-secret
           secret:
-            secretName: grafana-secret
+            secretName: grafana-secret  # Created by deploy.sh from secrets/grafana_admin_password.txt
         - name: datasources
           configMap:
             name: grafana-datasources
@@ -197,15 +269,19 @@ spec:
             name: grafana-dashboard-provider
         - name: dashboards
           configMap:
-            name: grafana-dashboard-llama-agent
+            name: grafana-dashboard-llama-agent  # Created by deploy.sh from config/grafana/dashboards/llama-agent.json
         - name: data
           persistentVolumeClaim:
             claimName: grafana-pvc
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 4: Service — Stable DNS for Grafana
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: grafana
+  name: grafana  # DNS: grafana.llama-agent.svc.cluster.local (used in datasource URL)
   namespace: llama-agent
 spec:
   selector:
@@ -216,7 +292,11 @@ spec:
       targetPort: 3000
       name: http
   type: ClusterIP
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 5: PVC — Persistent Storage for Grafana
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -228,3 +308,8 @@ spec:
   resources:
     requests:
       storage: 2Gi
+
+# 💡 LEARNER TIP: Grafana provisioning
+#   - Datasources and dashboards are auto-provisioned via ConfigMaps (no manual UI setup)
+#   - To add a new dashboard: Create ConfigMap with JSON, mount it, restart Grafana
+#   - Check: kubectl get configmap grafana-datasources -n llama-agent -o yaml

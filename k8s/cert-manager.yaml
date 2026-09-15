@@ -1,49 +1,97 @@
-# ============================================
-# cert-manager — Let's Encrypt ClusterIssuers
-# ============================================
-# Installs two issuers (staging + prod) using the HTTP-01 solver via the
-# existing ingress-nginx controller. cert-manager is NOT bundled in this repo;
-# install it once per cluster (see k8s/deploy.sh, guarded by INSTALL_OPERATORS):
+# ============================================================================
+# 📚 LEARNER GUIDE: cert-manager — k8s/cert-manager.yaml (TLS/HTTPS)
+# ============================================================================
+# WHAT IS CERT-MANAGER?
+# ---------------------
+# cert-manager is a Kubernetes operator that AUTOMATES TLS certificates:
+#   - Requests certs from Let's Encrypt (or self-signed CA)
+#   - Solves HTTP-01 challenge via Ingress
+#   - Stores certs as Secrets (e.g., llama-agent-tls)
+#   - Renews before expiry
 #
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 3 ClusterIssuers (cluster-scoped, not namespaced):
+#   1. letsencrypt-prod → Production Let's Encrypt (real, trusted certs, rate limits)
+#   2. letsencrypt-staging → Staging (untrusted, for testing, no rate limits)
+#   3. selfsigned → Self-signed CA (for .local lab, browser shows "not trusted")
+#
+# WHY 3 ISSUERS?
+# --------------
+# - Prod: For real cloud with public FQDN (e.g., llama-agent.example.com)
+# - Staging: Test flow without burning prod rate limits (5 certs per domain per week)
+# - Selfsigned: For local lab (llama-agent.local) — Let's Encrypt can't issue for .local!
+#
+# REQUIREMENTS:
+# -------------
+# - cert-manager must be installed first (via Helm, see deploy.sh)
 #   helm repo add jetstack https://charts.jetstack.io
-#   helm install cert-manager jetstack/cert-manager \
-#     --namespace cert-manager --create-namespace \
-#     --set crds.enabled=true
+#   helm install cert-manager jetstack/cert-manager --namespace cert-manager --create-namespace --set crds.enabled=true
+# - Ingresses must have `cert-manager.io/cluster-issuer: <name>` and `tls:` block
 #
-# Then apply this file. Ingresses reference an issuer via the
-#   cert-manager.io/cluster-issuer: <name>
-# annotation and a `tls:` block (see k8s/ingress.yaml, *-ingress.yaml).
+# KUBERNETES CONCEPTS:
+# --------------------
+# - ClusterIssuer (cert-manager.io/v1, cluster-scoped)
+# - acme.server (Let's Encrypt endpoint)
+# - privateKeySecretRef (where to store account key)
+# - solvers.http01.ingress.class (which Ingress controller to use for challenge)
+# - selfSigned (for local CA)
 #
-# NOTE: Let's Encrypt cannot issue certificates for `.local` domains. For the
-# local lab (llama-agent.local) use the `selfsigned` issuer instead of
-# `letsencrypt-prod` (swap the annotation on each ingress). For real cloud
-# deployments replace the host with your public FQDN and keep `letsencrypt-prod`.
-# ============================================
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
+# HOW IT CONNECTS:
+# ----------------
+# - Ingresses (ingress.yaml, *-ingress.yaml) reference ClusterIssuer via annotation
+# - cert-manager watches Ingresses, creates Certificate, solves challenge, stores Secret
+#
+# FLOW:
+# -----
+# 1. Install cert-manager (Helm)
+# 2. kubectl apply -f k8s/cert-manager.yaml (creates 3 ClusterIssuers)
+# 3. Apply Ingress with `cert-manager.io/cluster-issuer: letsencrypt-prod` and `tls:`
+# 4. cert-manager creates Certificate, Order, Challenge
+# 5. Solves HTTP-01 via Ingress (creates temporary Pod/Service/Ingress)
+# 6. Let's Encrypt issues cert, cert-manager stores as Secret (e.g., llama-agent-tls)
+# 7. Ingress uses Secret for TLS
+# 8. Verify: kubectl get clusterissuer
+#            kubectl get certificate -n llama-agent
+#            kubectl describe certificate llama-agent-tls -n llama-agent
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# CLUSTERISSUER 1: Let's Encrypt Production (Real Certs)
+# --------------------------------------------------------------------------
+apiVersion: cert-manager.io/v1  # cert-manager API
+kind: ClusterIssuer  # Cluster-scoped (vs Issuer which is namespaced)
 metadata:
-  name: letsencrypt-prod
+  name: letsencrypt-prod  # Name referenced in Ingress annotation
 spec:
-  acme:
-    # Production Let's Encrypt endpoint (real, trusted certs; tight rate limits).
+  acme:  # ACME = Automated Certificate Management Environment (Let's Encrypt protocol)
+    # Production endpoint (real, trusted certs; tight rate limits: 5 per domain per week)
     server: https://acme-v02.api.letsencrypt.org/directory
-    # Replace with a real, monitored inbox — cert expiry notices are sent here.
+
+    # Email for cert expiry notices (replace with real, monitored inbox)
     email: certs@llama-agent.example.com
+
+    # Where to store Let's Encrypt account private key (auto-created)
     privateKeySecretRef:
-      name: letsencrypt-prod-account-key
+      name: letsencrypt-prod-account-key  # Secret name (in cert-manager namespace)
+
     solvers:
-      - http01:
+      - http01:  # HTTP-01 challenge (prove you control domain via HTTP)
           ingress:
-            class: nginx
+            class: nginx  # Use nginx Ingress controller for challenge
+
 ---
+# --------------------------------------------------------------------------
+# CLUSTERISSUER 2: Let's Encrypt Staging (Untrusted, for Testing)
+# --------------------------------------------------------------------------
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: letsencrypt-staging
 spec:
   acme:
-    # Staging endpoint — issues untrusted certs, used to test the flow without
-    # burning the production rate limits.
+    # Staging endpoint — issues untrusted certs (browser shows warning), but no rate limits
+    # Use this to test flow before switching to prod
     server: https://acme-staging-v02.api.letsencrypt.org/directory
     email: certs@llama-agent.example.com
     privateKeySecretRef:
@@ -52,13 +100,26 @@ spec:
       - http01:
           ingress:
             class: nginx
+
 ---
-# Self-signed issuer for the local lab (.local domains). cert-manager still
-# provisions a Secret, but the cert is signed by a locally-generated CA and
-# will show as "not trusted" in the browser — fine for dev, never for prod.
+# --------------------------------------------------------------------------
+# CLUSTERISSUER 3: Self-Signed (for Local Lab)
+# --------------------------------------------------------------------------
+# Self-signed issuer for .local domains. cert-manager still provisions a Secret,
+# but cert is signed by locally-generated CA and will show as "not trusted" in browser.
+# Fine for dev, never for prod. Use this for llama-agent.local.
+
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: selfsigned
 spec:
-  selfSigned: {}
+  selfSigned: {}  # Self-signed CA (no ACME, just generate locally)
+
+# 💡 LEARNER TIP: Which issuer to use?
+#   - Local lab (llama-agent.local): Use `selfsigned` (swap annotation on Ingress)
+#     kubectl annotate ingress llama-agent-ingress -n llama-agent cert-manager.io/cluster-issuer=selfsigned --overwrite
+#   - Real cloud (llama-agent.example.com): Use `letsencrypt-prod` (default)
+#   Check cert: kubectl get certificate -n llama-agent
+#               kubectl describe order -n llama-agent
+#               kubectl describe challenge -n llama-agent

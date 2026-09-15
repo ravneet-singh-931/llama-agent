@@ -1,11 +1,42 @@
-# ============================================
-# Grafana Ingress
-# Host (add to /etc/hosts): grafana.llama-agent.local -> Grafana
+# ============================================================================
+# 📚 LEARNER GUIDE: Grafana Ingress — k8s/grafana-ingress.yaml
+# ============================================================================
+# WHAT IS THIS?
+# -------------
+# Ingress for Grafana UI (monitoring dashboards).
+# Host: grafana.llama-agent.local → Grafana Service:3000
 #
-# Grafana has its OWN login (admin / grafana_admin_password.txt), so no
-# ingress-level basic-auth is added here. Prometheus, Loki and Phoenix use
-# separate Ingress resources protected by basic-auth (same credentials).
-# ============================================
+# WHY SEPARATE INGRESS?
+# ---------------------
+# Each observability UI (Grafana, Prometheus, Loki, Phoenix) has its OWN Ingress
+# with its OWN host (grafana.llama-agent.local, prometheus.llama-agent.local, etc.).
+# This allows:
+#   - Different auth (Grafana has its own login, others use basic-auth)
+#   - Different rate limiting
+#   - Clean host-based routing (vs path-based like /grafana, /prometheus)
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Ingress with host grafana.llama-agent.local
+# - No basic-auth (Grafana has its own admin login)
+# - TLS, rate limiting, WAF
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Service: grafana:3000 (from grafana.yaml)
+# - Host: grafana.llama-agent.local (add to /etc/hosts → Ingress IP)
+# - When OIDC_ENABLED=true, deploy.sh adds external-auth annotations (SSO)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/grafana-ingress.yaml
+# 2. Ingress creates route: grafana.llama-agent.local/* → Grafana Service
+# 3. User adds `127.0.0.1 grafana.llama-agent.local` to hosts file
+# 4. Opens http://grafana.llama-agent.local → Grafana login (admin / password)
+# 5. Verify: kubectl get ingress -n llama-agent | grep grafana
+#            curl http://grafana.llama-agent.local/api/health  (should return JSON)
+# ============================================================================
+
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,27 +47,41 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
-    # Point 1: TLS via cert-manager (use "selfsigned" for the .local lab)
+
+    # Point 1: TLS via cert-manager (use "selfsigned" for .local lab)
     cert-manager.io/cluster-issuer: letsencrypt-prod
-    # Point 3: Rate limiting + WAF
-    nginx.ingress.kubernetes.io/limit-rps: "5"
+
+    # Point 3: Rate limiting + WAF (stricter than main ingress: 5 rps vs 10)
+    nginx.ingress.kubernetes.io/limit-rps: "5"  # 5 req/sec per IP (stricter for monitoring)
     nginx.ingress.kubernetes.io/limit-rpm: "150"
     nginx.ingress.kubernetes.io/enable-modsecurity: "true"
     nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+
+    # NOTE: No basic-auth here! Grafana has its OWN login (admin / grafana-secret)
+    # Prometheus, Loki, Phoenix DO have basic-auth (see their ingresses)
+
 spec:
   ingressClassName: nginx
+
   tls:
     - hosts:
         - grafana.llama-agent.local
-      secretName: grafana-tls
+      secretName: grafana-tls  # TLS Secret
+
   rules:
-    - host: grafana.llama-agent.local
+    - host: grafana.llama-agent.local  # Host to match
       http:
         paths:
-          - path: /
+          - path: /  # All paths
             pathType: Prefix
             backend:
               service:
-                name: grafana
+                name: grafana  # Grafana Service
                 port:
                   number: 3000
+
+# 💡 LEARNER TIP: Grafana vs Other Monitoring UIs
+#   - Grafana: Own login (admin / password from Secret) — no Ingress basic-auth
+#   - Prometheus/Loki/Phoenix: Basic-auth via Ingress (monitoring-auth Secret, same password)
+#   Why? Grafana is the main UI, has user management; others are simpler, basic-auth is enough.
+#   When SSO enabled (OIDC_ENABLED=true), all get external-auth (oauth2-proxy) instead!

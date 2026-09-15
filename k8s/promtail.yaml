@@ -1,30 +1,97 @@
-# ============================================
-# Promtail - Log shipping (DaemonSet: one pod per node)
-# ============================================
-# The compose config used docker_sd_configs against /var/run/docker.sock.
-# In k8s we use kubernetes_sd_configs (role: pod), which discovers every
-# pod/container in the cluster (matching the "scrape ALL containers"
-# behavior of docker_sd) and automatically sets __path__ to each
-# container's log file under /var/log/pods.
+# ============================================================================
+# 📚 LEARNER GUIDE: Promtail — k8s/promtail.yaml (Log Shipping)
+# ============================================================================
+# WHAT IS PROMTAIL?
+# -----------------
+# Promtail is a log shipper (like Fluentd, Logstash). It tails log files from
+# every Pod on its node and pushes them to Loki.
+#   - Runs as DaemonSet (one Pod per node, so every node's logs are collected)
+#   - Discovers Pods via kubernetes_sd_configs (role: pod)
+#   - Parses CRI log format, extracts labels (namespace, pod, container, app)
 #
-# Runs as root (default for the promtail image) so it can read all logs.
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 5 resources:
+#   1. ServiceAccount `promtail` → Identity for Promtail Pods
+#   2. ClusterRole `promtail` → Permissions to list/watch pods (cluster-scoped)
+#   3. ClusterRoleBinding → Binds ServiceAccount to ClusterRole
+#   4. ConfigMap `promtail-config` → promtail-config.yml
+#   5. DaemonSet (one Pod per node, Promtail on port 9080)
+#
+# WHY DAEMONSET (not Deployment)?
+# -------------------------------
+# - Deployment: Fixed replicas (e.g., 2 Pods, maybe on same node)
+# - DaemonSet: One Pod PER NODE (ensures every node's logs are collected)
+# - If you have 3 nodes, DaemonSet creates 3 Pods (one per node)
+#
+# PROMTAIL CONFIG (promtail-config.yml):
+# --------------------------------------
+#   - server.http_listen_port: 9080
+#   - clients.url: http://loki:3100/loki/api/v1/push (where to push logs)
+#   - scrape_configs: kubernetes_sd_configs (discover all pods)
+#   - relabel_configs: Set __path__ to /var/log/pods/*$1/*.log (CRI layout)
+#   - pipeline_stages: Parse CRI format, extract level (ERROR, WARN, etc.)
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - ServiceAccount, ClusterRole, ClusterRoleBinding (RBAC)
+# - ConfigMap for config
+# - DaemonSet (one Pod per node)
+# - hostPath volumes (/var/log, /var/lib/docker/containers)
+# - env HOSTNAME from fieldRef spec.nodeName (for __host__ matching)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Discovers: All Pods via Kubernetes API (needs RBAC)
+# - Reads: /var/log/pods/*/*.log (kubelet CRI logs) and /var/lib/docker/containers (Docker logs)
+# - Pushes: To Loki Service http://loki:3100
+# - Labels: Adds namespace, pod, container, app, component, node, level
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/promtail.yaml
+# 2. DaemonSet creates one Pod per node (on Docker Desktop, 1 Pod)
+# 3. Pod discovers all Pods via API, tails their log files
+# 4. Parses logs, adds labels, pushes to Loki
+# 5. Verify: kubectl get pods -n llama-agent -l component=promtail
+#            kubectl logs -f daemonset/promtail -n llama-agent
+#            Check Loki: curl http://localhost:3100/loki/api/v1/labels
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: ServiceAccount — Identity for Promtail
+# --------------------------------------------------------------------------
+# ServiceAccount is like a user account for Pods. Promtail Pods use this
+# identity to authenticate to Kubernetes API (to list/watch pods).
+
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: promtail
+  name: promtail  # ServiceAccount name (used in DaemonSet spec.serviceAccountName)
   namespace: llama-agent
+
 ---
-# kubernetes_sd_configs (role: pod) needs to list/watch pods. ClusterRole
-# because pod discovery is cluster-scoped (pods in ALL namespaces).
+# --------------------------------------------------------------------------
+# RESOURCE 2: ClusterRole — Permissions to List/Watch Pods
+# --------------------------------------------------------------------------
+# ClusterRole defines permissions (what can be done, on what resources).
+# This one allows get/list/watch on pods (cluster-scoped, all namespaces).
+
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: promtail
+  name: promtail  # ClusterRole name (cluster-scoped, not namespaced)
 rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]  # Core API group (for pods)
+    resources: ["pods"]  # Resource: pods
+    verbs: ["get", "list", "watch"]  # Actions allowed
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 3: ClusterRoleBinding — Bind ServiceAccount to ClusterRole
+# --------------------------------------------------------------------------
+# ClusterRoleBinding grants the ClusterRole permissions to the ServiceAccount.
+
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -32,12 +99,16 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: promtail
-    namespace: llama-agent
+    namespace: llama-agent  # ServiceAccount in llama-agent namespace
 roleRef:
   kind: ClusterRole
-  name: promtail
+  name: promtail  # ClusterRole to bind
   apiGroup: rbac.authorization.k8s.io
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 4: ConfigMap — Promtail Config
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -48,39 +119,38 @@ metadata:
     component: promtail
 data:
   promtail-config.yml: |
-    # ============================================
     # Promtail Configuration (k8s) - Log Shipping
-    # ============================================
-
     server:
-      http_listen_port: 9080
-      grpc_listen_port: 0
+      http_listen_port: 9080  # Promtail HTTP port (for /ready)
+      grpc_listen_port: 0     # Disable gRPC
 
     positions:
-      filename: /tmp/positions.yaml
+      filename: /tmp/positions.yaml  # Where to store read positions (resume after restart)
 
     clients:
-      - url: http://loki:3100/loki/api/v1/push
+      - url: http://loki:3100/loki/api/v1/push  # Loki push endpoint (Service DNS)
 
     scrape_configs:
       # ---- Scrape logs of ALL k8s pods/containers ----
       - job_name: kubernetes-pods
         kubernetes_sd_configs:
-          - role: pod
+          - role: pod  # Discover all pods (like docker_sd in compose)
         relabel_configs:
-          # Promtail ONLY tails logs from pods on the SAME node as itself;
-          # without the __host__ label every target is dropped.
+          # Promtail ONLY tails logs from pods on SAME node as itself
+          # Without __host__ label, every target is dropped
           - source_labels: ["__meta_kubernetes_pod_node_name"]
             target_label: __host__
-          # Set the container log file path (CRI layout):
+
+          # Set container log file path (CRI layout):
           #   /var/log/pods/<namespace>_<pod>_<uid>/<container>/*.log
-          # The "*" expands to "<namespace>_<pod>_" and $1 is the pod UID.
+          # The "*" expands to "<namespace>_<pod>_" and $1 is pod UID
           - action: replace
             replacement: /var/log/pods/*$1/*.log
             separator: /
             source_labels: ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
             target_label: __path__
-          # Replace namespace/pod/container names with their actual values
+
+          # Replace namespace/pod/container names with actual values (for labels)
           - source_labels: ["__meta_kubernetes_namespace"]
             target_label: namespace
           - source_labels: ["__meta_kubernetes_pod_name"]
@@ -93,17 +163,23 @@ data:
             target_label: component
           - source_labels: ["__meta_kubernetes_pod_node_name"]
             target_label: node
+
         pipeline_stages:
-          # Parse the CRI log format (timestamp, stream, flags, message)
+          # Parse CRI log format (timestamp, stream, flags, message)
           - cri: {}
-          # Extract log level from messages
+
+          # Extract log level from messages (ERROR, WARN, INFO, etc.)
           - regex:
               expression: '(?i)(?P<level>(ERROR|WARN|INFO|DEBUG|CRITICAL))'
           - labels:
               level:
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 5: DaemonSet — One Promtail Pod Per Node
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
-kind: DaemonSet
+kind: DaemonSet  # DaemonSet = one Pod per node (vs Deployment = fixed replicas)
 metadata:
   name: promtail
   namespace: llama-agent
@@ -121,21 +197,22 @@ spec:
         app: llama-agent
         component: promtail
     spec:
+      # serviceAccountName: Use the ServiceAccount we created (for RBAC)
       serviceAccountName: promtail
+
       containers:
         - name: promtail
           image: grafana/promtail:2.9.6
           args:
             - -config.file=/etc/promtail/config.yml
           env:
-            # Promtail drops every target whose __host__ label differs from
-            # its own hostname. Setting HOSTNAME to the node name makes
-            # __host__ (set from __meta_kubernetes_pod_node_name) match
-            # without needing hostNetwork.
+            # HOSTNAME: Set to node name so __host__ label matches
+            #   - Promtail drops targets where __host__ != HOSTNAME
+            #   - Without this, no logs would be collected!
             - name: HOSTNAME
               valueFrom:
                 fieldRef:
-                  fieldPath: spec.nodeName
+                  fieldPath: spec.nodeName  # Node name where Pod is scheduled
           ports:
             - containerPort: 9080
               name: http
@@ -157,26 +234,35 @@ spec:
               mountPath: /etc/promtail/config.yml
               subPath: promtail-config.yml
               readOnly: true
+
             # Container log files (kubelet CRI log layout)
             - name: varlog
               mountPath: /var/log
               readOnly: true
-            # Docker-managed container logs (Docker Desktop runs k8s pods
-            # as Docker containers; files live under /var/lib/docker)
+
+            # Docker-managed container logs (Docker Desktop runs k8s pods as Docker containers)
             - name: dockerlog
               mountPath: /var/lib/docker/containers
               readOnly: true
+
+            # Positions file (where Promtail left off)
             - name: positions
               mountPath: /tmp
+
       volumes:
         - name: config
           configMap:
             name: promtail-config
         - name: varlog
-          hostPath:
+          hostPath:  # hostPath = mount host directory into Pod (node's /var/log)
             path: /var/log
         - name: dockerlog
           hostPath:
             path: /var/lib/docker/containers
         - name: positions
-          emptyDir: {}
+          emptyDir: {}  # Ephemeral (lost on Pod restart, but okay — will re-read logs)
+
+# 💡 LEARNER TIP: DaemonSet vs Deployment
+#   kubectl get daemonset -n llama-agent
+#   kubectl get pods -n llama-agent -o wide  (see which node each Pod is on)
+#   On Docker Desktop (single node), DaemonSet creates 1 Pod. On 3-node cluster, 3 Pods.

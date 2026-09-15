@@ -1,74 +1,150 @@
-# ============================================
-# Ingress - Routes external traffic
-# Host: llama-agent.local (add to /etc/hosts)
+# ============================================================================
+# 📚 LEARNER GUIDE: Main Ingress — k8s/ingress.yaml (The Traffic Cop)
+# ============================================================================
+# WHAT IS AN INGRESS?
+# -------------------
+# Ingress is a Kubernetes resource that routes EXTERNAL HTTP traffic (from
+# internet/browser) to INTERNAL Services (ClusterIP). It's like a reverse proxy
+# or load balancer at the cluster edge.
 #
-# Path routing (capture groups are passed through via rewrite-target):
-#   /api/*      -> API backend (prefix stripped)
-#   /ws/*       -> API WebSocket port (prefix stripped)
-#   /mcp/*      -> MCP agent server (prefix stripped)
-#   /streamlit/*-> Streamlit web UI (prefix stripped)
+# Think: Browser → Ingress (nginx) → Service → Pod
 #
-# NOTE: the Next.js frontend catch-all lives in frontend-ingress.yaml with
-# NO rewrite-target. The global /$2 here would corrupt /_next/static/* paths
-# (the /(.*) pattern has only one capture group, so $2 is empty and every
-# asset request rewrites to / -> index.html -> black screen).
-# ============================================
+# WHY INGRESS?
+# ------------
+# - Services are ClusterIP (internal only). Ingress exposes them externally.
+# - Single entry point for all paths: /api, /ws, /mcp, /streamlit
+# - Handles TLS (HTTPS), rate limiting, WAF, WebSocket, SSE
+# - Without Ingress, you'd need LoadBalancer per Service (expensive!)
+#
+# THIS INGRESS ROUTES:
+# --------------------
+#   /api/*       → llama-agent-api-service:8000 (REST API, prefix stripped)
+#   /ws/*        → llama-agent-api-service:8000 (WebSocket, prefix stripped)
+#   /mcp/*       → llama-agent-mcp-server-service:8001 (MCP SSE)
+#   /streamlit/* → llama-agent-web-service:8501 (Streamlit)
+#   /            → Handled by frontend-ingress.yaml (separate, no rewrite!)
+#
+# WHY SEPARATE FRONTEND INGRESS?
+# -------------------------------
+# This Ingress has `rewrite-target: /$2` which strips prefix (e.g., /api/chat → /chat).
+# But frontend catch-all `/(.*)` has only ONE capture group, so $2 is empty and
+# every request (including /_next/static/*) would rewrite to / → black screen!
+# So frontend has its OWN Ingress with NO rewrite-target.
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Ingress (networking.k8s.io/v1)
+# - ingressClassName: nginx (which controller to use)
+# - annotations: nginx-specific config (rate limiting, WAF, TLS, etc.)
+# - tls: HTTPS certs via cert-manager
+# - rules: Host + path → Service mapping
+# - pathType: ImplementationSpecific (for regex like /api(/|$)(.*))
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Requires: ingress-nginx controller installed (kubectl apply -f https://.../deploy.yaml)
+# - Requires: Host entry `127.0.0.1 llama-agent.local` in /etc/hosts (or Windows hosts)
+# - Routes to: 4 Services (api, mcp, web)
+# - TLS: Uses cert-manager ClusterIssuer `letsencrypt-prod` (or `selfsigned` for .local)
+#
+# FLOW:
+# -----
+# 1. Browser requests http://llama-agent.local/api/chat
+# 2. DNS resolves llama-agent.local → Ingress controller IP (127.0.0.1)
+# 3. Ingress matches host `llama-agent.local` and path `/api(/|$)(.*)`
+# 4. Strips prefix via rewrite-target: /api/chat → /chat (captured as $2)
+# 5. Forwards to Service llama-agent-api-service:8000 → Pod
+# 6. Pod responds, Ingress returns to browser
+# 7. Verify: kubectl get ingress -n llama-agent
+#            kubectl describe ingress llama-agent-ingress -n llama-agent
+# ============================================================================
+
+# apiVersion: Ingress API (networking.k8s.io/v1)
 apiVersion: networking.k8s.io/v1
+
+# kind: Ingress = HTTP routing rules
 kind: Ingress
+
 metadata:
+  # name: Ingress name (for kubectl get ingress)
   name: llama-agent-ingress
   namespace: llama-agent
+
   annotations:
+    # rewrite-target: Rewrite path before forwarding to Service
+    #   - /api(/|$)(.*) captures: $1 = / or end, $2 = rest (e.g., /chat)
+    #   - /$2 = forward only the rest (strip /api prefix)
+    #   - Example: /api/chat → /chat, /api/docs → /docs
     nginx.ingress.kubernetes.io/rewrite-target: /$2
+
+    # proxy-body-size: Max upload size (10m = 10 megabytes)
+    #   - For document uploads (PDF, etc.)
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+
+    # proxy-read-timeout: How long to wait for backend response (300s = 5 min)
+    #   - For long LLM calls (Groq can take time)
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+
+    # proxy-send-timeout: How long to wait to send request to backend
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
-    # WebSocket + SSE support (harmless for plain HTTP backends)
+
+    # WebSocket + SSE support (harmless for plain HTTP)
+    #   - proxy-http-version 1.1 = needed for WebSocket Upgrade
+    #   - proxy-buffering off = needed for SSE streaming (don't buffer)
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
-    # NOTE: configuration-snippet intentionally NOT used - it is disabled by
-    # default in ingress-nginx (allow-snippet-annotations=false) for security.
-    # WebSocket Upgrade/Connection headers are set automatically by ingress-nginx.
+
+    # NOTE: configuration-snippet NOT used — disabled by default for security
+    # WebSocket headers are set automatically by ingress-nginx
 
     # ---- Point 1: TLS via cert-manager ----
-    # For the local lab (.local) swap to "selfsigned"; for real cloud use
-    # "letsencrypt-prod" (default here) with a public FQDN host.
+    # ClusterIssuer name for Let's Encrypt certs
+    #   - For .local lab, use "selfsigned" (Let's Encrypt can't issue for .local)
+    #   - For real cloud, use "letsencrypt-prod" with public FQDN
     cert-manager.io/cluster-issuer: letsencrypt-prod
 
     # ---- Point 3: Rate limiting (per-client-IP) ----
-    nginx.ingress.kubernetes.io/limit-connections: "20"
-    nginx.ingress.kubernetes.io/limit-rps: "10"
-    nginx.ingress.kubernetes.io/limit-rpm: "300"
-    nginx.ingress.kubernetes.io/limit-burst-multiplier: "2"
+    # Protect against abuse/DDoS
+    nginx.ingress.kubernetes.io/limit-connections: "20"  # Max 20 concurrent connections per IP
+    nginx.ingress.kubernetes.io/limit-rps: "10"          # Max 10 requests per second per IP
+    nginx.ingress.kubernetes.io/limit-rpm: "300"         # Max 300 requests per minute per IP
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "2"  # Allow burst 2x limit
 
     # ---- Point 3: WAF (ModSecurity + OWASP Core Rule Set) ----
-    # Requires the ingress-nginx controller to be deployed with ModSecurity
-    # enabled (--enable-modsecurity / modsecurity-snippet). On cloud-managed
-    # ingress-nginx enable it in the controller ConfigMap; the annotations
-    # below then turn the rules on for this ingress.
+    # Requires ingress-nginx built with ModSecurity enabled
     nginx.ingress.kubernetes.io/enable-modsecurity: "true"
     nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
     nginx.ingress.kubernetes.io/modsecurity-snippet: |
       SecRuleEngine On
-      SecRequestBodyLimit 10485760
-      SecRequestBodyNoFilesLimit 1048576
+      SecRequestBodyLimit 10485760      # 10MB body limit
+      SecRequestBodyNoFilesLimit 1048576  # 1MB without files
+
 spec:
+  # ingressClassName: Which Ingress controller to use (must be installed)
+  #   - "nginx" = ingress-nginx controller (most common)
   ingressClassName: nginx
+
+  # tls: HTTPS configuration (cert-manager provisions certs)
   tls:
     - hosts:
-        - llama-agent.local
-      secretName: llama-agent-tls
+        - llama-agent.local  # Host for TLS cert
+      secretName: llama-agent-tls  # Secret where cert is stored (auto-created by cert-manager)
+
+  # rules: Host + path routing rules
   rules:
-    - host: llama-agent.local
+    - host: llama-agent.local  # Host to match (must be in /etc/hosts → Ingress IP)
       http:
         paths:
-          - path: /api(/|$)(.*)
-            pathType: ImplementationSpecific
+          # Path 1: /api/* → API Service (REST)
+          - path: /api(/|$)(.*)  # Regex: /api or /api/ or /api/anything
+            pathType: ImplementationSpecific  # Allows regex (vs Prefix/Exact)
             backend:
               service:
-                name: llama-agent-api-service
+                name: llama-agent-api-service  # Service name
                 port:
-                  number: 8000
+                  number: 8000  # Service port
+
+          # Path 2: /ws/* → API Service (WebSocket)
           - path: /ws(/|$)(.*)
             pathType: ImplementationSpecific
             backend:
@@ -76,6 +152,8 @@ spec:
                 name: llama-agent-api-service
                 port:
                   number: 8000
+
+          # Path 3: /mcp/* → MCP Server (SSE)
           - path: /mcp(/|$)(.*)
             pathType: ImplementationSpecific
             backend:
@@ -83,6 +161,8 @@ spec:
                 name: llama-agent-mcp-server-service
                 port:
                   number: 8001
+
+          # Path 4: /streamlit/* → Streamlit Service
           - path: /streamlit(/|$)(.*)
             pathType: ImplementationSpecific
             backend:
@@ -90,3 +170,10 @@ spec:
                 name: llama-agent-web-service
                 port:
                   number: 8501
+
+# 💡 LEARNER TIP: Test Ingress
+#   kubectl get ingress -n llama-agent
+#   kubectl describe ingress llama-agent-ingress -n llama-agent
+#   curl http://llama-agent.local/api/health  (should return JSON)
+#   curl http://llama-agent.local/api/docs    (Swagger UI)
+#   Remember: Add `127.0.0.1 llama-agent.local` to /etc/hosts!

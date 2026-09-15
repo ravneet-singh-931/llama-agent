@@ -1,18 +1,59 @@
-# ============================================
-# Redis Deployment + Service
-# ============================================
+# ============================================================================
+# 📚 LEARNER GUIDE: Redis — k8s/redis.yaml
+# ============================================================================
+# WHAT IS REDIS?
+# --------------
+# Redis is an in-memory data store (super fast, stores in RAM). Used for:
+#   - Caching (fast lookups, avoid DB hits)
+#   - Session storage
+#   - Pub/Sub for WebSockets (real-time chat)
+#   - Shared fact store: `llama:facts` hash (so all API replicas see same facts)
+#   - Rate limiting counters
+#
+# WHY REDIS IN THIS APP?
+# ----------------------
+# - The API runs 2 replicas. Without Redis, `remember` on replica A would be
+#   invisible to `recall` on replica B (each has own memory). Redis solves this!
+# - `modules/memory.py` → FactMemory uses Redis if REDIS_URL is set, else JSON fallback
+# - `modules/redis_store.py` → Shared dict for agent_stats, doc_followup
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Deployment (1 replica, like Postgres — Redis is stateful)
+# - Service (ClusterIP, DNS: redis-service:6379)
+# - Probes using `redis-cli ping` (Redis health check)
+# - No PVC here (data is cache, can be lost — but you could add one for persistence)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - api.yaml → env REDIS_URL = redis://redis-service:6379
+#   Host `redis-service` is the Service name defined here!
+# - api.py → `await redis_store.get_json("llama:agent_stats")`
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/redis.yaml
+# 2. Deployment creates Pod with redis:7-alpine
+# 3. Service creates DNS: redis-service → Pod IP
+# 4. API pods connect via REDIS_URL
+# 5. Verify: kubectl exec -n llama-agent deploy/redis -- redis-cli ping  → PONG
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: Deployment — Runs Redis Pod
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: redis
+  name: redis  # Deployment name
   namespace: llama-agent
   labels:
-    app: redis
+    app: redis  # Label for Service selector
 spec:
-  replicas: 1
+  replicas: 1  # Single replica (Redis is stateful; for HA use managed Redis)
   selector:
     matchLabels:
-      app: redis
+      app: redis  # Must match Pod labels
   template:
     metadata:
       labels:
@@ -20,23 +61,29 @@ spec:
     spec:
       containers:
         - name: redis
-          image: redis:7-alpine
+          image: redis:7-alpine  # Lightweight Redis 7
           ports:
-            - containerPort: 6379
+            - containerPort: 6379  # Redis default port
+
+          # resources: Redis is lightweight, needs less than Postgres
           resources:
             requests:
-              memory: "64Mi"
-              cpu: "100m"
+              memory: "64Mi"   # Small request (in-memory store, but cache)
+              cpu: "100m"      # 0.1 CPU
             limits:
-              memory: "128Mi"
+              memory: "128Mi"  # Max 128Mi (if exceeded, OOMKill — data lost, but cache)
               cpu: "200m"
+
+          # livenessProbe: Is Redis alive? Uses redis-cli ping (should return PONG)
           livenessProbe:
             exec:
               command:
-                - redis-cli
-                - ping
-            initialDelaySeconds: 30
+                - redis-cli  # Redis CLI tool
+                - ping       # Ping command → expects PONG
+            initialDelaySeconds: 30  # Wait 30s for Redis to start
             periodSeconds: 10
+
+          # readinessProbe: Ready to serve? Same check, but faster initial delay
           readinessProbe:
             exec:
               command:
@@ -44,16 +91,34 @@ spec:
                 - ping
             initialDelaySeconds: 5
             periodSeconds: 5
+
+          # Note: No volumeMounts — Redis data is ephemeral (cache).
+          # If you want persistence, add:
+          #   volumeMounts:
+          #     - name: redis-data
+          #       mountPath: /data
+          # And a PVC + volumes section like postgres.yaml
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Service — Stable DNS for Redis
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: redis-service
+  name: redis-service  # DNS: redis-service.llama-agent.svc.cluster.local
+                       # Short: redis-service (inside same namespace)
   namespace: llama-agent
 spec:
   selector:
-    app: redis
+    app: redis  # Routes to Pods with label app=redis
   ports:
-    - port: 6379
-      targetPort: 6379
-  type: ClusterIP
+    - port: 6379        # Service port
+      targetPort: 6379  # Container port
+  type: ClusterIP  # Internal only (secure, not exposed to internet)
+
+# 💡 LEARNER TIP: Test Redis
+#   kubectl exec -n llama-agent deploy/redis -- redis-cli ping
+#   kubectl exec -n llama-agent deploy/redis -- redis-cli set mykey "hello"
+#   kubectl exec -n llama-agent deploy/redis -- redis-cli get mykey
+#   kubectl exec -n llama-agent deploy/redis -- redis-cli hgetall llama:facts

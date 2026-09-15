@@ -1,38 +1,99 @@
-# ============================================
-# HorizontalPodAutoscaler — API + MCP server (Point 7)
-# ============================================
-# Scales on CPU utilization (requires metrics-server in the cluster). The API
-# is stateless (shared Redis/Chroma/Postgres), so it scales horizontally; the
-# MCP server is lighter and scales more conservatively. Min replicas stay at
-# the current deployed count so autoscaling never drops below a safe floor.
-# ============================================
-apiVersion: autoscaling/v2
+# ============================================================================
+# 📚 LEARNER GUIDE: Horizontal Pod Autoscaler (HPA) — k8s/api-hpa.yaml
+# ============================================================================
+# WHAT IS HPA?
+# ------------
+# HPA = Horizontal Pod Autoscaler. It AUTOMATICALLY scales Deployments up/down
+# based on metrics (usually CPU). "Horizontal" = more Pods (vs Vertical = bigger Pods).
+#   - If CPU > 70%, add more Pods (up to max)
+#   - If CPU < 70%, remove Pods (down to min, with stabilization window)
+#
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 2 HPAs:
+#   1. llama-agent-api-hpa → Scales API Deployment (2 to 10 replicas, CPU 70%)
+#   2. llama-agent-mcp-hpa → Scales MCP Server (1 to 4 replicas, CPU 70%)
+#
+# WHY HPA?
+# --------
+# - Handle traffic spikes (more users → more Pods)
+# - Save resources when idle (fewer Pods)
+# - API is stateless (shared Redis/Chroma/Postgres), so it scales horizontally
+#
+# REQUIREMENTS:
+# -------------
+# - metrics-server must be installed in cluster (provides CPU metrics)
+#   On Docker Desktop: kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+#   Or: Enable in Docker Desktop settings → Kubernetes → Enable metrics-server
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - HPA (autoscaling/v2)
+# - scaleTargetRef: Which Deployment to scale
+# - minReplicas/maxReplicas: Scaling bounds
+# - metrics: Resource CPU with target Utilization 70%
+# - behavior: How fast to scale down (stabilizationWindow, policies)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Targets: llama-agent-api and llama-agent-mcp-server Deployments
+# - Uses: CPU metrics from metrics-server (or Prometheus via custom metrics)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/api-hpa.yaml
+# 2. HPA watches CPU of target Deployment's Pods
+# 3. If avg CPU > 70% for a while, HPA increases replicas (up to max)
+# 4. If avg CPU < 70%, HPA decreases replicas (with 5 min stabilization)
+# 5. Verify: kubectl get hpa -n llama-agent
+#            kubectl describe hpa llama-agent-api-hpa -n llama-agent
+#            kubectl top pods -n llama-agent  (needs metrics-server)
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# HPA 1: API Deployment (2 to 10 replicas, CPU 70%)
+# --------------------------------------------------------------------------
+apiVersion: autoscaling/v2  # HPA API (v2 supports multiple metrics, behavior)
 kind: HorizontalPodAutoscaler
 metadata:
-  name: llama-agent-api-hpa
+  name: llama-agent-api-hpa  # HPA name
   namespace: llama-agent
 spec:
+  # scaleTargetRef: Which resource to scale
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: llama-agent-api
+    name: llama-agent-api  # Target Deployment (from api.yaml)
+
+  # minReplicas: Minimum Pods (never scale below this, even if idle)
+  #   - 2 = current deployed count, safe floor for HA
   minReplicas: 2
-  maxReplicas: 10
+
+  # maxReplicas: Maximum Pods (never scale above this, even if overloaded)
+  maxReplicas: 10  # Up to 10 Pods for high traffic
+
+  # metrics: When to scale (CPU 70%)
   metrics:
-    - type: Resource
+    - type: Resource  # Resource metric (CPU/memory)
       resource:
-        name: cpu
+        name: cpu  # CPU utilization
         target:
-          type: Utilization
-          averageUtilization: 70
+          type: Utilization  # Target is utilization % (vs AverageValue)
+          averageUtilization: 70  # Target 70% CPU per Pod (avg across Pods)
+
+  # behavior: How to scale (advanced, optional)
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 300
+      stabilizationWindowSeconds: 300  # Wait 5 min before scaling down (avoid flapping)
       policies:
-        - type: Pods
-          value: 1
-          periodSeconds: 60
+        - type: Pods  # Policy type: Pods (vs Percent)
+          value: 1    # Remove at most 1 Pod per period
+          periodSeconds: 60  # Per 60 seconds
+
 ---
+# --------------------------------------------------------------------------
+# HPA 2: MCP Server Deployment (1 to 4 replicas, CPU 70%)
+# --------------------------------------------------------------------------
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -42,13 +103,22 @@ spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: llama-agent-mcp-server
-  minReplicas: 1
-  maxReplicas: 4
+    name: llama-agent-mcp-server  # Target MCP Deployment
+
+  minReplicas: 1  # Min 1 (lighter, single replica is okay)
+  maxReplicas: 4  # Max 4 (less than API, MCP is lighter)
+
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: 70  # Same 70% target
+
+  # Note: No custom behavior for MCP (uses defaults: scale down quickly)
+
+# 💡 LEARNER TIP: Test HPA
+#   kubectl get hpa -n llama-agent --watch
+#   # Generate load: kubectl run -i --tty load-generator --rm --image=busybox --restart=Never -- /bin/sh -c "while sleep 0.01; do wget -q -O- http://llama-agent-api-service:8000/health; done"
+#   # Watch replicas increase: kubectl get deployment llama-agent-api -n llama-agent --watch

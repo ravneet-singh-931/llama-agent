@@ -1,11 +1,37 @@
-# ============================================
-# Loki Ingress — protected by basic-auth
-# Host (add to /etc/hosts): loki.llama-agent.local -> Loki
+# ============================================================================
+# 📚 LEARNER GUIDE: Loki Ingress — k8s/loki-ingress.yaml
+# ============================================================================
+# WHAT IS THIS?
+# -------------
+# Ingress for Loki (log aggregation).
+# Host: loki.llama-agent.local → Loki Service:3100
+# Protected by basic-auth (same as Prometheus).
 #
-# Basic-auth uses the SAME credentials as Grafana (admin / grafana password).
-# The htpasswd secret (monitoring-auth) is created by k8s/deploy.sh from the
-# gitignored secrets/grafana_admin_password.txt — never committed.
-# ============================================
+# WHY BASIC-AUTH?
+# ---------------
+# Loki has no built-in login, so Ingress protects it (like Prometheus).
+# Same monitoring-auth Secret (admin / grafana password).
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Ingress with basic-auth, host loki.llama-agent.local
+# - TLS, rate limiting, WAF
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Service: loki:3100 (from loki.yaml)
+# - Secret: monitoring-auth
+# - When OIDC_ENABLED=true, replaced with external-auth
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/loki-ingress.yaml
+# 2. Ingress creates route: loki.llama-agent.local/* → Loki Service
+# 3. User adds `127.0.0.1 loki.llama-agent.local` to hosts
+# 4. Opens http://loki.llama-agent.local → basic-auth prompt
+# 5. Verify: curl -u admin:password http://loki.llama-agent.local/ready
+# ============================================================================
+
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,22 +42,26 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+
     nginx.ingress.kubernetes.io/auth-type: basic
     nginx.ingress.kubernetes.io/auth-secret: monitoring-auth
     nginx.ingress.kubernetes.io/auth-realm: "Monitoring"
-    # Point 1: TLS via cert-manager (use "selfsigned" for the .local lab)
+
     cert-manager.io/cluster-issuer: letsencrypt-prod
-    # Point 3: Rate limiting + WAF
+
     nginx.ingress.kubernetes.io/limit-rps: "5"
     nginx.ingress.kubernetes.io/limit-rpm: "150"
     nginx.ingress.kubernetes.io/enable-modsecurity: "true"
     nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+
 spec:
   ingressClassName: nginx
+
   tls:
     - hosts:
         - loki.llama-agent.local
       secretName: loki-tls
+
   rules:
     - host: loki.llama-agent.local
       http:
@@ -43,3 +73,8 @@ spec:
                 name: loki
                 port:
                   number: 3100
+
+# 💡 LEARNER TIP: Loki API
+#   curl -u admin:password "http://loki.llama-agent.local/loki/api/v1/labels"
+#   curl -u admin:password "http://loki.llama-agent.local/loki/api/v1/query_range?query={app=\"llama-agent\"}"
+#   In Grafana: Explore → Loki → Query: {namespace="llama-agent"} |= "error"

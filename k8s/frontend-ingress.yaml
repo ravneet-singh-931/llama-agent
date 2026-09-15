@@ -1,45 +1,95 @@
-# ============================================
-# Next.js Frontend - dedicated Ingress
-# Host: llama-agent.local
+# ============================================================================
+# 📚 LEARNER GUIDE: Frontend Ingress — k8s/frontend-ingress.yaml
+# ============================================================================
+# WHAT IS THIS?
+# -------------
+# Dedicated Ingress for Next.js frontend (catch-all `/` → frontend Service).
+# Kept SEPARATE from main ingress.yaml on purpose!
 #
-# Kept SEPARATE from llama-agent-ingress on purpose: that Ingress uses
-# rewrite-target: /$2, but the catch-all pattern /(.*) has only ONE capture
-# group, so $2 is empty and every request (including /_next/static/* assets)
-# would be rewritten to / -> index.html -> black screen. This Ingress has
-# NO rewrite-target so static assets pass through untouched. More specific
-# paths (/api, /ws, /mcp, /streamlit) in llama-agent-ingress take precedence.
-# ============================================
+# WHY SEPARATE?
+# -------------
+# Main ingress has `rewrite-target: /$2` which strips prefix (e.g., /api/chat → /chat).
+# But frontend catch-all pattern `/(.*)` has only ONE capture group, so $2 is EMPTY!
+# Every request (including /_next/static/chunks/...js) would rewrite to / → index.html
+# → Browser gets HTML instead of JS/CSS → Black screen!
+#
+# Solution: This Ingress has NO rewrite-target, so static assets pass through untouched.
+# More specific paths (/api, /ws, /mcp, /streamlit) in main ingress take precedence
+# (Ingress controller matches longest path first).
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Ingress with path `/` and pathType Prefix (matches all, but least specific)
+# - No rewrite-target (preserve original path)
+# - Same TLS, rate limiting, WAF as main ingress
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Routes: / (and /_next/*, /favicon.ico, etc.) → llama-agent-frontend-service:3000
+# - Main ingress handles /api/* etc. (more specific, so matched first)
+# - Requires same host: llama-agent.local
+#
+# FLOW:
+# -----
+# 1. Browser requests http://llama-agent.local/ or http://llama-agent.local/_next/static/...
+# 2. Ingress controller checks all Ingresses for host llama-agent.local
+# 3. Tries to match most specific path first: /api/*? No. /ws/*? No. → Falls to / (Prefix)
+# 4. Forwards to frontend Service WITHOUT rewriting (preserves /_next/static/...)
+# 5. Next.js Pod serves the asset or page
+# 6. Verify: curl http://llama-agent.local/  (should return HTML)
+#            curl http://llama-agent.local/_next/static/...  (should return JS, not HTML)
+# ============================================================================
+
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: frontend-ingress
+  name: frontend-ingress  # Separate Ingress for frontend
   namespace: llama-agent
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
-    # Point 1: TLS via cert-manager (use "selfsigned" for the .local lab)
+
+    # Point 1: TLS via cert-manager (use "selfsigned" for .local lab)
     cert-manager.io/cluster-issuer: letsencrypt-prod
-    # Point 3: Rate limiting + WAF
+
+    # Point 3: Rate limiting + WAF (same as main ingress)
     nginx.ingress.kubernetes.io/limit-connections: "20"
     nginx.ingress.kubernetes.io/limit-rps: "10"
     nginx.ingress.kubernetes.io/limit-rpm: "300"
     nginx.ingress.kubernetes.io/enable-modsecurity: "true"
     nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+
+    # NOTE: NO rewrite-target here! That's the whole point.
+    # If we had rewrite-target: /$2, then /_next/static/chunks/main.js
+    # would become / (because $2 is empty for pattern /(.*)) → broken!
+
 spec:
   ingressClassName: nginx
+
   tls:
     - hosts:
         - llama-agent.local
-      secretName: llama-agent-tls
+      secretName: llama-agent-tls  # Same TLS secret as main ingress (shared cert)
+
   rules:
     - host: llama-agent.local
       http:
         paths:
-          - path: /
-            pathType: Prefix
+          # Catch-all: / → Frontend Service
+          #   - pathType: Prefix = matches / and any subpath (/, /about, /_next/*, etc.)
+          #   - But more specific paths in main ingress (/api/*) are matched FIRST
+          - path: /  # Catch-all (least specific, matched last)
+            pathType: Prefix  # Prefix = matches / and everything under it
             backend:
               service:
-                name: llama-agent-frontend-service
+                name: llama-agent-frontend-service  # Frontend Service
                 port:
-                  number: 3000
+                  number: 3000  # Frontend port
+
+# 💡 LEARNER TIP: Ingress path matching priority
+#   Ingress controller sorts paths by length/specificity:
+#   1. /api(/|$)(.*)  (regex, very specific) → main ingress
+#   2. /ws(/|$)(.*)   (regex) → main ingress
+#   3. /              (Prefix, least specific) → this ingress
+#   So /api/chat goes to main ingress, / goes to this one. No conflict!

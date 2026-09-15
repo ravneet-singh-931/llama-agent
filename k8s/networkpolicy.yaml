@@ -1,42 +1,101 @@
-# ============================================
-# NetworkPolicies — zero-trust baseline (Point 7)
-# ============================================
-# Baseline: deny ALL ingress by default, then explicitly allow only what the
-# app needs. Egress is default-deny + allow DNS, in-namespace, and outbound
-# HTTPS (the app needs Groq/OIDC/ACME/Tavily over 443). Tighten the 0.0.0.0/0
-# egress rule to specific provider CIDRs in production.
+# ============================================================================
+# 📚 LEARNER GUIDE: NetworkPolicies — k8s/networkpolicy.yaml (Zero-Trust)
+# ============================================================================
+# WHAT IS NETWORKPOLICY?
+# ----------------------
+# NetworkPolicy is a firewall for Pods. By default, all Pods can talk to all Pods.
+# NetworkPolicy lets you DENY by default, then ALLOW only what you need (zero-trust).
+#   - Ingress: Who can talk TO this Pod?
+#   - Egress: Who can this Pod talk TO?
 #
-# NOTE: ingress-nginx runs in the "ingress-nginx" namespace; the
-# namespaceSelector below matches it by the well-known label
-# "app.kubernetes.io/name: ingress-nginx". Adjust if your controller uses a
-# different label/namespace.
-# ============================================
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 6 NetworkPolicies (Point 7: Cloud Hardening):
+#   1. default-deny-ingress → Deny ALL ingress to every Pod (default deny)
+#   2. allow-intra-namespace → Allow all traffic WITHIN namespace (app ↔ DB, etc.)
+#   3. allow-from-ingress-nginx → Allow ingress controller to reach user-facing services
+#   4. allow-monitoring-scrape → Allow Prometheus to scrape metrics
+#   5. default-deny-egress → Deny ALL egress (default deny)
+#   6. allow-egress-baseline → Allow DNS, in-namespace, and outbound HTTPS (Groq, etc.)
+#
+# WHY ZERO-TRUST?
+# ---------------
+# - Without policies, a compromised Pod could scan all other Pods
+# - With default-deny, only explicitly allowed traffic works (secure)
+# - Egress to 0.0.0.0/0 is broad — tighten to specific provider CIDRs in prod
+#
+# REQUIREMENTS:
+# -------------
+# - CNI that supports NetworkPolicy (e.g., Calico, Cilium, Weave)
+# - Docker Desktop's default CNI may not enforce — test with `kubectl get networkpolicy`
+# - Enable via NETWORK_POLICY=true in deploy.sh (off by default for lab)
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - NetworkPolicy (networking.k8s.io/v1)
+# - podSelector: Which Pods this policy applies to ({} = all Pods)
+# - policyTypes: Ingress and/or Egress
+# - ingress.from: Who can connect (podSelector, namespaceSelector, ipBlock)
+# - egress.to: Who can be connected to
+# - ports: Which ports are allowed
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Applies to: All Pods in llama-agent namespace
+# - Allows: Intra-namespace, ingress-nginx, Prometheus scraping, DNS, HTTPS
+# - Denies: Everything else (by default)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/networkpolicy.yaml (only if NETWORK_POLICY=true)
+# 2. Policies are created, kubelet/CNI enforces them
+# 3. Test: kubectl exec -n llama-agent deploy/llama-agent-api -- curl http://postgres-service:5432 (should work, intra-namespace)
+#          kubectl exec -n llama-agent deploy/llama-agent-api -- curl http://google.com:80 (should fail, egress deny except 443)
+# 4. Verify: kubectl get networkpolicy -n llama-agent
+# ============================================================================
 
-# 1) Default deny all ingress to every pod in the namespace.
+# --------------------------------------------------------------------------
+# POLICY 1: Default Deny All Ingress (to every Pod)
+# --------------------------------------------------------------------------
+# This is the "default deny" — without it, all ingress is allowed by default.
+# With it, NO Pod can receive traffic unless another policy explicitly allows it.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: default-deny-ingress
+  name: default-deny-ingress  # Policy name
   namespace: llama-agent
 spec:
-  podSelector: {}
-  policyTypes: [Ingress]
+  podSelector: {}  # Applies to ALL Pods in namespace (empty selector = all)
+  policyTypes: [Ingress]  # Only ingress (not egress)
+  # No `ingress` rules → Deny all ingress (default deny)
+
 ---
-# 2) Allow all traffic WITHIN the namespace (app <-> postgres/redis/chromadb,
-#    api <-> mcp, promtail -> pods, etc.).
+# --------------------------------------------------------------------------
+# POLICY 2: Allow All Traffic WITHIN Namespace
+# --------------------------------------------------------------------------
+# Allows any Pod in llama-agent to talk to any other Pod in same namespace.
+# Needed for: api ↔ postgres/redis/chromadb, api ↔ mcp, promtail → pods, etc.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-intra-namespace
   namespace: llama-agent
 spec:
-  podSelector: {}
+  podSelector: {}  # All Pods
   policyTypes: [Ingress]
   ingress:
     - from:
-        - podSelector: {}
+        - podSelector: {}  # From any Pod in same namespace
+
 ---
-# 3) Allow the ingress controller to reach the user-facing services.
+# --------------------------------------------------------------------------
+# POLICY 3: Allow Ingress Controller to Reach User-Facing Services
+# --------------------------------------------------------------------------
+# Allows ingress-nginx (in ingress-nginx namespace) to reach api, web, frontend, etc.
+# Without this, Ingress couldn't forward external traffic to Services!
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -47,11 +106,11 @@ spec:
     matchExpressions:
       - key: component
         operator: In
-        values: [api, web, frontend, mcp-server, grafana, prometheus, loki, phoenix]
+        values: [api, web, frontend, mcp-server, grafana, prometheus, loki, phoenix]  # Only these components
   policyTypes: [Ingress]
   ingress:
     - from:
-        - namespaceSelector:
+        - namespaceSelector:  # From namespace with label app.kubernetes.io/name=ingress-nginx
             matchLabels:
               app.kubernetes.io/name: ingress-nginx
       ports:
@@ -62,63 +121,88 @@ spec:
         - { protocol: TCP, port: 9090 }   # prometheus
         - { protocol: TCP, port: 3100 }   # loki
         - { protocol: TCP, port: 6006 }   # phoenix
+
 ---
-# 4) Allow Prometheus to scrape app/metrics + node-exporter.
+# --------------------------------------------------------------------------
+# POLICY 4: Allow Prometheus to Scrape Metrics
+# --------------------------------------------------------------------------
+# Allows Prometheus Pod to scrape metrics from app Pods and node-exporter.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-monitoring-scrape
   namespace: llama-agent
 spec:
-  podSelector: {}
+  podSelector: {}  # All Pods (any Pod can be scraped)
   policyTypes: [Ingress]
   ingress:
     - from:
         - podSelector:
             matchLabels:
-              component: prometheus
+              component: prometheus  # From Prometheus Pod
       ports:
-        - { protocol: TCP, port: 8000 }
-        - { protocol: TCP, port: 9100 }   # node-exporter
-        - { protocol: TCP, port: 3000 }   # grafana (scrape)
-        - { protocol: TCP, port: 3100 }   # loki
-        - { protocol: TCP, port: 6006 }   # phoenix
+        - { protocol: TCP, port: 8000 }  # api metrics
+        - { protocol: TCP, port: 9100 }  # node-exporter
+        - { protocol: TCP, port: 3000 }  # grafana
+        - { protocol: TCP, port: 3100 }  # loki
+        - { protocol: TCP, port: 6006 }  # phoenix
+
 ---
-# 5) Egress: default-deny, then allow DNS, in-namespace, and outbound HTTPS.
+# --------------------------------------------------------------------------
+# POLICY 5: Default Deny All Egress (to every Pod)
+# --------------------------------------------------------------------------
+# Default deny for egress — no Pod can talk OUT unless explicitly allowed.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-egress
   namespace: llama-agent
 spec:
-  podSelector: {}
+  podSelector: {}  # All Pods
   policyTypes: [Egress]
+  # No `egress` rules → Deny all egress
+
 ---
+# --------------------------------------------------------------------------
+# POLICY 6: Allow Egress Baseline (DNS, In-Namespace, Outbound HTTPS)
+# --------------------------------------------------------------------------
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-egress-baseline
   namespace: llama-agent
 spec:
-  podSelector: {}
+  podSelector: {}  # All Pods
   policyTypes: [Egress]
   egress:
-    # DNS resolution (kube-system kube-dns / coredns)
+    # Allow DNS resolution (kube-system coredns/kube-dns)
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: kube-system
+              kubernetes.io/metadata.name: kube-system  # kube-system namespace
       ports:
-        - { protocol: UDP, port: 53 }
-        - { protocol: TCP, port: 53 }
-    # All in-namespace traffic (postgres/redis/chromadb/api/mcp/monitoring)
+        - { protocol: UDP, port: 53 }  # DNS UDP
+        - { protocol: TCP, port: 53 }  # DNS TCP
+
+    # Allow all in-namespace traffic (postgres/redis/chromadb/api/mcp/monitoring)
     - to:
-        - podSelector: {}
-    # Outbound HTTPS to the public internet (Groq, OIDC, Let's Encrypt, Tavily)
+        - podSelector: {}  # Any Pod in same namespace
+
+    # Allow outbound HTTPS to public internet (Groq, OIDC, Let's Encrypt, Tavily)
+    #   - 0.0.0.0/0 = all IPs, except private ranges (RFC1918 + link-local)
+    #   - In production, tighten to specific provider CIDRs (e.g., Groq IPs)
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]  # Exclude private
       ports:
-        - { protocol: TCP, port: 443 }
-        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 443 }  # HTTPS
+        - { protocol: TCP, port: 80 }   # HTTP (for Let's Encrypt HTTP-01)
+
+# 💡 LEARNER TIP: Test NetworkPolicy
+#   kubectl get networkpolicy -n llama-agent
+#   kubectl exec -n llama-agent deploy/llama-agent-api -- curl -v http://postgres-service:5432  (should work)
+#   kubectl exec -n llama-agent deploy/llama-agent-api -- curl -v http://example.com:80  (should work, port 80 allowed)
+#   kubectl exec -n llama-agent deploy/llama-agent-api -- curl -v http://example.com:22  (should fail, only 80/443 allowed)

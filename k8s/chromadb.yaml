@@ -1,21 +1,59 @@
-# ============================================
-# ChromaDB Server — shared vector store for ALL API replicas
-# ============================================
-# The API runs 2+ replicas. A pod-local ChromaDB (PersistentClient) meant
-# each replica had its own index, so a document indexed on replica A was
-# invisible to search on replica B. Running ChromaDB as a single shared
-# server (and pointing the API at it via CHROMA_SERVER_URL) gives every
-# replica the SAME semantic index. ClusterIP only — never exposed outside
-# the cluster (matches the self-hosted lab-grade security posture).
+# ============================================================================
+# 📚 LEARNER GUIDE: ChromaDB — k8s/chromadb.yaml (Shared Vector Store)
+# ============================================================================
+# WHAT IS CHROMADB?
+# -----------------
+# ChromaDB is a vector database for semantic search (RAG).
+#   - Text → Embedding (vector of numbers) → Stored in ChromaDB
+#   - Query → Embedding → Find similar vectors (cosine similarity)
+#   - Example: "refund policy" also finds "money back guarantee"
+#
+# WHY A SHARED SERVER?
+# --------------------
+# The API runs 2 replicas. If each had its own local ChromaDB (PersistentClient),
+# a document uploaded to replica A would be INVISIBLE to search on replica B!
+# Solution: Run ChromaDB as a SINGLE shared server (HttpClient), all replicas
+# connect via CHROMA_SERVER_URL=http://chromadb-service:8000
+#
+# This mirrors docker-compose.yml's `chromadb` service.
+# ClusterIP only — never exposed outside cluster (security).
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Deployment (1 replica, shared state)
+# - Service (ClusterIP, DNS: chromadb-service:8000)
+# - PVC (5Gi for vector data)
+# - Probes using tcpSocket (ChromaDB image has no curl/wget, so use TCP check)
+# - command: Overrides Docker entrypoint to run `chroma run --host 0.0.0.0 ...`
+#
+# HOW IT CONNECTS:
+# ----------------
+# - api.yaml → env CHROMA_SERVER_URL = http://chromadb-service:8000
+# - modules/vector_store.py → get_vector_store() uses HttpClient if URL set
+# - api.py → app.state.rag = OptimizedRAG(vector_store) uses this shared store
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/chromadb.yaml
+# 2. Deployment creates Pod with chromadb/chroma:latest
+# 3. Pod runs `chroma run --host 0.0.0.0 --port 8000 --path /chroma/chroma`
+# 4. Service creates DNS: chromadb-service → Pod IP
+# 5. API pods connect via CHROMA_SERVER_URL
+# 6. Verify: kubectl logs -f deployment/chromadb -n llama-agent
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: Deployment — Runs ChromaDB Server Pod
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: chromadb
+  name: chromadb  # Deployment name
   namespace: llama-agent
   labels:
     app: chromadb
 spec:
-  replicas: 1
+  replicas: 1  # Single shared instance (all API replicas share it)
   selector:
     matchLabels:
       app: chromadb
@@ -26,46 +64,66 @@ spec:
     spec:
       containers:
         - name: chromadb
-          image: chromadb/chroma:latest
-          # Serve on all interfaces and persist to the mounted PVC.
+          image: chromadb/chroma:latest  # Official ChromaDB image
+
+          # command: What to run inside container
+          #   - The image's entrypoint is already `chroma`, so we pass `run ...`
+          #   - --host 0.0.0.0 = listen on all interfaces (needed for k8s networking)
+          #   - --port 8000 = ChromaDB API port
+          #   - --path /chroma/chroma = where to persist data (mounted PVC)
           command: ["chroma", "run", "--host", "0.0.0.0", "--port", "8000", "--path", "/chroma/chroma"]
+
           ports:
-            - containerPort: 8000
+            - containerPort: 8000  # ChromaDB API port
               name: http
+
           resources:
             requests:
-              memory: "512Mi"
+              memory: "512Mi"  # ChromaDB needs more RAM (embeddings)
               cpu: "250m"
             limits:
               memory: "1Gi"
               cpu: "500m"
+
+          # startupProbe: Gives slow-starting app time to initialize
+          #   - ChromaDB downloads embedding model (all-MiniLM-L6-v2, ~80MB) on first boot
+          #   - Without this, liveness probe would kill Pod mid-download → restart loop
           startupProbe:
-            tcpSocket:
+            tcpSocket:  # Check if TCP port 8000 is open (no HTTP client in image)
               port: 8000
-            failureThreshold: 30
-            periodSeconds: 10
+            failureThreshold: 30  # Allow 30 failures
+            periodSeconds: 10     # Check every 10s → up to 300s (5 min) startup time
+
           livenessProbe:
             tcpSocket:
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 15
+
           readinessProbe:
             tcpSocket:
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 10
+
           volumeMounts:
             - name: chromadb-data
-              mountPath: /chroma
+              mountPath: /chroma  # Where ChromaDB persists vectors
+
       volumes:
         - name: chromadb-data
           persistentVolumeClaim:
-            claimName: chromadb-pvc
+            claimName: chromadb-pvc  # PVC defined below
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Service — Stable DNS for ChromaDB
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: chromadb-service
+  name: chromadb-service  # DNS: chromadb-service.llama-agent.svc.cluster.local
+                          # Used in api.yaml as CHROMA_SERVER_URL
   namespace: llama-agent
 spec:
   selector:
@@ -74,8 +132,12 @@ spec:
     - port: 8000
       targetPort: 8000
       name: http
-  type: ClusterIP
+  type: ClusterIP  # Internal only
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 3: PVC — Persistent Storage for Vectors
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -83,7 +145,12 @@ metadata:
   namespace: llama-agent
 spec:
   accessModes:
-    - ReadWriteOnce
+    - ReadWriteOnce  # One node read-write
   resources:
     requests:
-      storage: 5Gi
+      storage: 5Gi  # 5Gi for embeddings (each chunk ~500 chars → vector)
+
+# 💡 LEARNER TIP: Why not use Deployment with 2 replicas for ChromaDB?
+#   ChromaDB is stateful (stores vectors on disk). Scaling to 2 would create
+#   2 separate indexes (split brain). For HA, use managed vector DB or
+#   ChromaDB's distributed mode (not covered here).

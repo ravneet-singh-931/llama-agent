@@ -1,11 +1,40 @@
-# ============================================
-# Prometheus Ingress — protected by basic-auth
-# Host (add to /etc/hosts): prometheus.llama-agent.local -> Prometheus
+# ============================================================================
+# 📚 LEARNER GUIDE: Prometheus Ingress — k8s/prometheus-ingress.yaml
+# ============================================================================
+# WHAT IS THIS?
+# -------------
+# Ingress for Prometheus UI (metrics).
+# Host: prometheus.llama-agent.local → Prometheus Service:9090
+# Protected by basic-auth (admin / grafana password, same as Grafana).
 #
-# Basic-auth uses the SAME credentials as Grafana (admin / grafana password).
-# The htpasswd secret (monitoring-auth) is created by k8s/deploy.sh from the
-# gitignored secrets/grafana_admin_password.txt — never committed.
-# ============================================
+# WHY BASIC-AUTH?
+# ---------------
+# Prometheus has no built-in login (unlike Grafana). So Ingress adds basic-auth:
+#   - User → Ingress → Check basic-auth (monitoring-auth Secret) → Prometheus
+#   - Secret `monitoring-auth` is created by deploy.sh from secrets/grafana_admin_password.txt
+#   - Same credentials as Grafana (admin / password) for simplicity
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Ingress with basic-auth annotations (auth-type, auth-secret, auth-realm)
+# - Host prometheus.llama-agent.local
+# - TLS, rate limiting, WAF
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Service: prometheus:9090 (from prometheus.yaml)
+# - Secret: monitoring-auth (htpasswd file, created by deploy.sh)
+# - When OIDC_ENABLED=true, deploy.sh REPLACES basic-auth with external-auth (SSO)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/prometheus-ingress.yaml
+# 2. Ingress creates route: prometheus.llama-agent.local/* → Prometheus Service, with basic-auth
+# 3. User adds `127.0.0.1 prometheus.llama-agent.local` to hosts
+# 4. Opens http://prometheus.llama-agent.local → Browser prompts for basic-auth (admin / password)
+# 5. Verify: curl -u admin:password http://prometheus.llama-agent.local/api/v1/query?query=up
+# ============================================================================
+
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,22 +45,29 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
-    nginx.ingress.kubernetes.io/auth-type: basic
-    nginx.ingress.kubernetes.io/auth-secret: monitoring-auth
-    nginx.ingress.kubernetes.io/auth-realm: "Monitoring"
-    # Point 1: TLS via cert-manager (use "selfsigned" for the .local lab)
+
+    # Basic-auth: Protect Prometheus with username/password
+    nginx.ingress.kubernetes.io/auth-type: basic  # Type: basic (vs digest)
+    nginx.ingress.kubernetes.io/auth-secret: monitoring-auth  # Secret with htpasswd file
+    nginx.ingress.kubernetes.io/auth-realm: "Monitoring"  # Realm name (shown in browser prompt)
+
+    # Point 1: TLS via cert-manager
     cert-manager.io/cluster-issuer: letsencrypt-prod
+
     # Point 3: Rate limiting + WAF
     nginx.ingress.kubernetes.io/limit-rps: "5"
     nginx.ingress.kubernetes.io/limit-rpm: "150"
     nginx.ingress.kubernetes.io/enable-modsecurity: "true"
     nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+
 spec:
   ingressClassName: nginx
+
   tls:
     - hosts:
         - prometheus.llama-agent.local
       secretName: prometheus-tls
+
   rules:
     - host: prometheus.llama-agent.local
       http:
@@ -43,3 +79,11 @@ spec:
                 name: prometheus
                 port:
                   number: 9090
+
+# 💡 LEARNER TIP: Basic-auth Secret
+#   deploy.sh creates it via:
+#     GRAFANA_PW=$(cat secrets/grafana_admin_password.txt)
+#     HTPASSWD="admin:$(openssl passwd -apr1 "$GRAFANA_PW")"
+#     kubectl create secret generic monitoring-auth -n llama-agent --from-file=auth=/tmp/monitoring_htpasswd.txt
+#   Check: kubectl get secret monitoring-auth -n llama-agent -o yaml
+#          kubectl describe ingress prometheus-ingress -n llama-agent | grep auth

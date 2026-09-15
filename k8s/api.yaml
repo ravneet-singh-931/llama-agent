@@ -1,20 +1,78 @@
-# ============================================
-# Llama Agent API Deployment + Service
-# ============================================
-apiVersion: apps/v1
+# ============================================================================
+# 📚 LEARNER GUIDE: FastAPI API — k8s/api.yaml (The Brain of the App)
+# ============================================================================
+# WHAT IS THIS FILE?
+# ------------------
+# This is the MOST IMPORTANT file — it runs the FastAPI backend (api.py).
+# Creates 3 resources:
+#   1. Deployment (2 replicas, the API servers)
+#   2. Service (ClusterIP, DNS: llama-agent-api-service:8000)
+#   3. PVC (1Gi for uploads)
+#
+# WHAT DOES THE API DO?
+# ---------------------
+# - REST: POST /chat, /chat/stream (SSE), /auth/*, /documents, /mcp/*
+# - WebSocket: /ws/{user_id} (real-time chat)
+# - RAG: Document upload → ChromaDB → semantic search
+# - Multi-agent: Routes to 5 agents via MCP server
+# - Observability: Traces to Phoenix, metrics to Prometheus
+#
+# WHY 2 REPLICAS?
+# ---------------
+# - High availability: If one Pod dies, the other serves traffic
+# - Load balancing: Service distributes requests round-robin
+# - Shared state via Redis + ChromaDB server (so both see same facts/vectors)
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Deployment with 2 replicas, rolling updates
+# - Service (ClusterIP) for internal discovery
+# - PVC for uploads (shared? Actually ReadWriteOnce — each Pod gets own? See note)
+# - Secrets for env vars (DATABASE_URL, etc.)
+# - Probes: startupProbe (10 min for model download), liveness, readiness
+# - Resources: requests/limits for QoS
+# - imagePullPolicy: IfNotPresent (don't re-pull if already cached)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Connects TO: postgres-service, redis-service, chromadb-service, mcp-server, phoenix
+# - Connected FROM: Ingress (via Service), frontend, web
+# - Env vars from Secrets: app-secrets (database-url, redis-url, groq-api-key, jwt-secret-key)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/api.yaml
+# 2. Deployment creates 2 Pods with ravneet231/llama-agent:v7
+# 3. Each Pod runs `uvicorn api:app --host 0.0.0.0 --port 8000`
+# 4. startupProbe waits up to 10 min for /health (model download)
+# 5. Service creates DNS: llama-agent-api-service → 2 Pod IPs (load balanced)
+# 6. Ingress routes /api/* → Service → Pods
+# 7. Verify: kubectl get pods -n llama-agent -l component=api
+#            kubectl logs -f deployment/llama-agent-api -n llama-agent
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: Deployment — 2 Replicas of FastAPI
+# --------------------------------------------------------------------------
+apiVersion: apps/v1  # Deployment API
 kind: Deployment
 metadata:
-  name: llama-agent-api
+  name: llama-agent-api  # Deployment name
   namespace: llama-agent
   labels:
-    app: llama-agent
-    component: api
+    app: llama-agent      # App label (for grouping)
+    component: api        # Component label (for Service selector, HPA, PDB)
 spec:
+  # replicas: Number of Pods to run (2 for HA)
+  #   - HPA (api-hpa.yaml) can scale this to 10 based on CPU
+  #   - PDB (poddisruptionbudgets.yaml) ensures at least 1 stays up during drains
   replicas: 2
+
   selector:
     matchLabels:
       app: llama-agent
-      component: api
+      component: api  # Must match Pod template labels
+
   template:
     metadata:
       labels:
@@ -22,119 +80,172 @@ spec:
         component: api
     spec:
       containers:
-        - name: api
-          # Point 4: pin to an explicit, immutable release tag (v7). CI builds
-          # and pushes :v7 on every main merge (see .github/workflows/main.yml).
-          # For maximum reproducibility pin to a digest instead, e.g.
-          #   ravneet231/llama-agent@sha256:<64-hex>
+        - name: api  # Container name
+
+          # image: Docker image for the API
+          #   - Built by CI (.github/workflows/main.yml) on every main push
+          #   - Tag :v7 is pinned (Point 4: immutable, not :latest which drifts)
+          #   - For max reproducibility, use digest: ravneet231/llama-agent@sha256:...
           image: ravneet231/llama-agent:v7
-          # IfNotPresent: only pull when the tag is missing locally, so a
-          # re-pushed :v7 is picked up via an explicit `kubectl rollout
-          # restart` (or image digest bump) rather than silent :latest drift.
+
+          # imagePullPolicy: When to pull image
+          #   - IfNotPresent: Only pull if not already cached on node
+          #   - Always: Always pull (for :latest)
+          #   - Never: Never pull (for local images)
+          #   - Here, IfNotPresent + :v7 means re-pushed :v7 needs `kubectl rollout restart`
           imagePullPolicy: IfNotPresent
+
+          # command: Override Docker CMD (what to run)
+          #   - uvicorn = ASGI server for FastAPI
+          #   - api:app = module `api.py`, variable `app` (FastAPI instance)
+          #   - --host 0.0.0.0 = listen on all interfaces (k8s networking)
+          #   - --port 8000 = API port
           command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+
           ports:
-            - containerPort: 8000
-              name: http
+            - containerPort: 8000  # Container port (Service targets this)
+              name: http           # Port name (for Service reference)
+
+          # env: Environment variables (many from Secrets)
           env:
+            # DATABASE_URL: Postgres connection string, from Secret `app-secrets`
+            #   - Value: postgresql+asyncpg://postgres:postgres@postgres-service:5432/llama_agent
+            #   - Host is Service DNS, not localhost!
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
                   key: database-url
+
+            # REDIS_URL: Redis connection, from Secret
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
                   key: redis-url
+
+            # GROQ_API_KEY: LLM API key, from Secret
             - name: GROQ_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
                   key: groq-api-key
+
+            # JWT_SECRET_KEY: For signing JWT tokens, from Secret
             - name: JWT_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
                   key: jwt-secret-key
+
+            # MCP_SERVER_URL: Where to find MCP agent server (Service DNS)
+            #   - http://llama-agent-mcp-server-service:8001/sse
+            #   - The API calls this for multi-agent tasks
             - name: MCP_SERVER_URL
               value: http://llama-agent-mcp-server-service:8001/sse
-            # Tiered defaults: strong=70b for one-shot answers/agents,
-            # fast=8b for streaming chat. Delete these lines once the
-            # free-tier 70b daily quota is upgraded or resets.
+
+            # LLM_MODEL_STRONG: Strong model for one-shot answers (70b)
+            #   - Tiered: strong=70b for agents, fast=8b for streaming
             - name: LLM_MODEL_STRONG
               value: llama-3.3-70b-versatile
+
+            # LLM_MODEL_FAST: Fast model for streaming chat (8b, lower latency)
             - name: LLM_MODEL_FAST
               value: llama-3.1-8b-instant
+
+            # ENVIRONMENT: Tells app it's in production (affects CORS, etc.)
             - name: ENVIRONMENT
               value: production
+
+            # USE_OPTIMIZED_RAG: Enable 7-feature RAG pipeline (Hybrid, Reranker, etc.)
+            #   - If false, falls back to SimpleRAG
             - name: USE_OPTIMIZED_RAG
               value: "true"
-            # Shared ChromaDB server so every API replica uses the SAME
-            # vector index (otherwise each pod has its own pod-local index).
+
+            # CHROMA_SERVER_URL: Shared ChromaDB server (all replicas same index)
+            #   - Without this, each Pod has own local index (bug!)
             - name: CHROMA_SERVER_URL
               value: http://chromadb-service:8000
-            # K8s injects PHOENIX_PORT as "tcp://<IP>:<PORT>" because the
-            # "phoenix" Service exists; the phoenix client needs an integer.
+
+            # PHOENIX_PORT: Phoenix tracing port (must be integer, not tcp://...)
+            #   - K8s auto-injects PHOENIX_PORT as tcp://IP:PORT if Service exists
+            #   - We override to ensure it's "6006" (integer)
             - name: PHOENIX_PORT
               value: "6006"
+
+          # resources: CPU/Memory for scheduling and limits
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "250m"
+              memory: "256Mi"  # Guaranteed
+              cpu: "250m"      # 0.25 CPU
             limits:
-              memory: "512Mi"
+              memory: "512Mi"  # Max, else OOMKill
               cpu: "500m"
-          # startupProbe gives slow-starting apps (e.g. OptimizedRAG
-          # downloading the ChromaDB embedding model on first boot) up to
-          # 10 minutes before k8s treats the container as failed. Without
-          # this the liveness/readiness probes kill the pod mid-download,
-          # creating a restart death-spiral.
+
+          # startupProbe: Gives slow-starting app time to become ready
+          #   - OptimizedRAG downloads embedding model (~80MB) on first boot
+          #   - Without this, liveness probe kills Pod mid-download → crash loop
+          #   - Allows up to 60 failures * 10s = 600s (10 min) startup time
           startupProbe:
             httpGet:
-              path: /health
+              path: /health  # Health endpoint (api.py)
               port: 8000
-            failureThreshold: 60
-            periodSeconds: 10
+            failureThreshold: 60  # Allow 60 failures before marking failed
+            periodSeconds: 10     # Check every 10s
+
+          # livenessProbe: Is container alive? If fails, kubelet restarts it
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 30
+            initialDelaySeconds: 30  # Wait 30s after start
             periodSeconds: 10
+
+          # readinessProbe: Ready to serve traffic? If fails, Service removes Pod
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 10
+            initialDelaySeconds: 10  # Check sooner than liveness
             periodSeconds: 5
+
           volumeMounts:
             - name: uploads
-              mountPath: /app/uploads
+              mountPath: /app/uploads  # Where uploaded files are stored
             - name: logs
-              mountPath: /app/logs
+              mountPath: /app/logs     # Where logs are written
+
       volumes:
         - name: uploads
           persistentVolumeClaim:
-            claimName: uploads-pvc
+            claimName: uploads-pvc  # PVC defined below (shared uploads)
         - name: logs
-          emptyDir: {}
+          emptyDir: {}  # Ephemeral (lost on Pod restart) — for logs shipped via Promtail
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Service — Stable DNS for API
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: llama-agent-api-service
+  name: llama-agent-api-service  # DNS: llama-agent-api-service.llama-agent.svc.cluster.local
+                                 # Used in Ingress and frontend API_PROXY_URL
   namespace: llama-agent
 spec:
   selector:
     app: llama-agent
-    component: api
+    component: api  # Routes to Pods with these labels (2 replicas, load balanced)
   ports:
-    - port: 8000
-      targetPort: 8000
+    - port: 8000        # Service port
+      targetPort: 8000  # Container port
       name: http
-  type: ClusterIP
+  type: ClusterIP  # Internal only (Ingress exposes it externally)
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 3: PVC — Persistent Storage for Uploads
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -142,7 +253,14 @@ metadata:
   namespace: llama-agent
 spec:
   accessModes:
-    - ReadWriteOnce
+    - ReadWriteOnce  # One node read-write
   resources:
     requests:
-      storage: 1Gi
+      storage: 1Gi  # 1Gi for uploaded PDFs, etc.
+
+# 💡 LEARNER TIP: Why 2 replicas but ReadWriteOnce PVC?
+#   ReadWriteOnce means only one node can mount it. If 2 Pods land on different
+#   nodes, one will fail to mount! Solutions:
+#   - Use ReadWriteMany (needs shared storage like NFS/EFS)
+#   - Or use object storage (S3) for uploads (better for production)
+#   - For Docker Desktop (single node), it's fine — both Pods on same node.

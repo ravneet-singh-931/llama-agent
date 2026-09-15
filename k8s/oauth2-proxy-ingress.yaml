@@ -1,11 +1,45 @@
-# ============================================
-# oauth2-proxy callback ingress (Point 2 — SSO)
-# ============================================
-# Applied only when OIDC_ENABLED=true in k8s/deploy.sh. Hosts the
-# /oauth2/* endpoints that ingress-nginx external-auth redirects to.
-# The observability ingresses (grafana/prometheus/loki/phoenix) get
-# external-auth annotations pointing at this service when SSO is enabled.
-# ============================================
+# ============================================================================
+# 📚 LEARNER GUIDE: oauth2-proxy Ingress — k8s/oauth2-proxy-ingress.yaml
+# ============================================================================
+# WHAT IS THIS?
+# -------------
+# Ingress for oauth2-proxy callback (Point 2: SSO).
+# Hosts the /oauth2/* endpoints that ingress-nginx external-auth redirects to.
+#   - User tries to access grafana.llama-agent.local → Ingress checks auth-url
+#   - If not authenticated, redirect to https://oauth.llama-agent.local/oauth2/start
+#   - oauth2-proxy handles OIDC login, sets cookie, redirects back
+#
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 1 Ingress:
+#   - Host: oauth.llama-agent.local → oauth2-proxy Service:4180
+#   - Applied only when OIDC_ENABLED=true in deploy.sh
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Ingress (networking.k8s.io/v1)
+# - Host-based routing (oauth.llama-agent.local)
+# - TLS via cert-manager
+# - No auth on this Ingress itself (it's the auth provider!)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Service: oauth2-proxy:4180 (from oauth2-proxy.yaml)
+# - Used by: Observability ingresses (grafana, prometheus, etc.) via external-auth annotations
+#   When OIDC_ENABLED=true, deploy.sh annotates those ingresses with:
+#     nginx.ingress.kubernetes.io/auth-url: https://oauth.llama-agent.local/oauth2/auth
+#     nginx.ingress.kubernetes.io/auth-signin: https://oauth.llama-agent.local/oauth2/start?rd=$escaped_request_uri
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/oauth2-proxy-ingress.yaml (only if OIDC_ENABLED=true)
+# 2. Ingress creates route: oauth.llama-agent.local/* → oauth2-proxy Service
+# 3. User accesses grafana.llama-agent.local → Ingress checks auth-url (oauth2-proxy)
+# 4. If not authed, redirect to oauth2-proxy /oauth2/start → OIDC login → callback → set cookie → back to Grafana
+# 5. Verify: kubectl get ingress -n llama-agent | grep oauth
+#            curl http://oauth.llama-agent.local/oauth2/auth  (should return 401 if not authed)
+# ============================================================================
+
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,23 +50,37 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+
+    # TLS via cert-manager
     cert-manager.io/cluster-issuer: letsencrypt-prod
+
+    # WAF
     nginx.ingress.kubernetes.io/enable-modsecurity: "true"
     nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+
 spec:
   ingressClassName: nginx
+
   tls:
     - hosts:
-        - oauth.llama-agent.local
-      secretName: oauth2-proxy-tls
+        - oauth.llama-agent.local  # Host for oauth2-proxy
+      secretName: oauth2-proxy-tls  # TLS Secret (auto-created)
+
   rules:
     - host: oauth.llama-agent.local
       http:
         paths:
-          - path: /
+          - path: /  # All paths (/, /oauth2/*, etc.)
             pathType: Prefix
             backend:
               service:
-                name: oauth2-proxy
+                name: oauth2-proxy  # oauth2-proxy Service
                 port:
                   number: 4180
+
+# 💡 LEARNER TIP: External Auth Flow
+#   1. User → grafana.llama-agent.local
+#   2. Ingress → Check auth-url (https://oauth.llama-agent.local/oauth2/auth)
+#   3. oauth2-proxy → Check cookie → If valid, return 200 → Ingress allows to Grafana
+#   4. If invalid, return 401 → Ingress redirects to auth-signin (https://oauth.llama-agent.local/oauth2/start)
+#   5. User logs in via OIDC → oauth2-proxy sets cookie → Redirect back to Grafana

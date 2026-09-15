@@ -1,17 +1,69 @@
-# ============================================
-# MCP Agent Server Deployment + Service
-# Exposes 5 specialized agents as MCP tools (SSE transport)
-# ============================================
+# ============================================================================
+# 📚 LEARNER GUIDE: MCP Agent Server — k8s/mcp-server.yaml
+# ============================================================================
+# WHAT IS MCP?
+# ------------
+# MCP = Model Context Protocol (by Anthropic). It's a standard for exposing
+# tools/agents over a network. Here, it exposes 5 specialized agents as tools:
+#   - research_agent, coder_agent, writer_agent, analyzer_agent, planner_agent
+#   - collaborate (multi-agent), team_status
+#
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates:
+#   1. Deployment (1 replica, MCP server on port 8001 via SSE)
+#   2. Service (ClusterIP, DNS: llama-agent-mcp-server-service:8001)
+#
+# TRANSPORT: SSE (Server-Sent Events)
+# ------------------------------------
+# - SSE = HTTP streaming (server pushes events to client)
+# - Endpoint: http://mcp-server:8001/sse (and /messages/)
+# - Alternative: stdio (for subprocess, not used in k8s)
+#
+# WHY 1 REPLICA?
+# --------------
+# - MCP server is lightweight, single replica is enough
+# - HPA can scale to 4 if needed (api-hpa.yaml)
+# - Fresh orchestrator per call (no shared memory leak)
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Deployment (1 replica)
+# - Service (ClusterIP)
+# - Probes using tcpSocket (MCP has no HTTP health endpoint, just TCP)
+# - Secrets for GROQ_API_KEY
+#
+# HOW IT CONNECTS:
+# ----------------
+# - api.yaml → env MCP_SERVER_URL = http://llama-agent-mcp-server-service:8001/sse
+#   API calls MCP tools via HTTP (e.g., POST /mcp/tools with {"name": "coder_agent", ...})
+# - Ingress routes /mcp/* → Service → Pod
+# - Each agent inside uses Groq API (via GROQ_API_KEY)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/mcp-server.yaml
+# 2. Deployment creates Pod with ravneet231/llama-agent-mcp-server:v7
+# 3. Pod runs `python mcp_agents_server.py --transport sse --port 8001 --host 0.0.0.0`
+# 4. Service creates DNS: llama-agent-mcp-server-service → Pod IP
+# 5. API and Ingress connect via that DNS
+# 6. Verify: kubectl logs -f deployment/llama-agent-mcp-server -n llama-agent
+#            kubectl exec -n llama-agent deploy/llama-agent-mcp-server -- curl http://localhost:8001/sse
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: Deployment — 1 Replica of MCP Server
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: llama-agent-mcp-server
+  name: llama-agent-mcp-server  # Deployment name
   namespace: llama-agent
   labels:
     app: llama-agent
     component: mcp-server
 spec:
-  replicas: 1
+  replicas: 1  # Single replica (lightweight, HPA can scale to 4)
   selector:
     matchLabels:
       app: llama-agent
@@ -24,52 +76,69 @@ spec:
     spec:
       containers:
         - name: mcp-server
-          # Point 4: pin to an explicit release tag (v7). See k8s/api.yaml note.
+          # image: MCP server image (same code as API, but separate tag)
+          #   - Built by CI as ravneet231/llama-agent-mcp-server:v7
+          #   - Pinned :v7 (Point 4)
           image: ravneet231/llama-agent-mcp-server:v7
           imagePullPolicy: IfNotPresent
+
+          # command: Run MCP server with SSE transport
+          #   - --transport sse = Server-Sent Events over HTTP
+          #   - --port 8001 = MCP port
+          #   - --host 0.0.0.0 = listen on all interfaces
           command: ["python", "mcp_agents_server.py", "--transport", "sse", "--port", "8001", "--host", "0.0.0.0"]
+
           ports:
-            - containerPort: 8001
-              name: sse
+            - containerPort: 8001  # MCP SSE port
+              name: sse            # Port name `sse` (for Service)
+
           env:
             - name: GROQ_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
                   key: groq-api-key
-            # Tiered defaults: strong=70b for one-shot answers/agents,
-            # fast=8b for streaming chat. Delete these lines once the
-            # free-tier 70b daily quota is upgraded or resets.
+
             - name: LLM_MODEL_STRONG
               value: llama-3.3-70b-versatile
             - name: LLM_MODEL_FAST
               value: llama-3.1-8b-instant
-            # K8s injects PHOENIX_PORT as "tcp://<IP>:<PORT>" because the
-            # "phoenix" Service exists; the phoenix client needs an integer.
+
             - name: PHOENIX_PORT
-              value: "6006"
+              value: "6006"  # Override tcp://... to integer
+
           resources:
             requests:
-              memory: "128Mi"
+              memory: "128Mi"  # Lighter than API
               cpu: "100m"
             limits:
               memory: "256Mi"
               cpu: "250m"
+
+          # readinessProbe: Ready to serve? Check TCP port 8001
+          #   - MCP has no HTTP /health, so use tcpSocket
           readinessProbe:
             tcpSocket:
               port: 8001
             initialDelaySeconds: 10
             periodSeconds: 5
+
+          # livenessProbe: Alive? Same TCP check, longer delay
           livenessProbe:
             tcpSocket:
               port: 8001
             initialDelaySeconds: 30
             periodSeconds: 15
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Service — Stable DNS for MCP Server
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: llama-agent-mcp-server-service
+  name: llama-agent-mcp-server-service  # DNS: llama-agent-mcp-server-service.llama-agent.svc.cluster.local
+                                        # Used in api.yaml as MCP_SERVER_URL
   namespace: llama-agent
 spec:
   selector:
@@ -80,3 +149,8 @@ spec:
       targetPort: 8001
       name: sse
   type: ClusterIP
+
+# 💡 LEARNER TIP: Test MCP server
+#   kubectl port-forward -n llama-agent svc/llama-agent-mcp-server-service 8001:8001
+#   curl http://localhost:8001/sse  (should stream events)
+#   Or via API: curl http://llama-agent.local/mcp/status

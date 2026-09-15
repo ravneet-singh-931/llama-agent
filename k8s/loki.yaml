@@ -1,12 +1,59 @@
-# ============================================
-# Loki - Log aggregation
-# ============================================
-# Service is named "loki" so the Grafana datasource URL
-# http://loki:3100 and the promtail push URL http://loki:3100
-# resolve unchanged inside the cluster.
+# ============================================================================
+# 📚 LEARNER GUIDE: Loki — k8s/loki.yaml (Log Aggregation)
+# ============================================================================
+# WHAT IS LOKI?
+# -------------
+# Loki is a log aggregation system (like Elasticsearch, but cheaper).
+# It stores logs from all containers (via Promtail) and lets you query them
+# in Grafana (Explore → Loki datasource).
+#   - Promtail (on each node) → Loki (central store) → Grafana (UI)
 #
-# Loki image runs as UID 10001; Docker Desktop's hostpath PVCs are
-# root-owned, so we run as root (runAsUser: 0) to allow writes to /loki.
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 4 resources:
+#   1. ConfigMap `loki-config` → loki-config.yml
+#   2. Deployment (1 replica, Loki on port 3100)
+#   3. Service (ClusterIP, DNS: loki:3100)
+#   4. PVC (2Gi for log chunks)
+#
+# LOKI CONFIG (loki-config.yml):
+# -------------------------------
+#   - auth_enabled: false (no auth, internal only)
+#   - server.http_listen_port: 3100
+#   - common.storage.filesystem (stores chunks on PVC)
+#   - schema_config (TSDB, v13, 24h period)
+#   - limits_config (reject old samples > 7 days)
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - ConfigMap for config (mounted as /etc/loki/local-config.yaml via subPath)
+# - Deployment (1 replica)
+# - Service (ClusterIP)
+# - PVC for /loki data
+# - securityContext: runAsUser 0 (root for Docker Desktop)
+# - Probes on /ready
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Promtail pushes logs to http://loki:3100/loki/api/v1/push
+# - Grafana queries Loki via http://loki:3100 (datasource)
+# - Ingress: loki-ingress.yaml (basic-auth)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/loki.yaml
+# 2. Deployment creates Pod with grafana/loki:2.9.6
+# 3. Pod mounts ConfigMap, starts Loki, listens on 3100
+# 4. Service creates DNS: loki → Pod IP
+# 5. Promtail starts pushing logs
+# 6. Verify: kubectl logs -f deployment/loki -n llama-agent
+#            kubectl port-forward -n llama-agent svc/loki 3100:3100
+#            curl http://localhost:3100/ready  (should return "ready")
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: ConfigMap — Loki Config
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -17,43 +64,44 @@ metadata:
     component: loki
 data:
   loki-config.yml: |
-    # ============================================
     # Loki Configuration (k8s) - Log Aggregation
-    # ============================================
-
-    auth_enabled: false
+    auth_enabled: false  # No auth (internal, not exposed directly)
 
     server:
-      http_listen_port: 3100
+      http_listen_port: 3100  # Loki HTTP port
 
     common:
-      path_prefix: /loki
+      path_prefix: /loki  # Base path for storage
       storage:
-        filesystem:
-          chunks_directory: /loki/chunks
-          rules_directory: /loki/rules
-      replication_factor: 1
+        filesystem:  # Store on local filesystem (PVC)
+          chunks_directory: /loki/chunks  # Where log chunks are stored
+          rules_directory: /loki/rules    # Where alert rules are stored
+      replication_factor: 1  # Single replica (no replication)
       ring:
         kvstore:
-          store: inmemory
+          store: inmemory  # In-memory ring (for single instance)
 
     schema_config:
       configs:
-        - from: "2024-01-01"
-          store: tsdb
+        - from: "2024-01-01"  # Schema from this date
+          store: tsdb         # TSDB store (newer, more efficient)
           object_store: filesystem
           schema: v13
           index:
-            prefix: index_
-            period: 24h
+            prefix: index_  # Index prefix
+            period: 24h     # New index every 24h
 
     limits_config:
       reject_old_samples: true
-      reject_old_samples_max_age: 168h   # 7 days
+      reject_old_samples_max_age: 168h   # 7 days (reject logs older than 7d)
 
     analytics:
-      reporting_enabled: false
+      reporting_enabled: false  # Don't send analytics to Grafana Labs
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Deployment — Loki Pod
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -76,11 +124,11 @@ spec:
     spec:
       containers:
         - name: loki
-          image: grafana/loki:2.9.6
+          image: grafana/loki:2.9.6  # Loki version
           args:
-            - -config.file=/etc/loki/local-config.yaml
+            - -config.file=/etc/loki/local-config.yaml  # Config file path
           ports:
-            - containerPort: 3100
+            - containerPort: 3100  # Loki HTTP port
               name: http
           resources:
             requests:
@@ -90,10 +138,10 @@ spec:
               memory: "1Gi"
               cpu: "1"
           securityContext:
-            runAsUser: 0
+            runAsUser: 0  # Root for Docker Desktop PVC
           readinessProbe:
             httpGet:
-              path: /ready
+              path: /ready  # Loki ready endpoint
               port: 3100
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -105,11 +153,11 @@ spec:
             periodSeconds: 20
           volumeMounts:
             - name: config
-              mountPath: /etc/loki/local-config.yaml
-              subPath: loki-config.yml
+              mountPath: /etc/loki/local-config.yaml  # Config file
+              subPath: loki-config.yml  # Only this key from ConfigMap
               readOnly: true
             - name: data
-              mountPath: /loki
+              mountPath: /loki  # Data directory
       volumes:
         - name: config
           configMap:
@@ -117,11 +165,15 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: loki-pvc
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 3: Service — Stable DNS for Loki
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: loki
+  name: loki  # DNS: loki.llama-agent.svc.cluster.local (used in Grafana + Promtail)
   namespace: llama-agent
 spec:
   selector:
@@ -132,7 +184,11 @@ spec:
       targetPort: 3100
       name: http
   type: ClusterIP
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 4: PVC — Persistent Storage for Logs
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -143,4 +199,8 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 2Gi
+      storage: 2Gi  # 2Gi for log chunks (adjust based on log volume)
+
+# 💡 LEARNER TIP: Query Loki in Grafana
+#   Grafana → Explore → Loki datasource → Query: {app="llama-agent"} |= "error"
+#   Or via API: curl "http://localhost:3100/loki/api/v1/query_range?query={app=\"llama-agent\"}"

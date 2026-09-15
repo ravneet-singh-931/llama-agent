@@ -1,16 +1,56 @@
-# ============================================
-# Streamlit Web UI Deployment + Service
-# ============================================
+# ============================================================================
+# 📚 LEARNER GUIDE: Streamlit Web UI (Legacy) — k8s/web.yaml
+# ============================================================================
+# WHAT IS THIS?
+# -------------
+# Runs the Streamlit legacy UI (app.py) — the OLD web interface before Next.js.
+# Creates:
+#   1. Deployment (2 replicas, Streamlit on port 8501)
+#   2. Service (ClusterIP, DNS: llama-agent-web-service:8501)
+#
+# WHY KEEP STREAMLIT IF WE HAVE NEXT.JS?
+# ---------------------------------------
+# - Legacy: Still works, some users prefer it
+# - Fallback: If Next.js has issues, Streamlit is backup
+# - Accessible via /streamlit/* path (Ingress)
+# - Uses same Docker image as API (ravneet231/llama-agent:v7) but different command
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Deployment with 2 replicas, same image as API but `command` overrides CMD
+# - Service (ClusterIP)
+# - Secrets for GROQ_API_KEY, DATABASE_URL
+# - Probes on `/` (Streamlit homepage)
+# - emptyDir volume for logs (ephemeral)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Ingress routes /streamlit/* → Service → Pods
+# - Pods connect to postgres-service, phoenix, etc. (like API)
+# - Shares same image as API, so code is identical
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/web.yaml
+# 2. Deployment creates 2 Pods, each runs `streamlit run app.py --server.port 8501 ...`
+# 3. Service creates DNS: llama-agent-web-service → 2 Pod IPs
+# 4. Ingress routes http://llama-agent.local/streamlit/ → Service
+# 5. Verify: kubectl logs -f deployment/llama-agent-web -n llama-agent
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: Deployment — 2 Replicas of Streamlit
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: llama-agent-web
+  name: llama-agent-web  # Deployment name
   namespace: llama-agent
   labels:
     app: llama-agent
-    component: web
+    component: web  # Component = web (for Service selector)
 spec:
-  replicas: 2
+  replicas: 2  # 2 for HA
   selector:
     matchLabels:
       app: llama-agent
@@ -23,36 +63,47 @@ spec:
     spec:
       containers:
         - name: web
-          image: ravneet231/llama-agent:v7
+          image: ravneet231/llama-agent:v7  # SAME image as API!
           imagePullPolicy: IfNotPresent
+
+          # command: Override Docker CMD to run Streamlit instead of uvicorn
+          #   - streamlit run app.py = run Streamlit app
+          #   - --server.port 8501 = Streamlit port
+          #   - --server.address 0.0.0.0 = listen on all interfaces
           command: ["streamlit", "run", "app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+
           ports:
-            - containerPort: 8501
+            - containerPort: 8501  # Streamlit port
               name: http
+
           env:
+            # GROQ_API_KEY: LLM key, from Secret
             - name: GROQ_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
                   key: groq-api-key
+
+            # DATABASE_URL: Postgres connection, from Secret
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
                   key: database-url
-            # Tiered defaults: strong=70b for one-shot answers/agents,
-            # fast=8b for streaming chat. Delete these lines once the
-            # free-tier 70b daily quota is upgraded or resets.
+
+            # LLM_MODEL_STRONG/FAST: Tiered models (like API)
             - name: LLM_MODEL_STRONG
               value: llama-3.3-70b-versatile
             - name: LLM_MODEL_FAST
               value: llama-3.1-8b-instant
+
             - name: ENVIRONMENT
               value: production
-            # K8s injects PHOENIX_PORT as "tcp://<IP>:<PORT>" because the
-            # "phoenix" Service exists; the phoenix client needs an integer.
+
+            # PHOENIX_PORT: Override auto-injected tcp://... to integer
             - name: PHOENIX_PORT
               value: "6006"
+
           resources:
             requests:
               memory: "256Mi"
@@ -60,29 +111,37 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+
           livenessProbe:
             httpGet:
-              path: /
+              path: /  # Streamlit homepage
               port: 8501
             initialDelaySeconds: 30
             periodSeconds: 10
+
           readinessProbe:
             httpGet:
               path: /
               port: 8501
             initialDelaySeconds: 15
             periodSeconds: 5
+
           volumeMounts:
             - name: logs
               mountPath: /app/logs
+
       volumes:
         - name: logs
-          emptyDir: {}
+          emptyDir: {}  # Ephemeral logs (Promtail ships them to Loki)
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Service — Stable DNS for Streamlit
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: llama-agent-web-service
+  name: llama-agent-web-service  # DNS: llama-agent-web-service.llama-agent.svc.cluster.local
   namespace: llama-agent
 spec:
   selector:
@@ -93,3 +152,8 @@ spec:
       targetPort: 8501
       name: http
   type: ClusterIP
+
+# 💡 LEARNER TIP: Streamlit vs Next.js
+#   - Streamlit: Python-based, quick to build, but less customizable
+#   - Next.js: React-based, modern, better UX, but needs Node.js build
+#   - Both talk to same API (FastAPI) — they are just different frontends!

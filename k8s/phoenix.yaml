@@ -1,10 +1,55 @@
-# ============================================
-# Phoenix (Arize) - Observability backend
-# ============================================
-# Serves the Phoenix UI + OTLP trace collector.
-# Service is named "phoenix" so existing code that references
-# http://phoenix:6006 (api.py, app.py, modules/advanced_rag.py)
-# works unchanged inside the cluster.
+# ============================================================================
+# 📚 LEARNER GUIDE: Phoenix (Arize) — k8s/phoenix.yaml (LLM Observability)
+# ============================================================================
+# WHAT IS PHOENIX?
+# ----------------
+# Phoenix (by Arize AI) is an LLM observability tool. It traces every LLM call:
+#   - POST /chat/stream → GroqLLM.chat → tool calls → HTTP send/receive
+#   - Shows latency, model, tokens, inputs/outputs for each span
+#   - Uses OpenTelemetry (OTel) for tracing (auto-instruments FastAPI, llama-index)
+#
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 3 resources:
+#   1. Deployment (1 replica, Phoenix on port 6006)
+#   2. Service (ClusterIP, DNS: phoenix:6006) — name MUST be "phoenix"!
+#   3. PVC (2Gi for trace data)
+#
+# WHY SERVICE NAME MUST BE "phoenix"?
+# -----------------------------------
+# Existing code references http://phoenix:6006 (api.py, app.py, advanced_rag.py).
+# If Service were named differently, those URLs would break!
+# K8s DNS: phoenix.llama-agent.svc.cluster.local → Pod IP
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Deployment (1 replica)
+# - Service (ClusterIP, port 6006)
+# - PVC for /mnt/data (Phoenix working dir)
+# - Env vars: PHOENIX_WORKING_DIR, PHOENIX_PORT, PHOENIX_HOST
+# - Probes on /health
+#
+# HOW IT CONNECTS:
+# ----------------
+# - API pods push traces to http://phoenix:6006/v1/traces (OTLP)
+# - Phoenix UI at http://phoenix.llama-agent.local (via phoenix-ingress.yaml)
+# - Must be deployed BEFORE API (so Service exists when API starts)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/phoenix.yaml
+# 2. Deployment creates Pod with arizephoenix/phoenix:latest
+# 3. Pod listens on 0.0.0.0:6006, stores traces in /mnt/data (PVC)
+# 4. Service creates DNS: phoenix → Pod IP
+# 5. API pods auto-instrument and push traces
+# 6. Verify: kubectl logs -f deployment/phoenix -n llama-agent
+#            kubectl port-forward -n llama-agent svc/phoenix 6006:6006
+#            Open http://localhost:6006
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: Deployment — Phoenix Pod
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,19 +72,25 @@ spec:
     spec:
       containers:
         - name: phoenix
-          image: arizephoenix/phoenix:latest
+          image: arizephoenix/phoenix:latest  # Phoenix image (latest)
           ports:
-            - containerPort: 6006
+            - containerPort: 6006  # Phoenix UI + OTLP collector port
               name: http
           env:
+            # PHOENIX_WORKING_DIR: Where Phoenix stores data (traces, etc.)
             - name: PHOENIX_WORKING_DIR
-              value: /mnt/data
-            # K8s auto-injects PHOENIX_PORT as "tcp://<IP>:<PORT>" when a
-            # Service named "phoenix" exists; Phoenix requires an integer.
+              value: /mnt/data  # Mounted PVC
+
+            # PHOENIX_PORT: Port to listen on (must be integer, not tcp://...)
+            #   - K8s auto-injects PHOENIX_PORT as tcp://IP:PORT if Service exists
+            #   - We override to ensure it's "6006"
             - name: PHOENIX_PORT
               value: "6006"
+
+            # PHOENIX_HOST: Host to bind to (0.0.0.0 = all interfaces)
             - name: PHOENIX_HOST
               value: "0.0.0.0"
+
           resources:
             requests:
               memory: "256Mi"
@@ -47,30 +98,38 @@ spec:
             limits:
               memory: "1Gi"
               cpu: "1"
+
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health  # Phoenix health endpoint
               port: 6006
             initialDelaySeconds: 10
             periodSeconds: 10
+
           livenessProbe:
             httpGet:
               path: /health
               port: 6006
             initialDelaySeconds: 30
             periodSeconds: 20
+
           volumeMounts:
             - name: phoenix-data
-              mountPath: /mnt/data
+              mountPath: /mnt/data  # Working dir
+
       volumes:
         - name: phoenix-data
           persistentVolumeClaim:
             claimName: phoenix-pvc
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Service — Stable DNS for Phoenix
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: phoenix
+  name: phoenix  # MUST be "phoenix" (code references http://phoenix:6006)
   namespace: llama-agent
 spec:
   selector:
@@ -81,7 +140,11 @@ spec:
       targetPort: 6006
       name: http
   type: ClusterIP
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 3: PVC — Persistent Storage for Traces
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -93,3 +156,9 @@ spec:
   resources:
     requests:
       storage: 2Gi
+
+# 💡 LEARNER TIP: Phoenix tracing
+#   - Every LLM call (Groq) creates a span: GroqLLM.chat
+#   - Parent span: POST /chat/stream (FastAPI request)
+#   - View in Phoenix UI: http://phoenix.llama-agent.local or http://localhost:6006 (port-forward)
+#   - Check API logs: kubectl logs -f deployment/llama-agent-api -n llama-agent | grep -i phoenix

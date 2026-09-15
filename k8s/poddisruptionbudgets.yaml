@@ -1,37 +1,94 @@
-# ============================================
-# PodDisruptionBudgets (Point 5 + Point 7)
-# ============================================
-# Protect availability during voluntary disruptions (node drains, cluster
-# upgrades). For the multi-replica API, require at least 1 pod up. For the
-# single-replica stateful services, allow disruption (maxUnavailable: 1) so
-# node drains are not blocked — but note that REAL HA for Postgres/Redis/
-# Chroma requires a managed/multi-replica backend (see README "Cloud
-# Hardening" > Managed datastores). A PDB alone does not make a single
-# replica highly available.
-# ============================================
-apiVersion: policy/v1
+# ============================================================================
+# 📚 LEARNER GUIDE: PodDisruptionBudgets (PDB) — k8s/poddisruptionbudgets.yaml
+# ============================================================================
+# WHAT IS PDB?
+# ------------
+# PDB = PodDisruptionBudget. It protects availability during VOLUNTARY disruptions:
+#   - Node drains (kubectl drain)
+#   - Cluster upgrades
+#   - Manual Pod deletions
+# It ensures a minimum number of Pods stay available (or max unavailable).
+#
+# Example: API has 2 replicas, PDB minAvailable: 1 → At least 1 Pod must stay up
+#          during a drain. Kubernetes will not evict the 2nd Pod until 1st is back.
+#
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 5 PDBs:
+#   1. llama-agent-api-pdb → API (minAvailable: 1, 2 replicas)
+#   2. postgres-pdb → Postgres (maxUnavailable: 1, 1 replica)
+#   3. redis-pdb → Redis (maxUnavailable: 1)
+#   4. chromadb-pdb → ChromaDB (maxUnavailable: 1)
+#   5. mcp-server-pdb → MCP Server (maxUnavailable: 1)
+#
+# WHY PDB?
+# --------
+# - Prevent downtime during maintenance
+# - For API (2 replicas), minAvailable: 1 ensures HA
+# - For single-replica services (Postgres, etc.), maxUnavailable: 1 allows disruption
+#   but note: Single replica + PDB does NOT make it HA! For real HA, use managed DB.
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - PDB (policy/v1)
+# - minAvailable: Minimum Pods that must be available (for multi-replica)
+# - maxUnavailable: Maximum Pods that can be unavailable (for single-replica)
+# - selector: Which Pods this PDB protects (by labels)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Protects: Deployments (api, postgres, redis, chromadb, mcp-server)
+# - Used by: kubectl drain, cluster autoscaler, etc.
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/poddisruptionbudgets.yaml
+# 2. PDBs are created
+# 3. When you run `kubectl drain <node>`, Kubernetes checks PDBs
+# 4. If draining would violate PDB (e.g., API would have 0 available), drain is blocked
+# 5. Verify: kubectl get pdb -n llama-agent
+#            kubectl describe pdb llama-agent-api-pdb -n llama-agent
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# PDB 1: API (2 replicas, require at least 1 available)
+# --------------------------------------------------------------------------
+apiVersion: policy/v1  # PDB API
 kind: PodDisruptionBudget
 metadata:
   name: llama-agent-api-pdb
   namespace: llama-agent
 spec:
+  # minAvailable: At least 1 Pod must be available during voluntary disruption
+  #   - With 2 replicas, this allows 1 to be disrupted at a time (rolling)
   minAvailable: 1
   selector:
     matchLabels:
       app: llama-agent
-      component: api
+      component: api  # Protects API Pods
+
 ---
+# --------------------------------------------------------------------------
+# PDB 2: Postgres (1 replica, allow 1 unavailable)
+# --------------------------------------------------------------------------
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: postgres-pdb
   namespace: llama-agent
 spec:
+  # maxUnavailable: At most 1 Pod can be unavailable
+  #   - With 1 replica, this means the single Pod CAN be disrupted (drain not blocked)
+  #   - But if you had 2 replicas, maxUnavailable: 1 would allow 1 to be down
   maxUnavailable: 1
   selector:
     matchLabels:
       app: postgres
+
 ---
+# --------------------------------------------------------------------------
+# PDB 3: Redis (1 replica, allow 1 unavailable)
+# --------------------------------------------------------------------------
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -42,7 +99,11 @@ spec:
   selector:
     matchLabels:
       app: redis
+
 ---
+# --------------------------------------------------------------------------
+# PDB 4: ChromaDB (1 replica, allow 1 unavailable)
+# --------------------------------------------------------------------------
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -53,7 +114,11 @@ spec:
   selector:
     matchLabels:
       app: chromadb
+
 ---
+# --------------------------------------------------------------------------
+# PDB 5: MCP Server (1 replica, allow 1 unavailable)
+# --------------------------------------------------------------------------
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -65,3 +130,10 @@ spec:
     matchLabels:
       app: llama-agent
       component: mcp-server
+
+# 💡 LEARNER TIP: PDB vs HPA
+#   - HPA: Scales based on load (CPU) — automatic, for traffic
+#   - PDB: Protects during maintenance — manual, for availability
+#   Both are about availability, but different triggers!
+#   Check: kubectl get pdb -n llama-agent
+#          kubectl drain <node> --dry-run=client  (see if PDB would block)

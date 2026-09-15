@@ -1,34 +1,79 @@
-# ============================================
-# oauth2-proxy — SSO gateway for observability UIs
-# ============================================
-# Provides OIDC-based SSO in front of Grafana/Prometheus/Loki/Phoenix via
-# ingress-nginx external-auth. This is the "ingress auth" half of Point 2;
-# Grafana ALSO has native OAuth configured in k8s/grafana.yaml.
+# ============================================================================
+# 📚 LEARNER GUIDE: oauth2-proxy — k8s/oauth2-proxy.yaml (SSO Gateway)
+# ============================================================================
+# WHAT IS OAUTH2-PROXY?
+# ---------------------
+# oauth2-proxy is an SSO (Single Sign-On) gateway that sits in front of
+# observability UIs (Grafana, Prometheus, Loki, Phoenix) and requires OIDC login
+# (e.g., Google, Okta, Azure AD) before allowing access.
+#   - User → Ingress → oauth2-proxy (check auth) → Grafana (if authenticated)
+#   - Uses ingress-nginx external-auth (auth-url, auth-signin annotations)
 #
-# ACTIVATION (config step, not a rewrite):
-#   1. Create the Secret with your IdP creds (do NOT commit real values):
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 3 resources (Point 2: SSO):
+#   1. Secret `oauth2-proxy-secret` → OIDC credentials (PLACEHOLDER)
+#   2. Deployment (2 replicas, oauth2-proxy on port 4180)
+#   3. Service (ClusterIP, DNS: oauth2-proxy:4180)
+#
+# ACTIVATION:
+# -----------
+#   1. Create Secret with real IdP creds:
 #        kubectl create secret generic oauth2-proxy-secret -n llama-agent \
 #          --from-literal=oauth-client-id=<YOUR_OIDC_CLIENT_ID> \
 #          --from-literal=oauth-client-secret=<YOUR_OIDC_CLIENT_SECRET> \
 #          --from-literal=oauth-cookie-secret=$(python -c "import secrets;print(secrets.token_hex(16))")
-#   2. Set OIDC_ENABLED=true when running k8s/deploy.sh (it applies this file,
-#      the callback ingress, and annotates the observability ingresses with
-#      external-auth, replacing basic-auth).
+#   2. Set OIDC_ENABLED=true in deploy.sh (applies this + oauth2-proxy-ingress.yaml,
+#      annotates observability ingresses with external-auth)
 #
-# The Secret below is a PLACEHOLDER only; real values come from the user or
-# the External Secrets Operator (see k8s/external-secrets.yaml).
-# ============================================
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Secret (Opaque, stringData for plain text)
+# - Deployment (2 replicas, args for oauth2-proxy)
+# - Service (ClusterIP)
+# - Env vars from Secret (OIDC_ISSUER_URL, etc., optional:true)
+# - Probes on /ping
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Ingresses (grafana, prometheus, etc.) get external-auth annotations pointing to oauth2-proxy
+# - oauth2-proxy validates via OIDC provider (Google, etc.)
+# - Grafana also has native OAuth (grafana.yaml) — two layers!
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/oauth2-proxy.yaml (only if OIDC_ENABLED=true)
+# 2. Deployment creates 2 Pods with quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+# 3. Service creates DNS: oauth2-proxy → Pod IPs
+# 4. Ingress external-auth redirects unauthenticated users to oauth2-proxy
+# 5. User logs in via OIDC, gets cookie, then accesses Grafana
+# 6. Verify: kubectl logs -f deployment/oauth2-proxy -n llama-agent
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: Secret — OIDC Credentials (PLACEHOLDER)
+# --------------------------------------------------------------------------
+# This Secret holds OIDC client ID, secret, cookie secret, and issuer URL.
+# Real values come from user or ESO (external-secrets.yaml).
+
 apiVersion: v1
 kind: Secret
 metadata:
-  name: oauth2-proxy-secret
+  name: oauth2-proxy-secret  # Secret name (used in Deployment env)
   namespace: llama-agent
 type: Opaque
-stringData:
-  oauth-client-id: REPLACE_ME_OIDC_CLIENT_ID
-  oauth-client-secret: REPLACE_ME_OIDC_CLIENT_SECRET
-  oauth-cookie-secret: REPLACE_ME_32_BYTE_HEX
+stringData:  # stringData = plain text (k8s auto-base64 encodes)
+  oauth-client-id: REPLACE_ME_OIDC_CLIENT_ID  # Replace with real OIDC client ID
+  oauth-client-secret: REPLACE_ME_OIDC_CLIENT_SECRET  # Replace with real secret
+  oauth-cookie-secret: REPLACE_ME_32_BYTE_HEX  # 32-byte hex for cookie encryption (generate: python -c "import secrets;print(secrets.token_hex(16))")
+
+  # Note: oidc-issuer-url is not in this Secret here, but should be added:
+  #   kubectl create secret generic oauth2-proxy-secret -n llama-agent --from-literal=oidc-issuer-url=https://accounts.google.com ...
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Deployment — oauth2-proxy Pods
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,7 +83,7 @@ metadata:
     app: llama-agent
     component: oauth2-proxy
 spec:
-  replicas: 2
+  replicas: 2  # 2 for HA
   selector:
     matchLabels:
       app: llama-agent
@@ -51,23 +96,25 @@ spec:
     spec:
       containers:
         - name: oauth2-proxy
-          image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0  # oauth2-proxy version
           args:
-            - --provider=oidc
-            - --oidc-issuer-url=$(OIDC_ISSUER_URL)
+            - --provider=oidc  # OIDC provider (Google, Okta, etc.)
+            - --oidc-issuer-url=$(OIDC_ISSUER_URL)  # From env (Secret)
             - --client-id=$(OIDC_CLIENT_ID)
             - --client-secret=$(OIDC_CLIENT_SECRET)
             - --cookie-secret=$(OIDC_COOKIE_SECRET)
-            - --redirect-url=https://oauth.llama-agent.local/oauth2/callback
-            - --set-xauthrequest=true
+            - --redirect-url=https://oauth.llama-agent.local/oauth2/callback  # Must match IdP config
+            - --set-xauthrequest=true  # Set X-Auth-Request headers
             - --set-authorization-header=true
             - --pass-user-headers=true
-            - --email-domain=*
-            - --upstream=static://200
-            - --cookie-secure=true
+            - --email-domain=*  # Allow any email domain (restrict in prod: --email-domain=example.com)
+            - --upstream=static://200  # Return 200 if authenticated (for external-auth)
+            - --cookie-secure=true  # Secure cookies (HTTPS only)
             - --cookie-samesite=lax
-            - --skip-provider-button=false
+            - --skip-provider-button=false  # Show provider button
+
           env:
+            # Env vars from Secret (optional:true = don't fail if Secret missing)
             - name: OIDC_ISSUER_URL
               valueFrom:
                 secretKeyRef:
@@ -92,9 +139,11 @@ spec:
                   name: oauth2-proxy-secret
                   key: oauth-cookie-secret
                   optional: true
+
           ports:
-            - containerPort: 4180
+            - containerPort: 4180  # oauth2-proxy port
               name: http
+
           resources:
             requests:
               memory: "64Mi"
@@ -102,23 +151,30 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "200m"
+
           livenessProbe:
             httpGet:
-              path: /ping
+              path: /ping  # oauth2-proxy ping endpoint
               port: 4180
             initialDelaySeconds: 15
             periodSeconds: 15
+
           readinessProbe:
             httpGet:
               path: /ping
               port: 4180
             initialDelaySeconds: 10
             periodSeconds: 10
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 3: Service — Stable DNS for oauth2-proxy
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: oauth2-proxy
+  name: oauth2-proxy  # DNS: oauth2-proxy.llama-agent.svc.cluster.local
+                      # Used in Ingress external-auth annotations
   namespace: llama-agent
 spec:
   selector:
@@ -129,3 +185,8 @@ spec:
       targetPort: 4180
       name: http
   type: ClusterIP
+
+# 💡 LEARNER TIP: oauth2-proxy vs Grafana native OAuth
+#   - oauth2-proxy: Ingress-level SSO (protects ALL observability UIs via external-auth)
+#   - Grafana native OAuth: App-level SSO (only Grafana, via GF_AUTH_GENERIC_OAUTH_*)
+#   Both can be used together (defense in depth) or separately.

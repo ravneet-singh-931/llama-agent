@@ -1,93 +1,214 @@
-# ============================================
-# PostgreSQL Deployment + Service
-# ============================================
+# ============================================================================
+# 📚 LEARNER GUIDE: PostgreSQL — k8s/postgres.yaml
+# ============================================================================
+# WHAT IS THIS FILE?
+# ------------------
+# This file creates 3 Kubernetes resources for PostgreSQL:
+#   1. Deployment → Runs the Postgres container (1 replica)
+#   2. Service → Stable DNS name for other pods to connect to Postgres
+#   3. PersistentVolumeClaim (PVC) → Persistent disk so data survives pod restarts
+#
+# WHY POSTGRES?
+# -------------
+# - Stores: users, conversations, messages, document metadata
+# - The API (api.py) uses asyncpg to talk to it via DATABASE_URL
+# - Without persistence, all chat history would be lost on pod restart!
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Deployment: Manages Pods, ensures 1 replica is always running, handles updates
+# - Service (ClusterIP): Internal load balancer + DNS (postgres-service.llama-agent.svc.cluster.local)
+# - PVC: Request for persistent storage from the cluster's storage provider
+# - Probes: Health checks (liveness = is it alive? readiness = is it ready for traffic?)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - api.yaml → env DATABASE_URL = postgresql+asyncpg://...@postgres-service:5432/...
+#   The host `postgres-service` is the Service name defined here!
+# - Secrets: Reads username/password from `db-secrets` Secret
+# - Storage: Mounts PVC `postgres-pvc` at /var/lib/postgresql/data
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/postgres.yaml
+# 2. Deployment creates a Pod with postgres:15-alpine image
+# 3. Pod mounts PVC, starts Postgres, runs pg_isready probes
+# 4. Service creates DNS entry: postgres-service → Pod IP
+# 5. API pods connect via that DNS name
+# 6. Verify: kubectl get pods -n llama-agent -l app=postgres
+#            kubectl logs -f deployment/postgres -n llama-agent
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: Deployment — Runs the PostgreSQL Pod
+# --------------------------------------------------------------------------
+# apiVersion: apps/v1 is for Deployments, ReplicaSets, StatefulSets
 apiVersion: apps/v1
+
+# kind: Deployment = declarative way to run Pods, handles rolling updates, restarts
 kind: Deployment
+
+# metadata: Name, namespace, labels for this Deployment
 metadata:
+  # name: Deployment name (used in kubectl get deployment postgres)
   name: postgres
+
+  # namespace: Must be `llama-agent` (created by namespace.yaml)
   namespace: llama-agent
+
+  # labels: Tags for this Deployment itself (for filtering)
   labels:
-    app: postgres
+    app: postgres  # Label `app=postgres` — used by Service selector and PDB
+
+# spec: Desired state for the Deployment
 spec:
+  # replicas: How many Pods to run. 1 for Postgres (it's stateful, not easily scaled)
+  #   - For HA, use managed Postgres (RDS/Cloud SQL) instead of scaling this
   replicas: 1
+
+  # selector: How Deployment finds which Pods it owns (must match template.labels)
   selector:
     matchLabels:
-      app: postgres
+      app: postgres  # Must match Pod template labels below
+
+  # template: The Pod template — Deployment creates Pods from this
   template:
     metadata:
       labels:
-        app: postgres
+        app: postgres  # Pod label — Service and PDB select by this
+
+    # spec: Pod specification (containers, volumes, etc.)
     spec:
+      # containers: List of containers in this Pod (here, just 1: postgres)
       containers:
-        - name: postgres
+        - name: postgres  # Container name (for logs: kubectl logs -c postgres)
+
+          # image: Docker image to run. postgres:15-alpine = lightweight Postgres 15
+          #   - Alpine = small Linux distro, faster pull
           image: postgres:15-alpine
+
+          # ports: Ports this container exposes (for Service to target)
           ports:
-            - containerPort: 5432
+            - containerPort: 5432  # Postgres default port
+
+          # env: Environment variables for the container
           env:
+            # POSTGRES_USER: DB username, read from Secret `db-secrets` key `username`
+            #   - valueFrom.secretKeyRef = "get this value from a Secret"
+            #   - This avoids hardcoding passwords in YAML!
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
-                  name: db-secrets
-                  key: username
+                  name: db-secrets  # Secret name (from secrets.yaml)
+                  key: username     # Key inside that Secret
+
+            # POSTGRES_PASSWORD: DB password, from Secret `db-secrets` key `password`
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: db-secrets
                   key: password
+
+            # POSTGRES_DB: Database name to create on first start
+            #   - Plain value (not secret) — it's not sensitive
             - name: POSTGRES_DB
-              value: llama_agent
+              value: llama_agent  # Database name used in DATABASE_URL
+
+          # volumeMounts: Mount volumes into container filesystem
           volumeMounts:
-            - name: postgres-data
-              mountPath: /var/lib/postgresql/data
+            - name: postgres-data  # Must match volumes[].name below
+              mountPath: /var/lib/postgresql/data  # Where Postgres stores data inside container
+
+          # resources: CPU/Memory requests and limits (for scheduling and QoS)
           resources:
+            # requests: Guaranteed resources (scheduler uses this to place Pod)
             requests:
-              memory: "256Mi"
-              cpu: "250m"
+              memory: "256Mi"  # 256 Mebibytes RAM guaranteed
+              cpu: "250m"      # 250 millicores = 0.25 CPU core
+
+            # limits: Maximum allowed (if exceeded, Pod is throttled or OOMKilled)
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "512Mi"  # Max 512Mi, else OOMKill
+              cpu: "500m"      # Max 0.5 CPU
+
+          # livenessProbe: Is the container alive? If fails, kubelet RESTARTS it
           livenessProbe:
-            exec:
+            exec:  # Run a command inside container
               command:
-                - pg_isready
+                - pg_isready  # Postgres health check tool
                 - -U
-                - postgres
-            initialDelaySeconds: 30
-            periodSeconds: 10
+                - postgres    # Check as user `postgres`
+            initialDelaySeconds: 30  # Wait 30s after start before first check
+            periodSeconds: 10        # Check every 10s
+
+          # readinessProbe: Is container ready to serve traffic? If fails, Service removes it
           readinessProbe:
             exec:
               command:
                 - pg_isready
                 - -U
                 - postgres
-            initialDelaySeconds: 5
+            initialDelaySeconds: 5  # Check sooner than liveness (5s)
             periodSeconds: 5
+
+      # volumes: Volumes available to Pod (mounted into containers)
       volumes:
-        - name: postgres-data
+        - name: postgres-data  # Volume name (referenced in volumeMounts)
           persistentVolumeClaim:
-            claimName: postgres-pvc
+            claimName: postgres-pvc  # PVC name defined below (3rd resource)
+
 ---
-apiVersion: v1
+# --------------------------------------------------------------------------
+# RESOURCE 2: Service — Stable Network Endpoint for Postgres
+# --------------------------------------------------------------------------
+# A Service gives a stable DNS name and IP for Pods, even as Pods die/recreate.
+# Other pods connect to `postgres-service:5432` instead of Pod IP (which changes).
+
+apiVersion: v1  # Core API for Service
 kind: Service
 metadata:
-  name: postgres-service
+  name: postgres-service  # DNS name: postgres-service.llama-agent.svc.cluster.local
+                          # Short form inside same namespace: postgres-service
   namespace: llama-agent
 spec:
+  # selector: Which Pods this Service routes to (must match Deployment Pod labels)
   selector:
-    app: postgres
+    app: postgres  # Routes to Pods with label app=postgres
+
+  # ports: Port mapping for the Service
   ports:
-    - port: 5432
-      targetPort: 5432
+    - port: 5432        # Service port (what clients connect to)
+      targetPort: 5432  # Container port (where traffic goes)
+  # type: ClusterIP = internal only, not exposed outside cluster (secure!)
+  #   - Other types: NodePort, LoadBalancer, ExternalName
   type: ClusterIP
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 3: PersistentVolumeClaim — Persistent Disk for Postgres Data
+# --------------------------------------------------------------------------
+# A PVC is a request for storage. Without it, Postgres data would be lost
+# when Pod restarts (container filesystem is ephemeral!).
+
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: postgres-pvc
+  name: postgres-pvc  # PVC name (referenced in Deployment volumes)
   namespace: llama-agent
 spec:
+  # accessModes: How volume can be mounted
+  #   - ReadWriteOnce (RWO): Only one node can mount read-write (typical for DB)
+  #   - ReadWriteMany (RWM): Many nodes read-write (for shared storage)
+  #   - ReadOnlyMany (ROM): Many nodes read-only
   accessModes:
     - ReadWriteOnce
+
+  # resources: How much storage to request
   resources:
     requests:
-      storage: 5Gi
+      storage: 5Gi  # Request 5 Gibibytes (cluster must have storage provisioner)
+
+# 💡 LEARNER TIP: Check storage
+#   kubectl get pvc -n llama-agent
+#   kubectl get pv  (PersistentVolumes provisioned by cluster)
+#   On Docker Desktop, uses hostpath provisioner (stores on host filesystem)

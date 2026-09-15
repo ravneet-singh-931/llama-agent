@@ -1,10 +1,56 @@
-# ============================================
-# Node Exporter - System metrics (DaemonSet)
-# ============================================
-# Service is named "node-exporter" so the Prometheus scrape target
-# node-exporter:9100 (prometheus.yml) resolves unchanged.
+# ============================================================================
+# 📚 LEARNER GUIDE: Node Exporter — k8s/node-exporter.yaml (System Metrics)
+# ============================================================================
+# WHAT IS NODE EXPORTER?
+# ----------------------
+# Node Exporter (by Prometheus) exposes SYSTEM metrics (CPU, memory, disk, network)
+# for Prometheus to scrape. It's like a "system health reporter" for each node.
+#   - Metrics: node_cpu_seconds_total, node_memory_MemAvailable_bytes, etc.
+#   - Prometheus scrapes node-exporter:9100 every 15s
+#   - Grafana visualizes (or alerts on HighCpuUsage, etc.)
+#
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 2 resources:
+#   1. DaemonSet (one Pod per node, Node Exporter on port 9100)
+#   2. Service (ClusterIP, DNS: node-exporter:9100)
+#
+# WHY DAEMONSET?
+# --------------
+# - One Pod per node (like Promtail) — each node reports its own metrics
+# - If 3 nodes, 3 Pods (each scrapes its host's /proc, /sys, /)
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - DaemonSet (one Pod per node)
+# - Service (ClusterIP)
+# - hostPID: true (share host PID namespace, for accurate metrics)
+# - hostPath volumes (/proc, /sys, /)
+# - args: --path.procfs, --path.sysfs, --path.rootfs (where to find host files)
+# - securityContext: runAsNonRoot, runAsUser 65534 (nobody, secure)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Prometheus scrapes node-exporter:9100 (prometheus.yml)
+# - Alerts use node_* metrics (HighCpuUsage, etc.)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/node-exporter.yaml
+# 2. DaemonSet creates one Pod per node with prom/node-exporter:v1.7.0
+# 3. Pod mounts host /proc, /sys, / and exposes metrics on :9100
+# 4. Service creates DNS: node-exporter → Pod IPs (one per node, load balanced? Actually DaemonSet Service is a bit special)
+# 5. Prometheus scrapes it
+# 6. Verify: kubectl get pods -n llama-agent -l component=node-exporter -o wide
+#            kubectl port-forward -n llama-agent svc/node-exporter 9100:9100
+#            curl http://localhost:9100/metrics | head
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: DaemonSet — One Node Exporter Pod Per Node
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
-kind: DaemonSet
+kind: DaemonSet  # DaemonSet = one Pod per node
 metadata:
   name: node-exporter
   namespace: llama-agent
@@ -22,31 +68,36 @@ spec:
         app: llama-agent
         component: node-exporter
     spec:
+      # hostPID: Share host PID namespace (so Node Exporter sees host processes, not just Pod)
       hostPID: true
+
       containers:
         - name: node-exporter
-          image: prom/node-exporter:v1.7.0
+          image: prom/node-exporter:v1.7.0  # Node Exporter version
           args:
-            - --path.procfs=/host/proc
-            - --path.sysfs=/host/sys
-            - --path.rootfs=/rootfs
-            - --web.listen-address=:9100
+            - --path.procfs=/host/proc  # Where host /proc is mounted
+            - --path.sysfs=/host/sys    # Where host /sys is mounted
+            - --path.rootfs=/rootfs     # Where host / is mounted
+            - --web.listen-address=:9100  # Listen on 9100
           ports:
-            - containerPort: 9100
+            - containerPort: 9100  # Metrics port
               name: metrics
           resources:
             requests:
-              memory: "32Mi"
+              memory: "32Mi"  # Very lightweight
               cpu: "50m"
             limits:
               memory: "256Mi"
               cpu: "500m"
+
+          # securityContext: Run as non-root (secure)
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 65534
+            runAsNonRoot: true  # Don't run as root
+            runAsUser: 65534    # User `nobody` (65534)
+
           volumeMounts:
             - name: proc
-              mountPath: /host/proc
+              mountPath: /host/proc  # Host /proc → /host/proc in container
               readOnly: true
             - name: sys
               mountPath: /host/sys
@@ -54,21 +105,26 @@ spec:
             - name: root
               mountPath: /rootfs
               readOnly: true
+
       volumes:
         - name: proc
           hostPath:
-            path: /proc
+            path: /proc  # Host's /proc (process info)
         - name: sys
           hostPath:
-            path: /sys
+            path: /sys   # Host's /sys (system info)
         - name: root
           hostPath:
-            path: /
+            path: /      # Host's root filesystem (for disk metrics)
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Service — Stable DNS for Node Exporter
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: node-exporter
+  name: node-exporter  # DNS: node-exporter.llama-agent.svc.cluster.local (used in prometheus.yml)
   namespace: llama-agent
 spec:
   selector:
@@ -79,3 +135,7 @@ spec:
       targetPort: 9100
       name: metrics
   type: ClusterIP
+
+# 💡 LEARNER TIP: Node Exporter metrics
+#   curl http://localhost:9100/metrics | grep node_cpu
+#   Prometheus query: 100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)  → CPU usage %

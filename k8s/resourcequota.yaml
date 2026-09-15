@@ -1,24 +1,82 @@
-# ============================================
-# ResourceQuota + LimitRange — namespace guardrails (Point 7)
-# ============================================
-# Caps total consumable resources and pod counts so a runaway workload cannot
-# starve the node. Tune to your node size. LimitRange sets default
-# requests/limits for any container that omits them.
-# ============================================
+# ============================================================================
+# 📚 LEARNER GUIDE: ResourceQuota + LimitRange — k8s/resourcequota.yaml
+# ============================================================================
+# WHAT ARE THESE?
+# ---------------
+# - ResourceQuota: Caps TOTAL resources in a namespace (e.g., max 40 Pods, 8 CPU, 8Gi RAM)
+#   Prevents one namespace from starving the whole cluster (noisy neighbor).
+# - LimitRange: Sets DEFAULT and MIN/MAX for containers that don't specify resources
+#   Ensures every Pod has sane defaults (no runaway Pod with 10 CPU).
+#
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 2 resources:
+#   1. ResourceQuota `llama-agent-quota` → Hard limits for namespace
+#   2. LimitRange `llama-agent-limitrange` → Defaults for containers
+#
+# WHY NEEDED?
+# -----------
+# - Without Quota, a bug could create 100 Pods and starve the node
+# - Without LimitRange, a Pod without resources could use unlimited CPU/RAM
+# - Together, they are "guardrails" for the namespace (Point 7: Cloud Hardening)
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - ResourceQuota (v1, hard limits for namespace)
+# - LimitRange (v1, defaults for containers)
+# - requests vs limits (requests = guaranteed, limits = max)
+# - pods, requests.cpu, limits.memory, persistentvolumeclaims (quota scopes)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Applies to: All Pods in `llama-agent` namespace
+# - Enforced by: Kubernetes API server (rejects Pods that would exceed quota)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/resourcequota.yaml
+# 2. Quota and LimitRange are created
+# 3. When you create a Pod, API checks:
+#   a. Does Pod have resources? If not, LimitRange injects defaults
+#   b. Would new Pod exceed Quota? If yes, reject with error
+# 4. Verify: kubectl get resourcequota -n llama-agent
+#            kubectl describe resourcequota llama-agent-quota -n llama-agent
+#            kubectl get limitrange -n llama-agent
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: ResourceQuota — Hard Limits for Namespace
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: llama-agent-quota
+  name: llama-agent-quota  # Quota name
   namespace: llama-agent
 spec:
   hard:
+    # pods: Max number of Pods in namespace (40)
     pods: "40"
+
+    # requests.cpu: Total CPU requests across all Pods (8 cores)
+    #   - Sum of all `resources.requests.cpu` must be ≤ 8
     requests.cpu: "8"
+
+    # requests.memory: Total memory requests (8Gi)
     requests.memory: 8Gi
+
+    # limits.cpu: Total CPU limits (16 cores)
     limits.cpu: "16"
+
+    # limits.memory: Total memory limits (16Gi)
     limits.memory: 16Gi
+
+    # persistentvolumeclaims: Max PVCs (20)
     persistentvolumeclaims: "20"
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: LimitRange — Defaults for Containers
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: LimitRange
 metadata:
@@ -26,16 +84,30 @@ metadata:
   namespace: llama-agent
 spec:
   limits:
-    - type: Container
+    - type: Container  # Apply to containers (vs Pod, PVC)
+      # default: If container doesn't specify limits, use these
       default:
-        cpu: "500m"
-        memory: "512Mi"
+        cpu: "500m"     # 0.5 CPU
+        memory: "512Mi" # 512Mi RAM
+
+      # defaultRequest: If container doesn't specify requests, use these
       defaultRequest:
-        cpu: "100m"
-        memory: "128Mi"
+        cpu: "100m"     # 0.1 CPU
+        memory: "128Mi" # 128Mi RAM
+
+      # max: Maximum allowed per container (reject if higher)
       max:
-        cpu: "2"
-        memory: "2Gi"
+        cpu: "2"      # Max 2 CPU per container
+        memory: "2Gi" # Max 2Gi per container
+
+      # min: Minimum allowed per container (reject if lower)
       min:
-        cpu: "50m"
-        memory: "64Mi"
+        cpu: "50m"    # Min 0.05 CPU
+        memory: "64Mi" # Min 64Mi
+
+# 💡 LEARNER TIP: Quota vs LimitRange
+#   - Quota: "How much TOTAL can namespace use?" (like a budget)
+#   - LimitRange: "What's the DEFAULT per Pod?" (like a template)
+#   Check usage: kubectl describe resourcequota -n llama-agent
+#   Try creating a Pod without resources → it gets defaults from LimitRange
+#   Try creating 41st Pod → rejected by Quota!

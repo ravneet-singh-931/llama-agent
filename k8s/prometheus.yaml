@@ -1,16 +1,61 @@
-# ============================================
-# Prometheus - Metrics collection
-# ============================================
-# Service is named "prometheus" so the Grafana datasource URL
-# http://prometheus:9090 (config/grafana/provisioning/datasources/datasource.yml)
-# resolves unchanged inside the cluster.
+# ============================================================================
+# 📚 LEARNER GUIDE: Prometheus — k8s/prometheus.yaml (Metrics Collection)
+# ============================================================================
+# WHAT IS PROMETHEUS?
+# -------------------
+# Prometheus is a metrics database that SCRAPES (pulls) metrics from targets
+# every 15s and stores them as time-series. Grafana then visualizes them.
+#   - Metrics: Request count, error rate, response time, CPU, memory, etc.
+#   - Alerts: Rules that fire when thresholds exceeded (e.g., API down)
 #
-# NOTE: scrape targets from the compose config are adapted to k8s
-# service names: api:8000 -> llama-agent-api-service:8000.
+# WHAT DOES THIS FILE DO?
+# -----------------------
+# Creates 4 resources:
+#   1. ConfigMap `prometheus-config` → prometheus.yml + alerts.yml
+#   2. Deployment (1 replica, Prometheus on port 9090)
+#   3. Service (ClusterIP, DNS: prometheus:9090)
+#   4. PVC (2Gi for metrics data, 30d retention)
 #
-# Prometheus image runs as UID 65534 (nobody); Docker Desktop's hostpath
-# PVCs are root-owned, so we run as root (runAsUser: 0) to allow writes
-# to /prometheus.
+# SCRAPE TARGETS (prometheus.yml):
+# --------------------------------
+#   - llama-agent-api-service:8000/metrics (FastAPI metrics)
+#   - localhost:9090 (Prometheus self)
+#   - node-exporter:9100 (system metrics)
+#
+# ALERTS (alerts.yml):
+# --------------------
+#   - ApiDown, HighErrorRate, HighResponseTime, VeryHighResponseTime, ServerErrors
+#   - HighCpuUsage, HighMemoryUsage, DiskSpaceLow
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - ConfigMap for config files (mounted as /etc/prometheus)
+# - Deployment with args (--config.file, --storage.tsdb.retention.time=30d)
+# - Service (ClusterIP)
+# - PVC for /prometheus data
+# - securityContext: runAsUser 0 (root for Docker Desktop PVC)
+# - Probes on /-/ready and /-/healthy
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Scrapes: API Service (llama-agent-api-service:8000)
+# - Scraped by: Grafana datasource http://prometheus:9090
+# - Ingress: prometheus-ingress.yaml (basic-auth)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/prometheus.yaml
+# 2. Deployment creates Pod with prom/prometheus:v2.51.0
+# 3. Pod mounts ConfigMap, starts Prometheus, scrapes targets every 15s
+# 4. Service creates DNS: prometheus → Pod IP
+# 5. Grafana queries Prometheus for dashboards
+# 6. Verify: kubectl port-forward -n llama-agent svc/prometheus 9090:9090
+#            Open http://localhost:9090 → Status → Targets (should be UP)
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: ConfigMap — Prometheus Config + Alerts
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -20,27 +65,24 @@ metadata:
     app: llama-agent
     component: prometheus
 data:
+  # prometheus.yml: Main Prometheus config (scrape targets, intervals)
   prometheus.yml: |
-    # ============================================
-    # Prometheus Configuration (k8s)
-    # Scrapes metrics from all services
-    # ============================================
-
+    # Prometheus Configuration (k8s) - Scrapes metrics from all services
     global:
-      scrape_interval: 15s       # How often to pull metrics
-      evaluation_interval: 15s   # How often to evaluate rules
+      scrape_interval: 15s       # How often to pull metrics (15 seconds)
+      evaluation_interval: 15s   # How often to evaluate alert rules
 
-    # Alert rules
+    # Alert rules file (alerts.yml below, mounted at /etc/prometheus/alerts.yml)
     rule_files:
       - /etc/prometheus/alerts.yml
 
-    # Scrape targets
+    # Scrape targets: Where to pull metrics from
     scrape_configs:
       # ---- FastAPI Application Metrics ----
-      - job_name: "llama-agent-api"
-        metrics_path: "/metrics"
+      - job_name: "llama-agent-api"  # Job name (for labeling)
+        metrics_path: "/metrics"     # Path on target (FastAPI exposes /metrics)
         static_configs:
-          - targets: ["llama-agent-api-service:8000"]
+          - targets: ["llama-agent-api-service:8000"]  # API Service DNS + port
             labels:
               service: "llama-agent-api"
               environment: "production"
@@ -48,26 +90,32 @@ data:
       # ---- Prometheus Self-Monitoring ----
       - job_name: "prometheus"
         static_configs:
-          - targets: ["localhost:9090"]
+          - targets: ["localhost:9090"]  # Itself
 
       # ---- Node Exporter (System Metrics) ----
       - job_name: "node-exporter"
         static_configs:
-          - targets: ["node-exporter:9100"]
+          - targets: ["node-exporter:9100"]  # Node Exporter Service
             labels:
               service: "system"
-  alerts.yml: |
-    # ============================================
-    # Prometheus Alert Rules (k8s)
-    # ============================================
 
+      # ---- Container Metrics (via cAdvisor if added) ----
+      # Uncomment when cadvisor is added to docker-compose/k8s
+      # - job_name: "cadvisor"
+      #   static_configs:
+      #     - targets: ["cadvisor:8080"]
+
+  # alerts.yml: Alert rules (when to fire alerts)
+  alerts.yml: |
+    # Prometheus Alert Rules (k8s)
     groups:
       # ---- Application Alerts ----
       - name: llama_agent_app
         rules:
+          # Alert if API is down (no `up` metric for 2m)
           - alert: ApiDown
             expr: absent(up{job="llama-agent-api"})
-            for: 2m
+            for: 2m  # Fire after 2 minutes down
             labels:
               severity: critical
               service: llama-agent
@@ -75,6 +123,7 @@ data:
               summary: "API is DOWN"
               description: "Llama Agent API has not been reachable for 2 minutes."
 
+          # Alert if error rate > 5 errors/sec for 5m
           - alert: HighErrorRate
             expr: rate(llama_agent_errors_total[5m]) > 5
             for: 5m
@@ -85,6 +134,7 @@ data:
               summary: "High error rate detected"
               description: "Error rate is {{ $value }} errors/sec (threshold: 5)."
 
+          # Alert if P95 response time > 5s for 5m
           - alert: HighResponseTime
             expr: histogram_quantile(0.95, rate(llama_agent_response_time_seconds_bucket[5m])) > 5
             for: 5m
@@ -95,6 +145,7 @@ data:
               summary: "Slow API responses detected"
               description: "P95 response time is {{ $value | humanizeDuration }} (threshold: 5s)."
 
+          # Alert if P99 > 10s (critical)
           - alert: VeryHighResponseTime
             expr: histogram_quantile(0.99, rate(llama_agent_response_time_seconds_bucket[5m])) > 10
             for: 5m
@@ -105,6 +156,7 @@ data:
               summary: "CRITICAL: Very slow API responses"
               description: "P99 response time is {{ $value | humanizeDuration }} (threshold: 10s)."
 
+          # Alert if 5xx errors > 1/sec for 5m
           - alert: ServerErrors
             expr: rate(llama_agent_http_responses_total{status_code=~"5.."}[5m]) > 1
             for: 5m
@@ -147,7 +199,11 @@ data:
             annotations:
               summary: "Disk space critically low"
               description: "Only {{ $value | humanize }}% disk space remaining."
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Deployment — Prometheus Pod
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -170,41 +226,41 @@ spec:
     spec:
       containers:
         - name: prometheus
-          image: prom/prometheus:v2.51.0
+          image: prom/prometheus:v2.51.0  # Prometheus version
           args:
-            - --config.file=/etc/prometheus/prometheus.yml
-            - --storage.tsdb.retention.time=30d
-            - --web.enable-lifecycle
+            - --config.file=/etc/prometheus/prometheus.yml  # Config file path
+            - --storage.tsdb.retention.time=30d             # Keep data 30 days
+            - --web.enable-lifecycle                        # Enable reload via API
           ports:
-            - containerPort: 9090
+            - containerPort: 9090  # Prometheus UI/API port
               name: http
           resources:
             requests:
               memory: "128Mi"
               cpu: "100m"
             limits:
-              memory: "1Gi"
+              memory: "1Gi"  # Prometheus can use more memory for queries
               cpu: "1"
           securityContext:
-            runAsUser: 0
+            runAsUser: 0  # Root for Docker Desktop PVC
           readinessProbe:
             httpGet:
-              path: /-/ready
+              path: /-/ready  # Prometheus ready endpoint
               port: 9090
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /-/healthy
+              path: /-/healthy  # Prometheus healthy endpoint
               port: 9090
             initialDelaySeconds: 30
             periodSeconds: 20
           volumeMounts:
             - name: config
-              mountPath: /etc/prometheus
+              mountPath: /etc/prometheus  # Config files
               readOnly: true
             - name: data
-              mountPath: /prometheus
+              mountPath: /prometheus      # Data directory
       volumes:
         - name: config
           configMap:
@@ -212,11 +268,15 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: prometheus-pvc
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 3: Service — Stable DNS for Prometheus
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: prometheus
+  name: prometheus  # DNS: prometheus.llama-agent.svc.cluster.local (used in Grafana datasource)
   namespace: llama-agent
 spec:
   selector:
@@ -227,7 +287,11 @@ spec:
       targetPort: 9090
       name: http
   type: ClusterIP
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 4: PVC — Persistent Storage for Metrics
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -238,4 +302,9 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 2Gi
+      storage: 2Gi  # 2Gi for 30d of metrics (adjust based on scrape interval and targets)
+
+# 💡 LEARNER TIP: PromQL queries to try in Prometheus UI (http://localhost:9090)
+#   up{job="llama-agent-api"}  → Is API up? (1 = up, 0 = down)
+#   rate(llama_agent_requests_total[5m])  → Request rate per second
+#   histogram_quantile(0.95, rate(llama_agent_response_time_seconds_bucket[5m]))  → P95 latency

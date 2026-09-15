@@ -1,18 +1,61 @@
-# ============================================
-# Next.js Frontend Deployment + Service
-# Image must be built with: NEXT_PUBLIC_API_URL=/api
-# (docker build --build-arg NEXT_PUBLIC_API_URL=/api -t ravneet231/llama-agent-frontend:v7 ./frontend)
-# ============================================
+# ============================================================================
+# 📚 LEARNER GUIDE: Next.js Frontend — k8s/frontend.yaml
+# ============================================================================
+# WHAT IS THIS?
+# -------------
+# Runs the Next.js 16 main UI (the user-facing web app).
+# Creates:
+#   1. Deployment (2 replicas, Next.js server on port 3000)
+#   2. Service (ClusterIP, DNS: llama-agent-frontend-service:3000)
+#
+# WHAT DOES THE FRONTEND DO?
+# --------------------------
+# - Chat interface (streaming, markdown, agent collaboration)
+# - Dashboard, documents, agents, settings pages
+# - Talks to API via /api/* (proxied through Ingress or Next.js rewrites)
+# - Built with: Next.js 16, React 19, Zustand, Tailwind, shadcn/ui
+#
+# WHY 2 REPLICAS?
+# ---------------
+# - HA and load balancing (like API)
+# - Stateless (no PVC needed — just serves static + SSR)
+#
+# KUBERNETES CONCEPTS:
+# --------------------
+# - Deployment (2 replicas, rolling updates)
+# - Service (ClusterIP)
+# - Probes: readiness (5s) and liveness (30s) on `/` (homepage)
+# - imagePullPolicy: IfNotPresent (pinned :v7)
+#
+# HOW IT CONNECTS:
+# ----------------
+# - Ingress (frontend-ingress.yaml) routes `/` → Service → Pods
+# - Pods talk to API via `API_PROXY_URL=http://llama-agent-api-service:8000` (env in docker-compose, but in k8s via Ingress)
+# - Built with NEXT_PUBLIC_API_URL=/api (so browser calls /api/* which Ingress routes to API)
+#
+# FLOW:
+# -----
+# 1. kubectl apply -f k8s/frontend.yaml
+# 2. Deployment creates 2 Pods with ravneet231/llama-agent-frontend:v7
+# 3. Each Pod runs `next start` on port 3000
+# 4. Service creates DNS: llama-agent-frontend-service → 2 Pod IPs
+# 5. Ingress routes http://llama-agent.local/ → Service → Pods
+# 6. Verify: kubectl get pods -n llama-agent -l component=frontend
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# RESOURCE 1: Deployment — 2 Replicas of Next.js
+# --------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: llama-agent-frontend
+  name: llama-agent-frontend  # Deployment name
   namespace: llama-agent
   labels:
     app: llama-agent
     component: frontend
 spec:
-  replicas: 2
+  replicas: 2  # 2 for HA (stateless, easy to scale)
   selector:
     matchLabels:
       app: llama-agent
@@ -25,35 +68,50 @@ spec:
     spec:
       containers:
         - name: frontend
+          # image: Next.js frontend image (built from ./frontend/Dockerfile)
+          #   - Must be built with: docker build --build-arg NEXT_PUBLIC_API_URL=/api ...
+          #   - Tag :v7 pinned (like API)
           image: ravneet231/llama-agent-frontend:v7
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 3000
+            - containerPort: 3000  # Next.js default port
               name: http
           resources:
             requests:
-              memory: "128Mi"
+              memory: "128Mi"  # Frontend is lighter than API
               cpu: "100m"
             limits:
               memory: "256Mi"
               cpu: "250m"
+
+          # readinessProbe: Ready to serve? Check homepage `/`
           readinessProbe:
             httpGet:
-              path: /
+              path: /  # Homepage should return 200
               port: 3000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 5  # Quick check (Next.js starts fast)
             periodSeconds: 10
+
+          # livenessProbe: Alive? Same check, longer delay
           livenessProbe:
             httpGet:
               path: /
               port: 3000
             initialDelaySeconds: 30
             periodSeconds: 15
+
+          # Note: No env vars here (API URL is baked at build time via NEXT_PUBLIC_API_URL)
+          # No volumes (stateless)
+
 ---
+# --------------------------------------------------------------------------
+# RESOURCE 2: Service — Stable DNS for Frontend
+# --------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: llama-agent-frontend-service
+  name: llama-agent-frontend-service  # DNS: llama-agent-frontend-service.llama-agent.svc.cluster.local
+                                      # Used in frontend-ingress.yaml
   namespace: llama-agent
 spec:
   selector:
@@ -63,4 +121,10 @@ spec:
     - port: 3000
       targetPort: 3000
       name: http
-  type: ClusterIP
+  type: ClusterIP  # Internal (Ingress exposes it)
+
+# 💡 LEARNER TIP: How to build the frontend image
+#   cd frontend
+#   docker build --build-arg NEXT_PUBLIC_API_URL=/api -t ravneet231/llama-agent-frontend:v7 .
+#   docker push ravneet231/llama-agent-frontend:v7
+#   The build-arg bakes the API URL into the static JS (browser will call /api/*)
