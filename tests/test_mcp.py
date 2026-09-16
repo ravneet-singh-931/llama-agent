@@ -191,8 +191,13 @@ class TestServerToolDefinitions:
 
     @requires_mcp
     def test_mcp_package_imports(self):
-        """The mcp package should be importable."""
-        from mcp.server.fastmcp import FastMCP
+        """The mcp package should be importable (supports both mcp 1.x and 2.x)."""
+        # mcp 1.x: from mcp.server.fastmcp import FastMCP
+        # mcp 2.x: from mcp.server.mcpserver import MCPServer (FastMCP renamed)
+        try:
+            from mcp.server.fastmcp import FastMCP
+        except ModuleNotFoundError:
+            from mcp.server.mcpserver import MCPServer as FastMCP
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
         # If we get here, imports work
