@@ -93,7 +93,8 @@ COPY . .
 #   - Default `/api` = Same-origin (browser → /api/* → Next.js rewrite → API)
 #   - For k8s, also `/api` (Ingress routes /api/* to API Service)
 ARG NEXT_PUBLIC_API_URL=/api
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL  # Also set as ENV for build
+# Also set as ENV for build (so Next.js can read it)
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
 # Build arg: API_PROXY_URL (where Next.js server proxies /api/*)
 #   - Inside Docker Compose, API service resolves via http://api:8000 (Docker DNS)
