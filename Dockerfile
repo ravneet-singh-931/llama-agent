@@ -79,12 +79,8 @@ COPY requirements.txt .
 #   - `--no-cache-dir` = Don't cache pip downloads (saves image size)
 #   - `-r requirements.txt` = Install all packages listed in file
 #   - This layer is cached unless requirements.txt changes
+#   - Note: mcp<2 and fastmcp are now in requirements.txt (pinned), so no separate install needed
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Install MCP (Model Context Protocol) separately (requires Python 3.10+)
-#   - `mcp` package is not in requirements.txt (optional, but needed for MCP server)
-#   - Installed separately to ensure it's available for mcp_agents_server.py
-RUN pip install --no-cache-dir mcp
 
 # Copy all code from host to image
 #   - `COPY . .` = Copy everything from host current dir (.) to image /app
