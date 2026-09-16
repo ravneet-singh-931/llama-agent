@@ -114,7 +114,8 @@ WORKDIR /app
 
 # Set production env
 ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1  # Disable Next.js telemetry (privacy)
+# Disable Next.js telemetry (privacy)
+ENV NEXT_TELEMETRY_DISABLED=1
 
 # Create non-root user for security (don't run as root!)
 #   - `addgroup --system --gid 1001 nodejs` = Create group nodejs (GID 1001)
@@ -139,7 +140,8 @@ EXPOSE 3000
 
 # Env for Next.js server
 ENV PORT=3000
-ENV HOSTNAME="0.0.0.0"  # Listen on all interfaces (for Docker)
+# Listen on all interfaces (for Docker)
+ENV HOSTNAME="0.0.0.0"
 
 # Default command: Run Next.js standalone server
 #   - `node server.js` = Next.js standalone server (from .next/standalone)
