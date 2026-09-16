@@ -1,84 +1,87 @@
 # ============================================
-# Llama Agent - FULL STACK Requirements
+# Llama Agent - FULL STACK Requirements (Pinned for CI stability)
 # ============================================
+# Pinned versions to avoid pip backtracking hell (see https://pip.pypa.io/warnings/backtracking)
+# Generated from working local env + CI green versions (2026-08-16)
+# Update with: pip freeze | grep -E "^(groq|llama-index|chromadb|...)" > requirements.txt
 
 # --- AI / LLM ---
-groq
+groq==1.5.0
 llama-index-core==0.14.23
 llama-index-llms-groq==0.5.0
 
 # --- Environment ---
-python-dotenv
+python-dotenv==1.2.0
 
 # --- Document Reading ---
-# pypdf is the maintained successor of PyPDF2 (PyPDF2 is unmaintained
-# and has unfixed CVEs, e.g. PYSEC-2026-1835). >=3.9.0 includes the fixes.
 pypdf>=3.9.0
-python-docx
+python-docx==1.2.0
 
 # --- Vector Database (Smart RAG) ---
-chromadb
+chromadb==1.5.9
 
 # --- Observability (Phoenix by Arize AI) ---
-arize-phoenix
-opentelemetry-instrumentation-fastapi
+arize-phoenix==20.3.0
+opentelemetry-instrumentation-fastapi==0.65b0
 openinference-instrumentation-llama-index==4.4.5
 
 # --- Data Processing ---
-pandas
+pandas==3.0.3
 
 # --- Web Interface ---
-streamlit
+streamlit==1.59.2
 
 # --- REST API ---
-fastapi
-uvicorn[standard]
-python-multipart
+fastapi==0.139.2
+uvicorn[standard]==0.51.0
+python-multipart==0.0.32
 
 # --- WebSocket Support ---
-websockets
+websockets==16.1.1
 
 # --- Database (PostgreSQL) ---
-sqlalchemy[asyncio]
-asyncpg
-psycopg2-binary
-alembic
+sqlalchemy[asyncio]==2.0.51
+asyncpg==0.31.0
+psycopg2-binary==2.9.13
+alembic==1.20.0
 
 # --- Authentication ---
-python-jose[cryptography]
-bcrypt
+python-jose[cryptography]==3.5.0
+bcrypt==5.0.0
 
 # --- Redis (Caching) ---
-redis[hiredis]
+redis[hiredis]==8.0.1
 
 # --- Validation ---
-pydantic[email]
+pydantic[email]==2.13.5
 
 # --- Testing ---
-pytest
-pytest-cov
-pytest-asyncio
+pytest==9.1.1
+pytest-cov==7.1.0
+pytest-asyncio==1.4.0
 
 # --- Code Quality ---
-flake8
+flake8==7.3.0
 
 # --- Security ---
-pip-audit
-bandit
+pip-audit==2.10.1
+bandit==1.9.4
 
 # --- Coverage ---
-coverage
+coverage==7.16.1
 
 # --- Monitoring (Prometheus) ---
-prometheus-client
+prometheus-client==0.26.0
 
-# --- MCP (Model Context Protocol) - Optional, requires Python 3.10+ ---
-# Pinned to <2 because mcp 2.x renamed FastMCP -> MCPServer (breaking change)
-# See: https://py.sdk.modelcontextprotocol.io/v2/migration/#fastmcp-renamed-to-mcpserver
-mcp<2
-fastmcp
+# --- MCP (Model Context Protocol) - Pinned to <2 (mcp 2.x breaks FastMCP) ---
+mcp==1.28.1
+fastmcp==3.4.7
 
 # --- Utilities ---
-python-dateutil
-pytz
+python-dateutil==2.9.0
+pytz==2026.3
 
+# --- Transitive deps pinned to avoid backtracking ---
+openai==2.46.0
+kubernetes==36.0.3
+llama-index-workflows==2.22.2
