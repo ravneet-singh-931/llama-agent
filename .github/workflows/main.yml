@@ -324,7 +324,10 @@ jobs:
   deploy-staging:
     name: "\U0001F3AA Deploy to Staging"
     needs: docker
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    defaults:
+      run:
+        shell: bash
     # NOTE: `secrets` is NOT allowed in `if` expressions (GitHub rejects the
     # workflow). Gate the deploy on a check step that sets an output instead.
     if: github.ref == 'refs/heads/main'
@@ -410,7 +413,10 @@ jobs:
   deploy-production:
     name: "\U0001F3ED Deploy to Production"
     needs: deploy-staging
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    defaults:
+      run:
+        shell: bash
     if: github.ref == 'refs/heads/main'
     environment: production
 
