@@ -350,9 +350,13 @@ jobs:
 
       - name: "\U0001F512 Configure kubeconfig"
         if: steps.gate.outputs.enabled == 'true'
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG }}
         run: |
           mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          printf '%s' "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          # Verify it's valid YAML
+          kubectl config view --flatten >/dev/null && echo "✅ kubeconfig valid"
 
       - name: "Create runtime Secrets"
         if: steps.gate.outputs.enabled == 'true'
@@ -426,9 +430,13 @@ jobs:
 
       - name: "\U0001F512 Configure kubeconfig"
         if: steps.gate.outputs.enabled == 'true'
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG }}
         run: |
           mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          printf '%s' "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          # Verify it's valid YAML
+          kubectl config view --flatten >/dev/null && echo "✅ kubeconfig valid"
 
       - name: "Create runtime Secrets"
         if: steps.gate.outputs.enabled == 'true'
