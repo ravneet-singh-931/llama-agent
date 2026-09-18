@@ -354,6 +354,10 @@ jobs:
           KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG }}
         run: |
           mkdir -p "$HOME/.kube"
+          # Debug: show secret length and first/last chars
+          echo "Secret length: ${#KUBE_CONFIG_B64}"
+          echo "First 50: ${KUBE_CONFIG_B64:0:50}"
+          echo "Last 50: ${KUBE_CONFIG_B64: -50}"
           printf '%s' "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
           # Verify it's valid YAML
           kubectl config view --flatten >/dev/null && echo "✅ kubeconfig valid"
