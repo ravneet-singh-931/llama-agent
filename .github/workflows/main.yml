@@ -372,7 +372,7 @@ deploy-staging:
           # Replace Windows localhost with WSL-accessible Docker Desktop host
           # Docker Desktop's Kubernetes API (127.0.0.1:51935) is only reachable
           # from Windows. From WSL, use host.docker.internal instead.
-          sed -i 's|127.0.0.1:51935|host.docker.internal:51935|g' "$HOME/.kube/config"
+          # Commented out: sed -i 's|127.0.0.1:51935|host.docker.internal:51935|g' "$HOME/.kube/config"
           # Verify it's valid YAML and the server is reachable
           kubectl config view --flatten >/dev/null && echo "✅ kubeconfig valid"
           kubectl cluster-info 2>&1 || echo "⚠️  cluster-info failed (may need first run)"
@@ -489,7 +489,7 @@ deploy-production:
           # Replace Windows localhost with WSL-accessible Docker Desktop host
           # Docker Desktop's Kubernetes API (127.0.0.1:51935) is only reachable
           # from Windows. From WSL, use host.docker.internal instead.
-          sed -i 's|127.0.0.1:51935|host.docker.internal:51935|g' "$HOME/.kube/config"
+          # Commented out: sed -i 's|127.0.0.1:51935|host.docker.internal:51935|g' "$HOME/.kube/config"
           # Verify it's valid YAML and the server is reachable
           kubectl config view --flatten >/dev/null && echo "✅ kubeconfig valid"
           kubectl cluster-info 2>&1 || echo "⚠️  cluster-info failed (may need first run)"
