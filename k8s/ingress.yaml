@@ -101,7 +101,7 @@ metadata:
     # ClusterIssuer name for Let's Encrypt certs
     #   - For .local lab, use "selfsigned" (Let's Encrypt can't issue for .local)
     #   - For real cloud, use "letsencrypt-prod" with public FQDN
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/cluster-issuer: selfsigned
 
     # ---- Point 3: Rate limiting (per-client-IP) ----
     # Protect against abuse/DDoS
@@ -111,13 +111,17 @@ metadata:
     nginx.ingress.kubernetes.io/limit-burst-multiplier: "2"  # Allow burst 2x limit
 
     # ---- Point 3: WAF (ModSecurity + OWASP Core Rule Set) ----
-    # Requires ingress-nginx built with ModSecurity enabled
-    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
-    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
-    nginx.ingress.kubernetes.io/modsecurity-snippet: |
-      SecRuleEngine On
-      SecRequestBodyLimit 10485760      # 10MB body limit
-      SecRequestBodyNoFilesLimit 1048576  # 1MB without files
+    # NOTE: ModSecurity annotations removed for Docker Desktop compatibility.
+    # Docker Desktop's ingress-nginx does not include the ModSecurity module,
+    # and snippet annotations are disabled by the admission webhook.
+    # To enable WAF in production, deploy ingress-nginx with ModSecurity
+    # (see https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#modsecurity)
+    # nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    # nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    # nginx.ingress.kubernetes.io/modsecurity-snippet: |
+    #   SecRuleEngine On
+    #   SecRequestBodyLimit 10485760      # 10MB body limit
+    #   SecRequestBodyNoFilesLimit 1048576  # 1MB without files
 
 spec:
   # ingressClassName: Which Ingress controller to use (must be installed)

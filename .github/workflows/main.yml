@@ -321,10 +321,20 @@ jobs:
   # monitoring-auth, grafana dashboard) from repo secrets. Core manifests
   # only are applied here; operator/optional manifests (cert-manager.yaml,
   # external-secrets.yaml, oauth2-proxy*.yaml) are applied out-of-band.
+<<<<<<< HEAD
 deploy-staging:
      name: "\U0001F3AA Deploy to Staging"
      needs: docker
      runs-on: self-hosted
+=======
+  deploy-staging:
+    name: "\U0001F3AA Deploy to Staging"
+    needs: docker
+    runs-on: self-hosted
+    defaults:
+      run:
+        shell: bash
+>>>>>>> 4dedbf67d231df076ecb0d0490b95ac996c0474f
     # NOTE: `secrets` is NOT allowed in `if` expressions (GitHub rejects the
     # workflow). Gate the deploy on a check step that sets an output instead.
     if: github.ref == 'refs/heads/main'
@@ -350,9 +360,22 @@ deploy-staging:
 
       - name: "\U0001F512 Configure kubeconfig"
         if: steps.gate.outputs.enabled == 'true'
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG }}
         run: |
           mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          # Debug: show secret length and first/last chars
+          echo "Secret length: ${#KUBE_CONFIG_B64}"
+          echo "First 50: ${KUBE_CONFIG_B64:0:50}"
+          echo "Last 50: ${KUBE_CONFIG_B64: -50}"
+          printf '%s' "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          # Replace Windows localhost with WSL-accessible Docker Desktop host
+          # Docker Desktop's Kubernetes API (127.0.0.1:51935) is only reachable
+          # from Windows. From WSL, use host.docker.internal instead.
+          sed -i 's|127.0.0.1:51935|host.docker.internal:51935|g' "$HOME/.kube/config"
+          # Verify it's valid YAML and the server is reachable
+          kubectl config view --flatten >/dev/null && echo "✅ kubeconfig valid"
+          kubectl cluster-info 2>&1 || echo "⚠️  cluster-info failed (may need first run)"
 
       - name: "Create runtime Secrets"
         if: steps.gate.outputs.enabled == 'true'
@@ -383,12 +406,30 @@ deploy-staging:
         if: steps.gate.outputs.enabled == 'true'
         run: |
           kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/postgres.yaml k8s/redis.yaml k8s/chromadb.yaml
-          kubectl apply -f k8s/api.yaml k8s/mcp-server.yaml k8s/web.yaml k8s/frontend.yaml
-          kubectl apply -f k8s/ingress.yaml k8s/frontend-ingress.yaml
-          kubectl apply -f k8s/grafana.yaml k8s/prometheus.yaml k8s/loki.yaml k8s/promtail.yaml k8s/node-exporter.yaml k8s/phoenix.yaml
-          kubectl apply -f k8s/grafana-ingress.yaml k8s/prometheus-ingress.yaml k8s/loki-ingress.yaml k8s/phoenix-ingress.yaml
-          kubectl apply -f k8s/postgres-backup-cronjob.yaml k8s/poddisruptionbudgets.yaml k8s/api-hpa.yaml k8s/resourcequota.yaml k8s/networkpolicy.yaml
+          kubectl apply -f k8s/postgres.yaml
+          kubectl apply -f k8s/redis.yaml
+          kubectl apply -f k8s/chromadb.yaml
+          kubectl apply -f k8s/api.yaml
+          kubectl apply -f k8s/mcp-server.yaml
+          kubectl apply -f k8s/web.yaml
+          kubectl apply -f k8s/frontend.yaml
+          kubectl apply -f k8s/ingress.yaml
+          kubectl apply -f k8s/frontend-ingress.yaml
+          kubectl apply -f k8s/grafana.yaml
+          kubectl apply -f k8s/prometheus.yaml
+          kubectl apply -f k8s/loki.yaml
+          kubectl apply -f k8s/promtail.yaml
+          kubectl apply -f k8s/node-exporter.yaml
+          kubectl apply -f k8s/phoenix.yaml
+          kubectl apply -f k8s/grafana-ingress.yaml
+          kubectl apply -f k8s/prometheus-ingress.yaml
+          kubectl apply -f k8s/loki-ingress.yaml
+          kubectl apply -f k8s/phoenix-ingress.yaml
+          kubectl apply -f k8s/postgres-backup-cronjob.yaml
+          kubectl apply -f k8s/poddisruptionbudgets.yaml
+          kubectl apply -f k8s/api-hpa.yaml
+          kubectl apply -f k8s/resourcequota.yaml
+          kubectl apply -f k8s/networkpolicy.yaml
 
       - name: "\u23F3 Wait for rollout"
         if: steps.gate.outputs.enabled == 'true'
@@ -399,10 +440,20 @@ deploy-staging:
   # ============================================================
   # JOB 7: DEPLOY PRODUCTION
   # ============================================================
+<<<<<<< HEAD
 deploy-production:
      name: "\U0001F3ED Deploy to Production"
      needs: deploy-staging
      runs-on: self-hosted
+=======
+  deploy-production:
+    name: "\U0001F3ED Deploy to Production"
+    needs: deploy-staging
+    runs-on: self-hosted
+    defaults:
+      run:
+        shell: bash
+>>>>>>> 4dedbf67d231df076ecb0d0490b95ac996c0474f
     if: github.ref == 'refs/heads/main'
     environment: production
 
@@ -426,9 +477,22 @@ deploy-production:
 
       - name: "\U0001F512 Configure kubeconfig"
         if: steps.gate.outputs.enabled == 'true'
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG }}
         run: |
           mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          # Debug: show secret length and first/last chars
+          echo "Secret length: ${#KUBE_CONFIG_B64}"
+          echo "First 50: ${KUBE_CONFIG_B64:0:50}"
+          echo "Last 50: ${KUBE_CONFIG_B64: -50}"
+          printf '%s' "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          # Replace Windows localhost with WSL-accessible Docker Desktop host
+          # Docker Desktop's Kubernetes API (127.0.0.1:51935) is only reachable
+          # from Windows. From WSL, use host.docker.internal instead.
+          sed -i 's|127.0.0.1:51935|host.docker.internal:51935|g' "$HOME/.kube/config"
+          # Verify it's valid YAML and the server is reachable
+          kubectl config view --flatten >/dev/null && echo "✅ kubeconfig valid"
+          kubectl cluster-info 2>&1 || echo "⚠️  cluster-info failed (may need first run)"
 
       - name: "Create runtime Secrets"
         if: steps.gate.outputs.enabled == 'true'
@@ -459,12 +523,30 @@ deploy-production:
         if: steps.gate.outputs.enabled == 'true'
         run: |
           kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/postgres.yaml k8s/redis.yaml k8s/chromadb.yaml
-          kubectl apply -f k8s/api.yaml k8s/mcp-server.yaml k8s/web.yaml k8s/frontend.yaml
-          kubectl apply -f k8s/ingress.yaml k8s/frontend-ingress.yaml
-          kubectl apply -f k8s/grafana.yaml k8s/prometheus.yaml k8s/loki.yaml k8s/promtail.yaml k8s/node-exporter.yaml k8s/phoenix.yaml
-          kubectl apply -f k8s/grafana-ingress.yaml k8s/prometheus-ingress.yaml k8s/loki-ingress.yaml k8s/phoenix-ingress.yaml
-          kubectl apply -f k8s/postgres-backup-cronjob.yaml k8s/poddisruptionbudgets.yaml k8s/api-hpa.yaml k8s/resourcequota.yaml k8s/networkpolicy.yaml
+          kubectl apply -f k8s/postgres.yaml
+          kubectl apply -f k8s/redis.yaml
+          kubectl apply -f k8s/chromadb.yaml
+          kubectl apply -f k8s/api.yaml
+          kubectl apply -f k8s/mcp-server.yaml
+          kubectl apply -f k8s/web.yaml
+          kubectl apply -f k8s/frontend.yaml
+          kubectl apply -f k8s/ingress.yaml
+          kubectl apply -f k8s/frontend-ingress.yaml
+          kubectl apply -f k8s/grafana.yaml
+          kubectl apply -f k8s/prometheus.yaml
+          kubectl apply -f k8s/loki.yaml
+          kubectl apply -f k8s/promtail.yaml
+          kubectl apply -f k8s/node-exporter.yaml
+          kubectl apply -f k8s/phoenix.yaml
+          kubectl apply -f k8s/grafana-ingress.yaml
+          kubectl apply -f k8s/prometheus-ingress.yaml
+          kubectl apply -f k8s/loki-ingress.yaml
+          kubectl apply -f k8s/phoenix-ingress.yaml
+          kubectl apply -f k8s/postgres-backup-cronjob.yaml
+          kubectl apply -f k8s/poddisruptionbudgets.yaml
+          kubectl apply -f k8s/api-hpa.yaml
+          kubectl apply -f k8s/resourcequota.yaml
+          kubectl apply -f k8s/networkpolicy.yaml
 
       - name: "\u23F3 Wait for rollout"
         if: steps.gate.outputs.enabled == 'true'

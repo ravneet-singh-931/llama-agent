@@ -51,12 +51,12 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
 
-    # TLS via cert-manager
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # TLS via cert-manager (use "selfsigned" for .local lab)
+    cert-manager.io/cluster-issuer: selfsigned
 
-    # WAF
-    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
-    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    # WAF (ModSecurity disabled for Docker Desktop compatibility)
+    # nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    # nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
 
 spec:
   ingressClassName: nginx
