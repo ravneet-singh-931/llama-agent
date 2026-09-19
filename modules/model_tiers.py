@@ -23,7 +23,7 @@ retry once on the fast model instead of failing.
 import os
 
 DEFAULT_STRONG_MODEL = "qwen/qwen3.8-27b"
-DEFAULT_FAST_MODEL = "qwen/qwen3.8-27b"
+DEFAULT_FAST_MODEL = "openai/gpt-oss-20b"
 
 _TIER_ENV = {
     "strong": "LLM_MODEL_STRONG",
@@ -91,7 +91,7 @@ DEFAULT_PROVIDER = "groq"
 #   OPENAI_MODEL_STRONG / OPENAI_MODEL_FAST
 #   ANTHROPIC_MODEL_STRONG / ANTHROPIC_MODEL_FAST
 PROVIDER_MODELS = {
-    "groq":      {"strong": "qwen/qwen3.8-27b", "fast": "qwen/qwen3.8-27b"},
+    "groq":      {"strong": "qwen/qwen3.8-27b", "fast": "openai/gpt-oss-20b"},
     "openai":    {"strong": "gpt-4o",                 "fast": "gpt-4o-mini"},
     "anthropic": {"strong": "claude-3-5-sonnet-latest", "fast": "claude-3-5-haiku-latest"},
 }
