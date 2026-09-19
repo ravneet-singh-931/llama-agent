@@ -127,11 +127,6 @@ jobs:
   security-sast:
     name: "\U0001F511 Secret Leak Scan"
     runs-on: ubuntu-latest
-    # gitleaks-action@v2 does a PR-diff scan on pull_request events, which
-    # requires the token to read PR commits via the GitHub API. Without
-    # `pull-requests: read` it fails with 403 "Resource not accessible by
-    # integration" (a permissions error, not a real leak). `contents: read`
-    # is needed for actions/checkout.
     permissions:
       contents: read
       pull-requests: read
@@ -279,7 +274,7 @@ jobs:
 
       # The MCP agent server runs from the SAME code/Dockerfile but is
       # published under a separate repo tag (ravneet231/llama-agent-mcp-server)
-      # referenced by k8s/mcp-server.yaml. Pin it to :v7 too (Point 4).
+      # referenced by k8s/mcp-server.yaml. Pin it to :v7 too.
       - name: "Build and push MCP server image"
         uses: docker/build-push-action@v5
         with:
@@ -313,20 +308,6 @@ jobs:
   # ============================================================
   # JOB 6: DEPLOY STAGING
   # ============================================================
-  # Real cloud deploy. Skipped unless a base64 KUBE_CONFIG secret is set in
-  # the repo (so the pipeline stays green for forks without a cluster). The
-  # cluster must already have: the pinned :v7 images (built above), cert-manager
-  # + External Secrets Operator installed (if used). The deploy jobs now create
-  # the runtime Secrets/ConfigMap (db-secrets, app-secrets, grafana-secret,
-  # monitoring-auth, grafana dashboard) from repo secrets. Core manifests
-  # only are applied here; operator/optional manifests (cert-manager.yaml,
-  # external-secrets.yaml, oauth2-proxy*.yaml) are applied out-of-band.
-<<<<<<< HEAD
-deploy-staging:
-     name: "\U0001F3AA Deploy to Staging"
-     needs: docker
-     runs-on: self-hosted
-=======
   deploy-staging:
     name: "\U0001F3AA Deploy to Staging"
     needs: docker
@@ -334,9 +315,6 @@ deploy-staging:
     defaults:
       run:
         shell: bash
->>>>>>> 4dedbf67d231df076ecb0d0490b95ac996c0474f
-    # NOTE: `secrets` is NOT allowed in `if` expressions (GitHub rejects the
-    # workflow). Gate the deploy on a check step that sets an output instead.
     if: github.ref == 'refs/heads/main'
     environment: staging
 
@@ -364,16 +342,10 @@ deploy-staging:
           KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG }}
         run: |
           mkdir -p "$HOME/.kube"
-          # Debug: show secret length and first/last chars
           echo "Secret length: ${#KUBE_CONFIG_B64}"
           echo "First 50: ${KUBE_CONFIG_B64:0:50}"
           echo "Last 50: ${KUBE_CONFIG_B64: -50}"
           printf '%s' "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
-          # Replace Windows localhost with WSL-accessible Docker Desktop host
-          # Docker Desktop's Kubernetes API (127.0.0.1:51935) is only reachable
-          # from Windows. From WSL, use host.docker.internal instead.
-          # Commented out: sed -i 's|127.0.0.1:51935|host.docker.internal:51935|g' "$HOME/.kube/config"
-          # Verify it's valid YAML and the server is reachable
           kubectl config view --flatten >/dev/null && echo "✅ kubeconfig valid"
           kubectl cluster-info 2>&1 || echo "⚠️  cluster-info failed (may need first run)"
 
@@ -440,12 +412,6 @@ deploy-staging:
   # ============================================================
   # JOB 7: DEPLOY PRODUCTION
   # ============================================================
-<<<<<<< HEAD
-deploy-production:
-     name: "\U0001F3ED Deploy to Production"
-     needs: deploy-staging
-     runs-on: self-hosted
-=======
   deploy-production:
     name: "\U0001F3ED Deploy to Production"
     needs: deploy-staging
@@ -453,7 +419,6 @@ deploy-production:
     defaults:
       run:
         shell: bash
->>>>>>> 4dedbf67d231df076ecb0d0490b95ac996c0474f
     if: github.ref == 'refs/heads/main'
     environment: production
 
@@ -481,16 +446,10 @@ deploy-production:
           KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG }}
         run: |
           mkdir -p "$HOME/.kube"
-          # Debug: show secret length and first/last chars
           echo "Secret length: ${#KUBE_CONFIG_B64}"
           echo "First 50: ${KUBE_CONFIG_B64:0:50}"
           echo "Last 50: ${KUBE_CONFIG_B64: -50}"
           printf '%s' "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
-          # Replace Windows localhost with WSL-accessible Docker Desktop host
-          # Docker Desktop's Kubernetes API (127.0.0.1:51935) is only reachable
-          # from Windows. From WSL, use host.docker.internal instead.
-          # Commented out: sed -i 's|127.0.0.1:51935|host.docker.internal:51935|g' "$HOME/.kube/config"
-          # Verify it's valid YAML and the server is reachable
           kubectl config view --flatten >/dev/null && echo "✅ kubeconfig valid"
           kubectl cluster-info 2>&1 || echo "⚠️  cluster-info failed (may need first run)"
 
