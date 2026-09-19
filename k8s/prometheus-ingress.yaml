@@ -51,14 +51,14 @@ metadata:
     nginx.ingress.kubernetes.io/auth-secret: monitoring-auth  # Secret with htpasswd file
     nginx.ingress.kubernetes.io/auth-realm: "Monitoring"  # Realm name (shown in browser prompt)
 
-    # Point 1: TLS via cert-manager
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Point 1: TLS via cert-manager (use "selfsigned" for .local lab)
+    cert-manager.io/cluster-issuer: selfsigned
 
-    # Point 3: Rate limiting + WAF
+    # Point 3: Rate limiting (WAF/ModSecurity disabled for Docker Desktop compatibility)
     nginx.ingress.kubernetes.io/limit-rps: "5"
     nginx.ingress.kubernetes.io/limit-rpm: "150"
-    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
-    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    # nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    # nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
 
 spec:
   ingressClassName: nginx
