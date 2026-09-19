@@ -82,7 +82,7 @@ class JWTConfig:
 class LLMConfig:
     """LLM configuration"""
     provider: str = "groq"
-    model: str = "llama-3.3-70b-versatile"
+    model: str = "qwen/qwen3.8-27b"
     api_key: str = ""
     temperature: float = 0.7
     max_tokens: int = 1024

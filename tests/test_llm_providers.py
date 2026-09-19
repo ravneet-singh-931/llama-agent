@@ -25,10 +25,10 @@ def test_resolve_provider_chain_dedupes_and_drops_unknown(monkeypatch):
 
 
 def test_resolve_model_for_provider_defaults():
-    assert mt.resolve_model_for_provider("groq", "strong") == "llama-3.3-70b-versatile"
+    assert mt.resolve_model_for_provider("groq", "strong") == "qwen/qwen3.8-27b"
     assert mt.resolve_model_for_provider("openai", "fast") == "gpt-4o-mini"
     # unknown provider falls back to groq defaults
-    assert mt.resolve_model_for_provider("bogus", "strong") == "llama-3.3-70b-versatile"
+    assert mt.resolve_model_for_provider("bogus", "strong") == "qwen/qwen3.8-27b"
 
 
 def test_resolve_model_for_provider_env_override(monkeypatch):

@@ -93,9 +93,9 @@ spec:
 
             # LLM_MODEL_STRONG/FAST: Tiered models (like API)
             - name: LLM_MODEL_STRONG
-              value: llama-3.3-70b-versatile
+              value: qwen/qwen3.8-27b
             - name: LLM_MODEL_FAST
-              value: llama-3.1-8b-instant
+              value: qwen/qwen3.8-27b
 
             - name: ENVIRONMENT
               value: production

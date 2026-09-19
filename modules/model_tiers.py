@@ -3,9 +3,9 @@ Model tiering for the Llama Agent.
 
 Two model tiers are used to balance quality vs. latency/cost:
   - "strong": one-shot answers (document summaries, multi-agent tasks,
-    non-streaming agent runs). Default: llama-3.3-70b-versatile.
+    non-streaming agent runs). Default: qwen/qwen3.8-27b.
   - "fast": streaming chat and cheap helper calls (query reformulation).
-    Default: llama-3.1-8b-instant.
+    Default: qwen/qwen3.8-27b.
 
 Configuration (env vars, resolved at call time so no restart is needed
 between environments):
@@ -22,8 +22,8 @@ retry once on the fast model instead of failing.
 
 import os
 
-DEFAULT_STRONG_MODEL = "llama-3.3-70b-versatile"
-DEFAULT_FAST_MODEL = "llama-3.1-8b-instant"
+DEFAULT_STRONG_MODEL = "qwen/qwen3.8-27b"
+DEFAULT_FAST_MODEL = "qwen/qwen3.8-27b"
 
 _TIER_ENV = {
     "strong": "LLM_MODEL_STRONG",
@@ -91,7 +91,7 @@ DEFAULT_PROVIDER = "groq"
 #   OPENAI_MODEL_STRONG / OPENAI_MODEL_FAST
 #   ANTHROPIC_MODEL_STRONG / ANTHROPIC_MODEL_FAST
 PROVIDER_MODELS = {
-    "groq":      {"strong": "llama-3.3-70b-versatile", "fast": "llama-3.1-8b-instant"},
+    "groq":      {"strong": "qwen/qwen3.8-27b", "fast": "qwen/qwen3.8-27b"},
     "openai":    {"strong": "gpt-4o",                 "fast": "gpt-4o-mini"},
     "anthropic": {"strong": "claude-3-5-sonnet-latest", "fast": "claude-3-5-haiku-latest"},
 }

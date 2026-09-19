@@ -165,9 +165,9 @@ services:
       - ENVIRONMENT=production
       # Enable 7-feature OptimizedRAG pipeline (Hybrid Search, Cross-Encoder Reranker, etc.)
       - USE_OPTIMIZED_RAG=true
-      # Tiered defaults: strong=70b for one-shot answers/agents, fast=8b for streaming
-      - LLM_MODEL_STRONG=llama-3.3-70b-versatile
-      - LLM_MODEL_FAST=llama-3.1-8b-instant
+      # Tiered defaults for one-shot answers/agents and streaming
+      - LLM_MODEL_STRONG=qwen/qwen3.8-27b
+      - LLM_MODEL_FAST=qwen/qwen3.8-27b
       # Shared ChromaDB server so every api replica uses SAME vector index
       - CHROMA_SERVER_URL=http://chromadb:8000  # ChromaDB service DNS
     secrets:
@@ -214,8 +214,8 @@ services:
        - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
        - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
        - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
-       - LLM_MODEL_STRONG=llama-3.3-70b-versatile
-       - LLM_MODEL_FAST=llama-3.1-8b-instant
+         - LLM_MODEL_STRONG=qwen/qwen3.8-27b
+         - LLM_MODEL_FAST=qwen/qwen3.8-27b
     secrets:
       - groq_api_key
       - tavily_api_key
@@ -243,8 +243,8 @@ services:
     environment:
        - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
        - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
-       - LLM_MODEL_STRONG=llama-3.3-70b-versatile
-       - LLM_MODEL_FAST=llama-3.1-8b-instant
+       - LLM_MODEL_STRONG=qwen/qwen3.8-27b
+       - LLM_MODEL_FAST=qwen/qwen3.8-27b
     secrets:
       - groq_api_key
       - tavily_api_key
