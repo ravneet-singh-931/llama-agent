@@ -321,10 +321,10 @@ jobs:
   # monitoring-auth, grafana dashboard) from repo secrets. Core manifests
   # only are applied here; operator/optional manifests (cert-manager.yaml,
   # external-secrets.yaml, oauth2-proxy*.yaml) are applied out-of-band.
-  deploy-staging:
-    name: "\U0001F3AA Deploy to Staging"
-    needs: docker
-    runs-on: ubuntu-latest
+deploy-staging:
+     name: "\U0001F3AA Deploy to Staging"
+     needs: docker
+     runs-on: self-hosted
     # NOTE: `secrets` is NOT allowed in `if` expressions (GitHub rejects the
     # workflow). Gate the deploy on a check step that sets an output instead.
     if: github.ref == 'refs/heads/main'
@@ -399,10 +399,10 @@ jobs:
   # ============================================================
   # JOB 7: DEPLOY PRODUCTION
   # ============================================================
-  deploy-production:
-    name: "\U0001F3ED Deploy to Production"
-    needs: deploy-staging
-    runs-on: ubuntu-latest
+deploy-production:
+     name: "\U0001F3ED Deploy to Production"
+     needs: deploy-staging
+     runs-on: self-hosted
     if: github.ref == 'refs/heads/main'
     environment: production
 
