@@ -1,94 +1,76 @@
 # ============================================================================
-# 📚 LEARNER GUIDE: .dockerignore — What NOT to Copy into Docker Image
+# .dockerignore - files NOT sent to `docker build .` (main Python image)
 # ============================================================================
-# WHAT IS .dockerignore?
-# ----------------------
-# Like .gitignore, but for Docker. It tells `docker build` which files to EXCLUDE
-# when copying via `COPY . .` in Dockerfile.
-#   - Without it, `COPY . .` would copy EVERYTHING (including .git, node_modules, etc.)
-#   - This would make image HUGE and slow, and leak secrets
-#
-# WHY NEEDED?
-# -----------
-# - Smaller image (exclude .git, node_modules, logs, etc.)
-# - Faster build (less to copy)
-# - Security (exclude .env, secrets, etc.)
-# - Avoid cache invalidation (if .git changes, COPY . . would invalidate cache)
-#
-# HOW IT WORKS:
-# -------------
-# - Each line is a pattern (like .gitignore)
-# - `*` = wildcard, `!` = exception (include), `/` = directory
-# - Example: `*.log` = ignore all .log files, `!README.md` = but include README.md
-#
-# FLOW:
-# -----
-# 1. docker build . → Reads .dockerignore
-# 2. For each file, checks if it matches any pattern → If yes, skip it
-# 3. Only non-ignored files are sent to Docker daemon and copied via COPY
-# 4. Verify: docker build . --progress=plain 2>&1 | grep "transferring context"
+# IMPORTANT: .dockerignore does NOT support inline comments. A line like
+#   "uploads/  # comment"
+# is treated as the literal pattern "uploads/  # comment" and matches nothing,
+# so every pattern below sits on its own line with comments above it.
 # ============================================================================
 
-# Version control — Don't copy git history (huge, not needed in image)
+# Version control / CI
 .git
 .gitignore
-.github  # CI workflows, not needed in image
+.github
 
-# Python — Don't copy cache, compiled files, virtual envs
-__pycache__  # Python cache (regenerated)
-*.pyc        # Compiled Python
-*.pyo
-*.pyd
-*.egg-info   # Package metadata
-dist/        # Distribution files
-build/       # Build artifacts
-*.egg
-.venv        # Virtual env (host-specific, not for image)
-venv/
-env/
-
-# Node.js — Don't copy frontend dependencies (huge, host-specific)
-node_modules/          # Host node_modules (image will npm ci)
-frontend/node_modules/ # Frontend host modules
-frontend/.next/        # Next.js build output (host, not for image)
-frontend/out/          # Next.js export
-
-# Environment — Don't copy secrets (security!)
+# Secrets and environment files - must never end up in an image layer
 .env
-.env.local
-.env.*.local  # All env files (contain secrets)
+.env.*
+!.env.example
+secrets
+config/nginx/ssl
+*.pem
+*.key
+kubeconfig*
 
-# IDE — Don't copy editor configs
-.idea/    # JetBrains
-.vscode/  # VS Code
-*.swp     # Vim swap
+# Python caches, virtualenvs, build artifacts
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+*.egg-info
+*.egg
+dist
+build
+.venv
+venv
+env
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+coverage.xml
+htmlcov
+
+# Next.js frontend has its own image (context: ./frontend)
+frontend
+node_modules
+
+# Runtime data - provided by volumes / services, never baked in
+logs
+data
+uploads
+memory
+backups
+migrations
+*.log
+conversation_memory.json
+fact_memory.json
+
+# Deployment manifests / other Dockerfiles (not needed inside the image)
+k8s
+docker-compose*.yml
+Dockerfile.nginx
+
+# Docs (README kept)
+docs
+*.md
+!README.md
+
+# Editors / OS junk
+.idea
+.vscode
+*.swp
 *.swo
-*~        # Backup files
-
-# OS — Don't copy OS junk
-.DS_Store    # macOS
-Thumbs.db    # Windows
-
-# Docker — Don't copy Docker files themselves (avoid recursion, but keep main Dockerfile)
-docker-compose.yml  # Compose file (not needed in image, for host)
-Dockerfile*         # All Dockerfiles
-!Dockerfile         # Exception: BUT keep main Dockerfile (needed for reference, though not strictly)
-Dockerfile.nginx    # Nginx Dockerfile (also excluded, but we keep it via !Dockerfile? Actually this line re-excludes it)
-
-# Data & Logs — Don't copy runtime data (should be volumes, not in image)
-logs/     # Logs (ephemeral, via volume)
-data/     # Data (via volume)
-uploads/  # Uploads (via volume)
-*.log     # All log files
-
-# Docs — Don't copy docs (except README)
-docs/     # Documentation
-*.md      # All markdown
-!README.md  # Exception: Keep README.md (useful in image for reference)
-
-# 💡 LEARNER TIP: .dockerignore vs .gitignore
-#   - .gitignore: What git ignores (for version control)
-#   - .dockerignore: What Docker ignores (for image build)
-#   They overlap but are different! .dockerignore should be MORE restrictive.
-#   Check what's ignored: docker build . --progress=plain 2>&1 | grep "COPY"
-#   Or: docker builder prune && docker build . (clean build, see context size)
+*~
+.DS_Store
+Thumbs.db

@@ -301,13 +301,13 @@ services:
       - "80:80"    # HTTP
       - "443:443"  # HTTPS
     volumes:
-      - ./config/nginx/ssl:/etc/nginx/ssl:ro  # Mount SSL certs read-only
+      # Optional real certs (cert.pem/key.pem). If absent, the container
+      # generates a self-signed cert on start (config/nginx/ensure-cert.sh).
+      - ./config/nginx/ssl:/etc/nginx/ssl-provided:ro
     depends_on:
       - api
       - web
       - frontend
-      - mcp-server
-      - grafana
     networks:
       - backend
       - monitoring
@@ -317,6 +317,8 @@ services:
   # =============================================
   prometheus:
     image: prom/prometheus:v2.51.0
+    ports:
+      - "127.0.0.1:9090:9090"  # localhost only (use an SSH tunnel remotely)
     container_name: llama-agent-prometheus
     restart: unless-stopped
     volumes:
@@ -335,6 +337,8 @@ services:
   # =============================================
   grafana:
     image: grafana/grafana:10.4.0
+    ports:
+      - "127.0.0.1:3002:3000"  # localhost only (use an SSH tunnel remotely)
     container_name: llama-agent-grafana
     restart: unless-stopped
     environment:
@@ -411,6 +415,8 @@ services:
   # =============================================
   phoenix:
     image: arizephoenix/phoenix:latest
+    ports:
+      - "127.0.0.1:6006:6006"  # localhost only (use an SSH tunnel remotely)
     container_name: llama-agent-phoenix
     restart: unless-stopped
     environment:

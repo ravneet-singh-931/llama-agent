@@ -149,35 +149,49 @@ spec:
                   number: 8000  # Service port
 
           # Path 2: /ws/* → API Service (WebSocket)
-          - path: /ws(/|$)(.*)
-            pathType: ImplementationSpecific
+
+# ---------------------------------------------------------------------------
+# Paths that must reach the backend UNCHANGED (no rewrite-target):
+#   /ws/<id>      -> FastAPI route is literally /ws/{user_id}; the /$2 rewrite
+#                   above would turn /ws/abc into /abc (404 -> WS never opens)
+#   /streamlit/   -> Streamlit runs with --server.baseUrlPath=streamlit
+# /mcp is intentionally NOT exposed: the MCP server is internal (the API calls
+# it over the cluster network) and must not be reachable from the internet.
+# ---------------------------------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llama-agent-passthrough-ingress
+  namespace: llama-agent
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"   # long-lived WebSockets
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    cert-manager.io/cluster-issuer: selfsigned
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - llama-agent.local
+      secretName: llama-agent-tls
+  rules:
+    - host: llama-agent.local
+      http:
+        paths:
+          - path: /ws
+            pathType: Prefix
             backend:
               service:
                 name: llama-agent-api-service
                 port:
                   number: 8000
-
-          # Path 3: /mcp/* → MCP Server (SSE)
-          - path: /mcp(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: llama-agent-mcp-server-service
-                port:
-                  number: 8001
-
-          # Path 4: /streamlit/* → Streamlit Service
-          - path: /streamlit(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /streamlit
+            pathType: Prefix
             backend:
               service:
                 name: llama-agent-web-service
                 port:
                   number: 8501
-
-# 💡 LEARNER TIP: Test Ingress
-#   kubectl get ingress -n llama-agent
-#   kubectl describe ingress llama-agent-ingress -n llama-agent
-#   curl http://llama-agent.local/api/health  (should return JSON)
-#   curl http://llama-agent.local/api/docs    (Swagger UI)
-#   Remember: Add `127.0.0.1 llama-agent.local` to /etc/hosts!

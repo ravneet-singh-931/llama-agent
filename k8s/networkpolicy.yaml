@@ -106,7 +106,7 @@ spec:
     matchExpressions:
       - key: component
         operator: In
-        values: [api, web, frontend, mcp-server, grafana, prometheus, loki, phoenix]  # Only these components
+        values: [api, web, frontend, grafana, prometheus, loki, phoenix]  # Only these components
   policyTypes: [Ingress]
   ingress:
     - from:

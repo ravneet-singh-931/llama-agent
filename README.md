@@ -126,7 +126,7 @@ cd llama-agent
    # Postgres password + JWT secret (generate strong random values!)
    python -c "import secrets; print(secrets.token_hex(32))" > secrets/postgres_password.txt
    python -c "import secrets; print(secrets.token_hex(32))" > secrets/jwt_secret_key.txt
-   echo "change_me_grafana" > secrets/grafana_admin_password.txt
+   python -c "import secrets; print(secrets.token_urlsafe(16))" > secrets/grafana_admin_password.txt
    ```
    > 🔐 The `secrets/` directory is **gitignored** — Compose mounts these as Docker secrets at
    > `/run/secrets/<name>`, so keys never appear in code, images, or env listings.

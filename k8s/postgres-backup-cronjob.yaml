@@ -90,24 +90,29 @@ spec:
               image: postgres:15-alpine  # Postgres image (has pg_dump)
 
               # command: Shell script to run backup
+              # command: Shell script to run backup.
+              #   NOTE: no inline "# comments" after a trailing backslash -
+              #   that breaks line continuation (the old script exited 127).
               command:
                 - /bin/sh
                 - -c
                 - |
-                  set -e  # Exit on error
-                  DATE=$(date +%F-%H%M%S)  # Date like 2024-01-15-020000
-                  echo "Backing up Postgres -> /backup/llama_agent_${DATE}.sql.gz"
+                  set -eu
+                  set -o pipefail
+                  DATE=$(date +%F-%H%M%S)
+                  OUT="/backup/llama_agent_${DATE}.sql.gz"
+                  echo "Backing up Postgres -> ${OUT}"
                   pg_dump \
-                    --host=postgres-service \  # Postgres Service DNS
-                    --username="$POSTGRES_USER" \  # From Secret
+                    --host=postgres-service \
+                    --username="$POSTGRES_USER" \
                     --dbname=llama_agent \
-                    --no-password \  # Use PGPASSWORD env var
-                    --clean --if-exists --create \  # Include DROP/CREATE for restore
-                    | gzip > "/backup/llama_agent_${DATE}.sql.gz"  # Compress and save
-                  echo "Backup complete: $(ls -lh /backup/llama_agent_${DATE}.sql.gz | awk '{print $5}')"
-                  # Keep only 7 most recent dumps (rotate)
+                    --no-password \
+                    --clean --if-exists --create \
+                    | gzip > "${OUT}.partial"
+                  mv "${OUT}.partial" "${OUT}"
+                  echo "Backup complete: $(ls -lh "${OUT}" | awk '{print $5}')"
                   ls -1t /backup/llama_agent_*.sql.gz | tail -n +8 | xargs -r rm -f
-                  echo "Retained dumps:"; ls -1 /backup/ | tail -n 7
+                  echo "Retained dumps:"; ls -1t /backup/llama_agent_*.sql.gz
 
               env:
                 - name: POSTGRES_USER
@@ -156,8 +161,7 @@ spec:
     requests:
       storage: 10Gi  # 10Gi for backups (each dump ~ few MB, 7 dumps = ~50MB, but 10Gi safe)
 
-# 💡 LEARNER TIP: Restore from backup
-#   kubectl exec -n llama-agent deploy/postgres -- pg_restore -U postgres -d llama_agent /backup/llama_agent_<DATE>.sql.gz
-#   Or for plain SQL (pg_dump without --format=custom):
-#   kubectl exec -n llama-agent deploy/postgres -- psql -U postgres -d llama_agent -f /backup/llama_agent_<DATE>.sql
+# 💡 LEARNER TIP: Restore from backup (dumps are gzipped PLAIN SQL, not
+#   pg_restore's custom format; --create means connect to the "postgres" DB):
+#   gunzip -c llama_agent_<DATE>.sql.gz | kubectl exec -i -n llama-agent deploy/postgres -- psql -U postgres -d postgres
 #   To ship to S3, add aws-cli and: pg_dump ... | gzip | aws s3 cp - s3://my-bucket/backup.sql.gz

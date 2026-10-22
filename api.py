@@ -2919,8 +2919,18 @@ async def delete_conversation(conversation_id: str, user = Depends(optional_auth
 
 
 @app.get("/metrics")
-async def get_metrics_prometheus():
-    """Prometheus-format metrics endpoint for scraping"""
+async def get_metrics_prometheus(request: Request):
+    """Prometheus-format metrics endpoint for scraping.
+
+    Prometheus scrapes the API directly on the internal network. Requests
+    that arrive through a reverse proxy (Nginx, the k8s ingress, the Next.js
+    /api rewrite - all of which add X-Forwarded-For) come from the internet
+    and are refused, so internal metrics (routes, error rates, agent usage)
+    are never public. Set METRICS_ALLOW_PROXIED=1 to opt out.
+    """
+    if (request.headers.get("x-forwarded-for")
+            and os.getenv("METRICS_ALLOW_PROXIED", "0") != "1"):
+        raise HTTPException(status_code=404, detail="Not Found")
     return metrics_endpoint(None)
 
 
