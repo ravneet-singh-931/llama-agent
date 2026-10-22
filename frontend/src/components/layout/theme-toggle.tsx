@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
@@ -12,9 +12,11 @@ export function ThemeToggle() {
   // to mount before applying theme-dependent styles. Without this, the
   // inline rotation style differs between server and client HTML and React
   // throws a hydration mismatch error (#418).
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => setMounted(true), []);
+  const mounted = useSyncExternalStore(
+    () => () => {},
+    () => true, // client
+    () => false // server
+  );
 
   const isDark = mounted && theme === "dark";
 

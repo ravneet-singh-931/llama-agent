@@ -25,7 +25,22 @@ export function ReasoningView({ events }: { events: StreamEvent[] }) {
       })
     | undefined;
 
-  const reasoning = events.filter((e) => e.type === "reasoning");
+  // Reasoning stages plus agent-team progress (agent_start / agent_done).
+  const reasoning = events.filter((e) =>
+    ["reasoning", "agent_start", "agent_done"].includes(e.type)
+  );
+  const label = (e: StreamEvent) =>
+    e.type === "agent_start"
+      ? "agent"
+      : e.type === "agent_done"
+        ? "done"
+        : String(e.stage ?? e.type);
+  const text = (e: StreamEvent) =>
+    e.type === "agent_start"
+      ? `${String(e.agent ?? "Agent")} started`
+      : e.type === "agent_done"
+        ? `${String(e.agent ?? "Agent")} finished`
+        : String(e.content ?? "");
 
   return (
     <div className="mx-4 mb-3 rounded-lg border border-border bg-secondary/40 text-xs">
@@ -55,10 +70,10 @@ export function ReasoningView({ events }: { events: StreamEvent[] }) {
           {reasoning.map((e, i) => (
             <div key={i} className="flex gap-2">
               <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-primary">
-                {String(e.stage ?? e.type)}
+                {label(e)}
               </span>
               <span className="whitespace-pre-wrap text-muted-foreground">
-                {String(e.content ?? "")}
+                {text(e)}
               </span>
             </div>
           ))}

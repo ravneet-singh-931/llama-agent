@@ -109,3 +109,29 @@ async def close():
         except Exception as e:  # pragma: no cover - best effort on shutdown
             logger.warning("redis close failed: %s", e)
         _redis = None
+
+
+def is_configured() -> bool:
+    """True when REDIS_URL is set (avoid 2s connect timeouts otherwise)."""
+    return bool(os.getenv("REDIS_URL"))
+
+
+async def pop_json(key: str) -> Optional[Any]:
+    """Atomically read-and-delete a JSON value (single-use tokens).
+
+    Uses GETDEL (Redis >= 6.2) with a MULTI/EXEC GET+DEL fallback.
+    Returns None on miss or when Redis is unreachable.
+    """
+    try:
+        client = _get_client()
+        try:
+            raw = await client.getdel(key)
+        except Exception:
+            async with client.pipeline(transaction=True) as pipe:
+                pipe.get(key)
+                pipe.delete(key)
+                raw, _ = await pipe.execute()
+        return json.loads(raw) if raw is not None else None
+    except Exception as e:
+        logger.debug("redis pop miss (%s): %s", key, e)
+        return None

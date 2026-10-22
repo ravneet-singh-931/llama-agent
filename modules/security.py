@@ -218,8 +218,8 @@ def validate_password(password: str) -> Tuple[bool, str]:
     """Validate a password"""
     if not password:
         return False, "Password is required"
-    if len(password) < 4:
-        return False, "Password must be at least 4 characters"
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters"
     if len(password) > MAX_PASSWORD_LENGTH:
         return False, f"Password too long (max {MAX_PASSWORD_LENGTH} characters)"
     return True, ""

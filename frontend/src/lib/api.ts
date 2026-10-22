@@ -27,18 +27,61 @@ export interface StreamEvent {
   [key: string]: unknown;
 }
 
+export class UnauthorizedError extends Error {
+  status = 401;
+  constructor(message = "Not authenticated") {
+    super(message);
+    this.name = "UnauthorizedError";
+  }
+}
+
 class ApiClient {
+  // A single in-flight refresh shared by concurrent 401s.
+  private refreshing: Promise<boolean> | null = null;
+
+  private refreshSession(): Promise<boolean> {
+    if (!this.refreshing) {
+      this.refreshing = fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      })
+        .then((r) => r.ok)
+        .catch(() => false)
+        .finally(() => {
+          this.refreshing = null;
+        });
+    }
+    return this.refreshing;
+  }
+
+  // fetch() that, on a 401, refreshes the access cookie once via the refresh
+  // cookie and retries. (The backend middleware also renews transparently;
+  // this covers the edge cases, e.g. the access cookie was evicted.)
+  private async fetchAuth(path: string, init: RequestInit): Promise<Response> {
+    const doFetch = () =>
+      fetch(`${API_BASE}${path}`, { ...init, credentials: "include" });
+    const res = await doFetch();
+    if (res.status !== 401 || path.startsWith("/auth/")) return res;
+    const ok = await this.refreshSession();
+    return ok ? doFetch() : res;
+  }
+
   private async request<T>(
     method: string,
     path: string,
     body?: unknown
   ): Promise<T> {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await this.fetchAuth(path, {
       method,
-      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (res.status === 401) {
+      const err = await res.json().catch(() => ({ detail: "Not authenticated" }));
+      throw new UnauthorizedError(err.detail || "Not authenticated");
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || `HTTP ${res.status}`);
@@ -100,7 +143,6 @@ class ApiClient {
     onEvent?: (event: StreamEvent) => void
   ): AbortController {
     const controller = new AbortController();
-    const url = `${API_BASE}/chat/stream`;
 
     const body: Record<string, unknown> = conversationId
       ? { message, conversation_id: conversationId }
@@ -111,9 +153,8 @@ class ApiClient {
       }
     }
 
-    fetch(url, {
+    this.fetchAuth("/chat/stream", {
       method: "POST",
-      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -194,7 +235,7 @@ class ApiClient {
   }
 
   async deleteFact(key: string) {
-    return this.request("DELETE", `/facts/${key}`);
+    return this.request("DELETE", `/facts/${encodeURIComponent(key)}`);
   }
 
   async clearMemory() {
@@ -238,7 +279,7 @@ class ApiClient {
         timestamp: string;
         tool_used?: string | null;
       }[];
-    }>("GET", `/conversations/${id}`);
+    }>("GET", `/conversations/${encodeURIComponent(id)}`);
   }
 
   async createConversation(title?: string) {
@@ -256,7 +297,7 @@ class ApiClient {
   async deleteConversation(id: string) {
     return this.request<{ status: string; conversation_id: string }>(
       "DELETE",
-      `/conversations/${id}`
+      `/conversations/${encodeURIComponent(id)}`
     );
   }
 
@@ -264,9 +305,8 @@ class ApiClient {
   async uploadDocument(file: File) {
     const formData = new FormData();
     formData.append("file", file);
-    const res = await fetch(`${API_BASE}/documents/upload`, {
+    const res = await this.fetchAuth("/documents/upload", {
       method: "POST",
-      credentials: "include",
       body: formData,
     });
     if (!res.ok) {

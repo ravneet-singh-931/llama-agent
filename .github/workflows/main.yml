@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.11']
+        python-version: ['3.11']
 
     steps:
       - name: "\U0001F4E5 Checkout code"
@@ -32,20 +32,19 @@ jobs:
           cache: 'pip'
 
       - name: "\U0001F4E6 Install dependencies"
+        # Pinned: install exactly what the Docker image ships (requirements.txt)
         run: |
           python -m pip install --upgrade pip
-          pip install groq llama-index-core llama-index-llms-groq
-          pip install chromadb pydantic fastapi uvicorn python-jose bcrypt
-          pip install python-dotenv pypdf python-docx pandas
-          pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
-          pip install pytest pytest-cov pytest-asyncio sqlalchemy psycopg2-binary asyncpg redis "mcp<2" prometheus-client fastmcp
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio
 
       - name: "\U0001F9EA Run tests with coverage"
         run: |
-          pytest tests/ -v -m "not mcp" --tb=short
+          pytest tests/ -v -m "not mcp" --tb=short -p no:phoenix \
+            --cov=. --cov-report=xml --cov-report=term
 
       - name: "\U0001F4CA Upload coverage"
-        if: matrix.python-version == '3.10'
+        if: matrix.python-version == '3.11'
         uses: codecov/codecov-action@v4
         with:
           file: ./coverage.xml
@@ -65,7 +64,7 @@ jobs:
       - name: "\U0001F40D Set up Python"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
           cache: 'pip'
 
       - name: "\U0001F50D Scan for vulnerabilities"
@@ -75,7 +74,8 @@ jobs:
           #  - PYSEC-2025-217, PYSEC-2026-2288/2289/2290, PYSEC-2026-3929: transformers (<5 pinned by
           #    llama-index-llms-openai-like; no 4.x/5.10 fix exists upstream yet)
           #  - PYSEC-2026-311, PYSEC-2026-3813/3814/3815: chromadb (latest 1.5.9, no upstream fix yet)
-          #  - PYSEC-2026-1325: ecdsa (latest 0.19.2, no upstream fix yet)
+          #  - PYSEC-2026-4174: transformers load_custom_generate() remote code (no fix; the app
+          #    never calls it - transformers is only a transitive dep of llama-index-llms-openai-like)
           #  - PYSEC-2026-3740: nltk (latest 3.10.3, no upstream fix yet)
           # Re-evaluate on every dependency bump; new CVEs still fail the build.
           pip-audit -r requirements.txt --progress-spinner off \
@@ -88,7 +88,7 @@ jobs:
             --ignore-vuln PYSEC-2026-3813 \
             --ignore-vuln PYSEC-2026-3814 \
             --ignore-vuln PYSEC-2026-3815 \
-            --ignore-vuln PYSEC-2026-1325 \
+            --ignore-vuln PYSEC-2026-4174 \
             --ignore-vuln PYSEC-2026-3740
           # bandit: skip known non-issues (documented):
           #  B101 assert in tests (pytest standard), B105/B106/B107 hardcoded
@@ -155,7 +155,7 @@ jobs:
       - name: "\U0001F40D Set up Python"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: "\U0001F4E6 Install linting tools"
         run: pip install flake8
@@ -167,6 +167,31 @@ jobs:
   # ============================================================
   # JOB 4: INTEGRATION TEST
   # ============================================================
+  frontend:
+    name: "\U0001F310 Frontend (typecheck, lint, build)"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: "\U0001F4E5 Checkout code"
+        uses: actions/checkout@v4
+      - name: "\U0001F40D Set up Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: /api
+
   integration:
     name: "\U0001F517 Integration Test"
     needs: [test]
@@ -178,16 +203,16 @@ jobs:
       - name: "\U0001F40D Set up Python"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
           cache: 'pip'
 
       - name: "\U0001F4E6 Install dependencies"
         run: |
           pip install groq llama-index-core llama-index-llms-groq
-          pip install chromadb pydantic fastapi uvicorn python-jose bcrypt
+          pip install chromadb pydantic fastapi uvicorn PyJWT bcrypt
           pip install python-dotenv pypdf python-docx pandas
           pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
-          pip install pytest sqlalchemy psycopg2-binary asyncpg redis "mcp<2" prometheus-client fastmcp
+          pip install pytest sqlalchemy psycopg2-binary asyncpg redis "mcp<2" prometheus-client "fastmcp<4"
 
       - name: "\U0001F517 Test all modules import"
         run: |
@@ -233,7 +258,7 @@ jobs:
   # ============================================================
   docker:
     name: "\U0001F433 Build & Push Docker"
-    needs: [test, security, security-sast, lint, integration]
+    needs: [test, security, security-sast, lint, frontend, integration]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
@@ -308,6 +333,10 @@ jobs:
   # ============================================================
   # JOB 6: DEPLOY STAGING
   # ============================================================
+  # Staging and production each run in their GitHub Environment. Define
+  # KUBE_CONFIG (and the app secrets) as ENVIRONMENT secrets on both
+  # "staging" and "production" so each job targets its own cluster/context;
+  # environment secrets override repository secrets of the same name.
   deploy-staging:
     name: "\U0001F3AA Deploy to Staging"
     needs: docker
@@ -352,21 +381,40 @@ jobs:
 
       - name: "Create runtime Secrets"
         if: steps.gate.outputs.enabled == 'true'
+        # Secrets come in via env (not inlined into the script) so values
+        # containing quotes/$ can't break or inject into the shell.
+        env:
+          DB_USERNAME: ${{ secrets.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          GRAFANA_PW: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         run: |
+          set -euo pipefail
+          for v in DB_USERNAME DB_PASSWORD GROQ_API_KEY JWT_SECRET_KEY GRAFANA_PW; do
+            if [ -z "${!v}" ]; then echo "::error::secret for $v is not set"; exit 1; fi
+          done
+          # DATABASE_URL may omit the password - pods also get POSTGRES_PASSWORD
+          # from db-secrets and the app injects it.
+          DATABASE_URL="${DATABASE_URL:-postgresql+asyncpg://${DB_USERNAME}@postgres-service:5432/llama_agent}"
+          REDIS_URL="${REDIS_URL:-redis://redis-service:6379}"
           kubectl -n llama-agent create secret generic db-secrets \
-            --from-literal=username='${{ secrets.DB_USERNAME }}' \
-            --from-literal=password='${{ secrets.DB_PASSWORD }}' \
+            --from-literal=username="$DB_USERNAME" \
+            --from-literal=password="$DB_PASSWORD" \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n llama-agent create secret generic app-secrets \
-            --from-literal=database-url='${{ secrets.DATABASE_URL }}' \
-            --from-literal=redis-url='${{ secrets.REDIS_URL }}' \
-            --from-literal=groq-api-key='${{ secrets.GROQ_API_KEY }}' \
-            --from-literal=jwt-secret-key='${{ secrets.JWT_SECRET_KEY }}' \
+            --from-literal=database-url="$DATABASE_URL" \
+            --from-literal=redis-url="$REDIS_URL" \
+            --from-literal=groq-api-key="$GROQ_API_KEY" \
+            --from-literal=jwt-secret-key="$JWT_SECRET_KEY" \
+            --from-literal=tavily-api-key="${TAVILY_API_KEY:-}" \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n llama-agent create secret generic grafana-secret \
-            --from-literal=admin-password='${{ secrets.GRAFANA_ADMIN_PASSWORD }}' \
+            --from-literal=admin-password="$GRAFANA_PW" \
             --dry-run=client -o yaml | kubectl apply -f -
-          GRAFANA_PW='${{ secrets.GRAFANA_ADMIN_PASSWORD }}'
           HTPASSWD="admin:$(openssl passwd -apr1 "$GRAFANA_PW")"
           kubectl -n llama-agent create secret generic monitoring-auth \
             --from-literal=auth="$HTPASSWD" \
@@ -403,11 +451,25 @@ jobs:
           kubectl apply -f k8s/resourcequota.yaml
           kubectl apply -f k8s/networkpolicy.yaml
 
+      - name: "\U0001F3F7 Roll out this commit's images"
+        if: steps.gate.outputs.enabled == 'true'
+        # Manifests carry a bootstrap tag; every deploy pins the immutable
+        # :<git sha> pushed by the docker job, so a rollout always happens
+        # and is traceable/revertible (kubectl rollout undo).
+        run: |
+          set -euo pipefail
+          SHA="${{ github.sha }}"
+          kubectl -n llama-agent set image deployment/llama-agent-api api=${{ env.DOCKER_IMAGE }}:$SHA
+          kubectl -n llama-agent set image deployment/llama-agent-web web=${{ env.DOCKER_IMAGE }}:$SHA
+          kubectl -n llama-agent set image deployment/llama-agent-mcp-server mcp-server=ravneet231/llama-agent-mcp-server:$SHA
+          kubectl -n llama-agent set image deployment/llama-agent-frontend frontend=ravneet231/llama-agent-frontend:$SHA
       - name: "\u23F3 Wait for rollout"
         if: steps.gate.outputs.enabled == 'true'
         run: |
           kubectl -n llama-agent rollout status deployment/llama-agent-api --timeout=300s
           kubectl -n llama-agent rollout status deployment/llama-agent-mcp-server --timeout=300s
+          kubectl -n llama-agent rollout status deployment/llama-agent-web --timeout=300s
+          kubectl -n llama-agent rollout status deployment/llama-agent-frontend --timeout=300s
 
   # ============================================================
   # JOB 7: DEPLOY PRODUCTION
@@ -456,21 +518,40 @@ jobs:
 
       - name: "Create runtime Secrets"
         if: steps.gate.outputs.enabled == 'true'
+        # Secrets come in via env (not inlined into the script) so values
+        # containing quotes/$ can't break or inject into the shell.
+        env:
+          DB_USERNAME: ${{ secrets.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          GRAFANA_PW: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         run: |
+          set -euo pipefail
+          for v in DB_USERNAME DB_PASSWORD GROQ_API_KEY JWT_SECRET_KEY GRAFANA_PW; do
+            if [ -z "${!v}" ]; then echo "::error::secret for $v is not set"; exit 1; fi
+          done
+          # DATABASE_URL may omit the password - pods also get POSTGRES_PASSWORD
+          # from db-secrets and the app injects it.
+          DATABASE_URL="${DATABASE_URL:-postgresql+asyncpg://${DB_USERNAME}@postgres-service:5432/llama_agent}"
+          REDIS_URL="${REDIS_URL:-redis://redis-service:6379}"
           kubectl -n llama-agent create secret generic db-secrets \
-            --from-literal=username='${{ secrets.DB_USERNAME }}' \
-            --from-literal=password='${{ secrets.DB_PASSWORD }}' \
+            --from-literal=username="$DB_USERNAME" \
+            --from-literal=password="$DB_PASSWORD" \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n llama-agent create secret generic app-secrets \
-            --from-literal=database-url='${{ secrets.DATABASE_URL }}' \
-            --from-literal=redis-url='${{ secrets.REDIS_URL }}' \
-            --from-literal=groq-api-key='${{ secrets.GROQ_API_KEY }}' \
-            --from-literal=jwt-secret-key='${{ secrets.JWT_SECRET_KEY }}' \
+            --from-literal=database-url="$DATABASE_URL" \
+            --from-literal=redis-url="$REDIS_URL" \
+            --from-literal=groq-api-key="$GROQ_API_KEY" \
+            --from-literal=jwt-secret-key="$JWT_SECRET_KEY" \
+            --from-literal=tavily-api-key="${TAVILY_API_KEY:-}" \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n llama-agent create secret generic grafana-secret \
-            --from-literal=admin-password='${{ secrets.GRAFANA_ADMIN_PASSWORD }}' \
+            --from-literal=admin-password="$GRAFANA_PW" \
             --dry-run=client -o yaml | kubectl apply -f -
-          GRAFANA_PW='${{ secrets.GRAFANA_ADMIN_PASSWORD }}'
           HTPASSWD="admin:$(openssl passwd -apr1 "$GRAFANA_PW")"
           kubectl -n llama-agent create secret generic monitoring-auth \
             --from-literal=auth="$HTPASSWD" \
@@ -507,18 +588,32 @@ jobs:
           kubectl apply -f k8s/resourcequota.yaml
           kubectl apply -f k8s/networkpolicy.yaml
 
+      - name: "\U0001F3F7 Roll out this commit's images"
+        if: steps.gate.outputs.enabled == 'true'
+        # Manifests carry a bootstrap tag; every deploy pins the immutable
+        # :<git sha> pushed by the docker job, so a rollout always happens
+        # and is traceable/revertible (kubectl rollout undo).
+        run: |
+          set -euo pipefail
+          SHA="${{ github.sha }}"
+          kubectl -n llama-agent set image deployment/llama-agent-api api=${{ env.DOCKER_IMAGE }}:$SHA
+          kubectl -n llama-agent set image deployment/llama-agent-web web=${{ env.DOCKER_IMAGE }}:$SHA
+          kubectl -n llama-agent set image deployment/llama-agent-mcp-server mcp-server=ravneet231/llama-agent-mcp-server:$SHA
+          kubectl -n llama-agent set image deployment/llama-agent-frontend frontend=ravneet231/llama-agent-frontend:$SHA
       - name: "\u23F3 Wait for rollout"
         if: steps.gate.outputs.enabled == 'true'
         run: |
           kubectl -n llama-agent rollout status deployment/llama-agent-api --timeout=300s
           kubectl -n llama-agent rollout status deployment/llama-agent-mcp-server --timeout=300s
+          kubectl -n llama-agent rollout status deployment/llama-agent-web --timeout=300s
+          kubectl -n llama-agent rollout status deployment/llama-agent-frontend --timeout=300s
 
   # ============================================================
   # JOB 8: NOTIFY
   # ============================================================
   notify:
     name: "\U0001F4E2 Notifications"
-    needs: [test, security, security-sast, lint, integration, docker, deploy-staging, deploy-production]
+    needs: [test, security, security-sast, lint, frontend, integration, docker, deploy-staging, deploy-production]
     runs-on: ubuntu-latest
     if: always()
 

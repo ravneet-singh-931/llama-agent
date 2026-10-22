@@ -19,17 +19,23 @@ python-docx==1.2.0
 
 # --- Vector Database (Smart RAG) ---
 chromadb==1.5.9
+rank_bm25==0.2.2  # BM25 keyword half of hybrid search (modules/rag_optimizations.HybridSearcher)
 
 # --- Observability (Phoenix by Arize AI) ---
-arize-phoenix==20.3.0
-opentelemetry-instrumentation-fastapi==0.65b0
+# Only the tracing client: the app just calls phoenix.otel.register(); the Phoenix UI/server
+# runs as its own container (docker-compose `phoenix`, k8s/phoenix.yaml). The full `arize-phoenix`
+# server package dragged in strawberry-graphql/pydantic-ai-slim CVEs and its phoenix/__init__
+# crashes on Python 3.11 (dataclass mappingproxy default), which silently disabled tracing.
+arize-phoenix-otel==0.17.2
+opentelemetry-instrumentation-fastapi==0.66b1  # -> opentelemetry-api 1.45.1 (CVE-2026-114603)
 openinference-instrumentation-llama-index==4.4.5
 
 # --- Data Processing ---
 pandas==2.3.3
 
 # --- Web Interface ---
-streamlit==1.59.2
+streamlit==1.66.1  # allows pillow 13
+pillow>=13.0.0  # 35 CVEs fixed in 13.0.0 (needs Python >= 3.11)
 
 # --- REST API ---
 fastapi==0.139.2
@@ -46,7 +52,7 @@ psycopg2-binary==2.9.13
 alembic==1.20.0
 
 # --- Authentication ---
-python-jose[cryptography]==3.5.0
+PyJWT[crypto]==2.15.1  # replaces python-jose (unmaintained; PYSEC-2026-4298 + ecdsa PYSEC-2026-1325)
 bcrypt==5.0.0
 
 # --- Redis (Caching) ---
@@ -74,7 +80,7 @@ coverage==7.16.1
 prometheus-client==0.26.0
 
 # --- MCP (Model Context Protocol) - Pinned to <2 (mcp 2.x breaks FastMCP) ---
-mcp==1.28.1
+mcp==1.30.0  # CVE-2026-59951 (stateful session leak)
 fastmcp==3.4.7
 
 # --- Utilities ---

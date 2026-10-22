@@ -43,6 +43,8 @@ from modules.secrets import get_secret
 from modules.security import safe_math_eval
 from modules.model_tiers import resolve_model
 from modules.security_hardening import PROMPT_INJECTION_GUARD
+from modules.doc_scope import owner_dir_name, scoped
+from modules.request_context import bind_owner, get_owner
 
 # OpenTelemetry tracer for agent-level spans (best-effort; degrades to a no-op
 # tracer when Phoenix/OTel isn't configured, e.g. the CLI).
@@ -209,12 +211,23 @@ class GroqLLM(LLM):
             raw=response,
         )
 
+    def _record_usage(self, usage: Any) -> None:
+        if usage is None:
+            return
+        try:
+            from modules.prometheus_metrics import record_llm_usage
+            get = (lambda k: usage.get(k)) if isinstance(usage, dict) else (lambda k: getattr(usage, k, 0))
+            record_llm_usage(self.model, get("prompt_tokens") or 0, get("completion_tokens") or 0)
+        except Exception:
+            pass
+
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
         response = self._client.chat.completions.create(
             model=self.model,
             messages=self._format_messages(messages),
             **kwargs,
         )
+        self._record_usage(getattr(response, "usage", None))
         return self._parse_response(response)
 
     async def achat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
@@ -238,9 +251,17 @@ class GroqLLM(LLM):
         )
         def generate():
             for chunk in response:
-                if chunk.choices[0].delta.content:
+                # Groq reports token usage on the final chunk (x_groq.usage);
+                # that chunk may carry no choices at all.
+                x_groq = getattr(chunk, "x_groq", None)
+                usage = getattr(chunk, "usage", None) or (
+                    getattr(x_groq, "usage", None) if x_groq is not None else None)
+                if usage is not None:
+                    self._record_usage(usage)
+                choices = getattr(chunk, "choices", None) or []
+                if choices and choices[0].delta.content:
                     yield CompletionResponse(
-                        text=chunk.choices[0].delta.content,
+                        text=choices[0].delta.content,
                         raw=chunk,
                     )
         return generate()
@@ -348,21 +369,41 @@ def list_facts() -> str:
     return result
 
 
+def _user_rag():
+    """The shared RAG store scoped to the current user (tenant isolation)."""
+    return scoped(rag, get_owner() or _current_user_id.get())
+
+
 def read_document(file_path: str) -> str:
-    """Read a document and add it to knowledge base."""
-    result = rag.add_document(file_path)
+    """Add one of the user's uploaded documents to the knowledge base.
+
+    Only files inside the user's own upload directory are accepted - the
+    model must never be able to index arbitrary server files (/etc/passwd,
+    .env, other users' uploads).
+    """
+    owner = get_owner() or _current_user_id.get()
+    upload_root = os.path.realpath(os.path.join(
+        os.getenv("UPLOAD_DIR", "uploads"), owner_dir_name(owner)
+    ))
+    candidate = os.path.realpath(
+        file_path if os.path.isabs(file_path)
+        else os.path.join(upload_root, os.path.basename(file_path))
+    )
+    if not candidate.startswith(upload_root + os.sep) or not os.path.isfile(candidate):
+        return "📄 Only documents you uploaded can be read. Upload the file first."
+    result = _user_rag().add_document(candidate)
     return f"📄 {result}"
 
 
 def search_documents(query: str) -> str:
     """Search loaded documents for relevant information."""
-    context = rag.get_context(query)
+    context = _user_rag().get_context(query)
     return context
 
 
 def list_documents() -> str:
     """List all loaded documents."""
-    docs = rag.list_documents()
+    docs = _user_rag().list_documents()
     if not docs:
         return "No documents loaded."
     return "📚 Loaded documents:\n" + "\n".join(f"  - {d}" for d in docs)
@@ -492,11 +533,12 @@ async def run_agent(user_input: str, memory: Optional[Any] = None,
     fact_store = facts if facts is not None else globals().get("facts")
     _current_user_id.set(user_id)
     _current_conversation_id.set(conversation_id)
+    bind_owner(user_id)
 
     # Session memory: token-budgeted context (mirrors api.py's _window_messages)
     # so long conversations can't blow the context window or spike cost.
     context = _budget_context_string(mem, user_id, conversation_id)
-    fact_context = fact_store.get_context_string()
+    fact_context = fact_store.get_context_string(user_id=user_id)
 
     # Log the interaction
     monitor.track_request()
@@ -597,10 +639,11 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
     fact_store = facts if facts is not None else globals().get("facts")
     _current_user_id.set(user_id)
     _current_conversation_id.set(conversation_id)
+    bind_owner(user_id)
 
     # Token-budgeted context (mirrors run_agent / api.py _window_messages).
     context = _budget_context_string(mem, user_id, conversation_id)
-    fact_context = fact_store.get_context_string()
+    fact_context = fact_store.get_context_string(user_id=user_id)
     system_prompt = (
         "You are Llama Agent, a helpful AI assistant with tools for math, "
         "text analysis, unit conversion, memory, and document search. "

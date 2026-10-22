@@ -242,10 +242,8 @@ class DatabaseManager:
                          If not provided, reads from DATABASE_URL env var
         """
         if database_url is None:
-            database_url = os.getenv(
-                "DATABASE_URL",
-                "postgresql+asyncpg://postgres:postgres@localhost:5432/llama_agent"
-            )
+            from modules.secrets import resolve_database_url
+            database_url = resolve_database_url()
 
         self.database_url = database_url
         self.engine = create_async_engine(

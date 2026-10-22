@@ -1,59 +1,15 @@
-# ============================================================================
-# 📚 LEARNER GUIDE: Frontend .dockerignore — frontend/.dockerignore
-# ============================================================================
-# WHAT IS THIS?
-# -------------
-# Like root .dockerignore, but for frontend Docker build (context: ./frontend).
-# Tells `docker build ./frontend` which files to EXCLUDE when copying via `COPY . .`
-# in frontend/Dockerfile.
-#
-# WHY NEEDED?
-# -----------
-# - Smaller context (exclude node_modules, .next, etc. — huge!)
-# - Faster build (less to send to daemon)
-# - Avoid cache invalidation (if .next changes, COPY . . would invalidate)
-#
-# HOW IT WORKS:
-# -------------
-# - Each line is a pattern to ignore
-# - No `!` exceptions here (simpler than root)
-#
-# FLOW:
-# -----
-# 1. docker build ./frontend → Reads frontend/.dockerignore
-# 2. Excludes matching files from build context
-# 3. Only non-ignored files are copied via COPY . . in Dockerfile
-# ============================================================================
+# frontend/.dockerignore - for `docker build ./frontend`
+# (no inline comments: .dockerignore treats them as part of the pattern)
 
-# Don't copy host node_modules (huge, host-specific, image will npm ci)
 node_modules
-
-# Don't copy Next.js build output (host, not for image — builder stage will rebuild)
 .next
-
-# Don't copy git (not needed in image)
+out
 .git
-
-# Don't copy env files (contain secrets, host-specific)
-.env
-.env.local
-.env.*.local
-
-# Don't copy docs (not needed in image)
-*.md
-
-# Don't copy gitignore (not needed)
 .gitignore
-
-# Duplicate .next (redundant, but okay)
-.next
-
-# Don't copy npm/yarn logs (junk)
+.env
+.env.*
+*.md
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-# 💡 LEARNER TIP: Frontend vs Root .dockerignore
-#   - Root .dockerignore: For `docker build .` (main Dockerfile, context: .)
-#   - Frontend .dockerignore: For `docker build ./frontend` (frontend Dockerfile, context: ./frontend)
-#   They are separate! Each build context has its own .dockerignore.
+coverage

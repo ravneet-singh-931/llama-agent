@@ -15,6 +15,8 @@ interface ChatState {
   dsaOptions: DsaOptions;
   // Structured SSE events (config / reasoning) for the live reasoning view.
   reasoning: StreamEvent[];
+  // Seconds the last completed answer took (shown under the reply).
+  lastResponseTime: number | null;
 
   // Actions
   sendMessage: (content: string) => Promise<void>;
@@ -22,6 +24,7 @@ interface ChatState {
   clearMessages: () => void;
   setConversations: (convs: Conversation[]) => void;
   fetchConversations: () => Promise<void>;
+  refreshConversations: () => Promise<void>;
   loadConversation: (id: string) => Promise<void>;
   deleteConversation: (id: string) => Promise<void>;
   newConversation: () => Promise<void>;
@@ -55,6 +58,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   error: null,
   dsaOptions: {},
   reasoning: [],
+  lastResponseTime: null,
   _abortController: null,
 
   _setStreaming: (streaming) => set({ isStreaming: streaming }),
@@ -76,7 +80,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       streamingContent: "",
       error: null,
       reasoning: [],
+      lastResponseTime: null,
     }));
+    const startedAt = Date.now();
 
     // Add assistant placeholder
     const assistantId = generateId();
@@ -110,17 +116,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({
           isStreaming: false,
           streamingContent: "",
+          _abortController: null,
+          lastResponseTime: (Date.now() - startedAt) / 1000,
           messages: s.messages.map((m) =>
             m.id === assistantId
-              ? { ...m, content: fullContent, timestamp: new Date().toISOString() }
+              ? {
+                  ...m,
+                  content: fullContent.trim() || "No response received.",
+                  timestamp: new Date().toISOString(),
+                }
               : m
           ),
         }));
+        // New/renamed conversation + last-message preview in the sidebar.
+        void get().refreshConversations();
       },
       (err) => {
         set((s) => ({
           isStreaming: false,
           streamingContent: "",
+          _abortController: null,
           error: err.message,
           messages: s.messages.map((m) =>
             m.id === assistantId
@@ -132,8 +147,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       state.currentConversationId,
       state.dsaOptions,
       (event) => {
-        // Collect config / reasoning events for the live reasoning view.
+        // Collect config / reasoning / agent events for the reasoning view.
         set((s) => ({ reasoning: [...s.reasoning, event] }));
+        if (event.type === "agent_start" && typeof event.agent === "string") {
+          const agent = event.agent;
+          set((s) => ({
+            messages: s.messages.map((m) =>
+              m.id === assistantId ? { ...m, agent } : m
+            ),
+          }));
+        }
       }
     );
 
@@ -145,6 +168,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (state._abortController) {
       state._abortController.abort();
       set({ isStreaming: false, _abortController: null });
+      void get().refreshConversations();
     }
   },
 
@@ -154,6 +178,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setConversations: (conversations) => set({ conversations }),
 
   setDsaOptions: (dsaOptions) => set({ dsaOptions }),
+
+  refreshConversations: async () => {
+    try {
+      const res = await api.getConversations();
+      set({ conversations: res.conversations });
+    } catch {
+      // Sidebar refresh is best-effort.
+    }
+  },
 
   fetchConversations: async () => {
     try {
@@ -176,7 +209,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         toChatMessage(m.role, m.content, m.timestamp)
       );
       set({ currentConversationId: id, messages, error: null, reasoning: [] });
-      get().fetchConversations();
+      void get().refreshConversations();
     } catch (err) {
       set({ error: (err as Error).message });
     }
@@ -206,7 +239,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         error: null,
         reasoning: [],
       });
-      get().fetchConversations();
+      void get().refreshConversations();
     } catch (err) {
       set({ error: (err as Error).message, messages: [], currentConversationId: null });
     }

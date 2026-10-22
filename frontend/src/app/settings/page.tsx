@@ -4,9 +4,7 @@ import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
   Settings,
-  Server,
   Shield,
-  Bell,
   Palette,
   Key,
   Activity,
@@ -30,27 +28,38 @@ export default function SettingsPage() {
     version: string;
     modules: Record<string, string>;
   } | null>(null);
-  const [checking, setChecking] = useState(false);
+  // Starts true: the initial check runs on mount.
+  const [checking, setChecking] = useState(true);
 
-  const checkHealth = async () => {
+  // Resolves to the health payload (or an "unreachable" stand-in); state is
+  // only set in the promise callbacks, never synchronously in an effect.
+  const fetchHealth = () =>
+    api.health().catch(() => ({
+      status: "error",
+      uptime: "N/A",
+      version: "N/A",
+      modules: { api: "unreachable" } as Record<string, string>,
+    }));
+
+  const checkHealth = () => {
     setChecking(true);
-    try {
-      const data = await api.health();
-      setHealth(data);
-    } catch {
-      setHealth({
-        status: "error",
-        uptime: "N/A",
-        version: "N/A",
-        modules: { api: "unreachable" },
-      });
-    } finally {
-      setChecking(false);
-    }
+    fetchHealth()
+      .then(setHealth)
+      .finally(() => setChecking(false));
   };
 
   useEffect(() => {
-    checkHealth();
+    let alive = true;
+    fetchHealth()
+      .then((h) => {
+        if (alive) setHealth(h);
+      })
+      .finally(() => {
+        if (alive) setChecking(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   return (

@@ -5,13 +5,98 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-10-22
+
+### Security & multi-user isolation
+- JWTs can no longer be forged: no hard-coded fallback secret in production, refresh
+  tokens are rejected as access tokens, tokens for deleted users return 401.
+- Every user (and every anonymous browser, via an HttpOnly `guest_id` cookie) now has
+  private conversation history, facts, uploaded documents, RAG/semantic caches and
+  multi-agent caches. Previously all guests shared one identity and facts/caches leaked
+  across users.
+- `read_document` and `/documents/read` are confined to the caller's own uploads.
+- WebSocket identity comes from a short-lived single-use ticket (`POST /ws/ticket`) or
+  the auth cookie, never from the URL path. Presence broadcasting was removed, and
+  `/ws/status` returns counts only.
+- `/mcp/tools` requires login; `/metrics/json` and `/monitoring/dashboard` require
+  admin. Prometheus `/metrics` returns 404 through any proxy (`METRICS_ALLOW_PROXIED=1`
+  turns this off). The MCP server is no longer exposed by Nginx or the Ingress.
+- New accounts need passwords of at least 8 characters.
+- The frontend retries once via `/auth/refresh` on a 401; the API also renews expired
+  access cookies transparently.
+
+### Chat & agents
+- An agent picked in the UI is always honoured (`ChatRequest.agent`, previously ignored
+  unless keyword routing agreed). `agent: "team"` or an `@team ...` message runs the
+  full agent team, streaming each agent's progress as `agent_start` / `agent_done`
+  events.
+- Agent and LLM token streams run on worker threads, so one user's stream no longer
+  blocks the event loop for everyone else.
+- Next.js chat: the DSA control panel (critic / reflection / parallel / agent) and the
+  live reasoning view are wired into the main chat. The sidebar refreshes after every
+  reply. Fact keys and conversation ids are URL-encoded. Dead chat components removed.
+
+### RAG
+- Hybrid search adds BM25 keyword-only hits (same user only) instead of only re-scoring
+  vector hits. The BM25 index is rebuilt after uploads and deletes and every
+  `RAG_BM25_TTL` seconds. `rank_bm25` is now actually installed.
+- Fixed `TypeError` on tied retrieval scores; added the missing `get_cached_answer` /
+  `get_context_for_document`; Corrective-RAG verification (`RAG_CRAG=1`) wired in.
+
+### Monitoring
+- LLM token usage and estimated cost are recorded for every Groq call
+  (`llama_agent_llm_tokens_total`, `llama_agent_llm_cost_usd_total`, and the
+  `/monitoring/dashboard` cost section). This uses current Groq list prices and can be
+  overridden with `GROQ_PRICING`.
+- Request metrics use route templates (bounded label cardinality).
+- `ApiDown` now fires when the API is down (`up == 0`), not only when the target
+  disappears. New `HighLLMSpend` alert.
+- Compose binds Grafana/Prometheus/Phoenix to `127.0.0.1` (reachable locally, not publicly).
+
+### Deployment
+- Fixed the Postgres password mismatch: `DATABASE_URL` carries no password; it is
+  injected from `POSTGRES_PASSWORD(_FILE)` in Compose, k8s and the Streamlit UI.
+- Ingress: a separate non-rewriting Ingress for `/ws` (WebSocket timeouts) and
+  `/streamlit` (served under `--server.baseUrlPath=streamlit`).
+- Nginx: generates a self-signed cert when none is provided (`SSL_CN`); proxies
+  `/openapi.json`.
+- `.dockerignore` fixed (inline comments made it ineffective, so secrets/uploads could
+  enter the image).
+- Postgres backup CronJob fixed (it exited 127); dumps are written atomically and
+  rotated (7 kept).
+- CD: every deploy pins the immutable `:<git sha>` images with `kubectl set image`, so
+  rollouts always happen. Secrets are passed via env, a frontend typecheck/lint/build
+  job was added, tests install `requirements.txt` and report coverage.
+- `k8s/deploy.sh`: namespace first, waits for cert-manager/ESO CRDs, builds Secrets
+  from `secrets/*.txt` and fails on missing or placeholder values.
+- k8s API memory raised (512Mi → 1.5Gi limit); uploads use an emptyDir (documents live
+  in ChromaDB). Streamlit runs 1 replica (in-process sessions).
+
+### Dependencies & runtime
+- **Python 3.11 is now required** (Docker image and CI). Python 3.10 reaches end-of-life in
+  October 2026, and the security fixes below (Pillow 13, Streamlit 1.66) need 3.11 or newer.
+- `python-jose` → `PyJWT` 2.15.1. python-jose is unmaintained and has an unfixed HMAC/RSA
+  key-confusion bug (PYSEC-2026-4298). Dropping it also removes `ecdsa` (PYSEC-2026-1325).
+  Existing tokens stay valid (same HS256 format).
+- `arize-phoenix` → `arize-phoenix-otel`. The API only uses the tracing client; the Phoenix
+  UI runs as its own container. This removes the strawberry-graphql and pydantic-ai-slim
+  CVEs. It also fixes tracing on Python 3.11, where the full package's `phoenix/__init__`
+  crashed at import, so tracing was silently switched off.
+- Pillow 13.0.0 (35 CVEs), Streamlit 1.66.1, mcp 1.30.0 (CVE-2026-59951),
+  opentelemetry-instrumentation-fastapi 0.66b1 → opentelemetry-api 1.45.1 (CVE-2026-114603).
+- CI: `pip-audit` ignores transformers PYSEC-2026-4174 (no upstream fix; it only affects
+  `load_custom_generate`, which this project never calls). `.gitleaksignore` records one
+  reviewed false positive (a `kubectl wait --for=condition=…` flag in `k8s/deploy.sh`).
+
 ## [3.2.0] - 2026-08-13
 
 ### Added
 - **OptimizedRAG** — production RAG pipeline replacing the basic retriever, with 7 optimizations: hybrid search (BM25 + dense vectors), cross-encoder reranker, contextual retrieval with semantic chunking, query decomposition, corrective RAG (CRAG), conversational retrieval, and a semantic cache. Activated via `USE_OPTIMIZED_RAG=true` (set in `k8s/api.yaml` and `docker-compose.yml`).
 
 ### Changed
-- Kubernetes and Compose images now track `ravneet231/llama-agent:latest` (built and pushed by CI on every push to `main`); the API uses `imagePullPolicy: Always` so new builds are picked up on rollout.
+- CI builds and pushes `ravneet231/llama-agent` on every push to `main`. *(Correction: the
+  manifests actually pinned `:v7` with `IfNotPresent`, so new builds were not rolled out;
+  fixed in 3.3.0 with `:<git sha>` deploys.)*
 - ChromaDB ONNX embedding model is pre-downloaded at image build time (CI has fast network) so runtime pods no longer re-download it on cold start.
 
 ### Fixed

@@ -5,7 +5,7 @@
 # -------------
 # Runs the Streamlit legacy UI (app.py) — the OLD web interface before Next.js.
 # Creates:
-#   1. Deployment (2 replicas, Streamlit on port 8501)
+#   1. Deployment (1 replica, Streamlit on port 8501)
 #   2. Service (ClusterIP, DNS: llama-agent-web-service:8501)
 #
 # WHY KEEP STREAMLIT IF WE HAVE NEXT.JS?
@@ -17,7 +17,7 @@
 #
 # KUBERNETES CONCEPTS:
 # --------------------
-# - Deployment with 2 replicas, same image as API but `command` overrides CMD
+# - Deployment with 1 replica (in-process sessions), same image as API but `command` overrides CMD
 # - Service (ClusterIP)
 # - Secrets for GROQ_API_KEY, DATABASE_URL
 # - Probes on `/` (Streamlit homepage)
@@ -50,7 +50,9 @@ metadata:
     app: llama-agent
     component: web  # Component = web (for Service selector)
 spec:
-  replicas: 2  # 2 for HA
+  # 1 replica: Streamlit keeps session state in-process (no sticky sessions
+  # configured), so a second replica would randomly drop users' sessions.
+  replicas: 1
   selector:
     matchLabels:
       app: llama-agent
@@ -70,7 +72,8 @@ spec:
           #   - streamlit run app.py = run Streamlit app
           #   - --server.port 8501 = Streamlit port
           #   - --server.address 0.0.0.0 = listen on all interfaces
-          command: ["streamlit", "run", "app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+          # baseUrlPath=streamlit: served behind the ingress at /streamlit/
+          command: ["streamlit", "run", "app.py", "--server.port", "8501", "--server.address", "0.0.0.0", "--server.baseUrlPath=streamlit"]
 
           ports:
             - containerPort: 8501  # Streamlit port
@@ -91,11 +94,25 @@ spec:
                   name: app-secrets
                   key: database-url
 
+            # app.py talks to Postgres with psycopg2 via POSTGRES_* vars
+            - name: POSTGRES_HOST
+              value: postgres-service
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secrets
+                  key: password
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: redis-url
+
             # LLM_MODEL_STRONG/FAST: Tiered models (like API)
             - name: LLM_MODEL_STRONG
               value: qwen/qwen3.8-27b
             - name: LLM_MODEL_FAST
-              value: qwen/qwen3.8-27b
+              value: openai/gpt-oss-20b
 
             - name: ENVIRONMENT
               value: production
@@ -114,14 +131,14 @@ spec:
 
           livenessProbe:
             httpGet:
-              path: /  # Streamlit homepage
+              path: /streamlit/_stcore/health  # Streamlit health (behind baseUrlPath)
               port: 8501
             initialDelaySeconds: 30
             periodSeconds: 10
 
           readinessProbe:
             httpGet:
-              path: /
+              path: /streamlit/_stcore/health
               port: 8501
             initialDelaySeconds: 15
             periodSeconds: 5

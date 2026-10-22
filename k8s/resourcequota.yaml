@@ -62,13 +62,13 @@ spec:
     requests.cpu: "8"
 
     # requests.memory: Total memory requests (8Gi)
-    requests.memory: 8Gi
+    requests.memory: 12Gi
 
     # limits.cpu: Total CPU limits (16 cores)
     limits.cpu: "16"
 
     # limits.memory: Total memory limits (16Gi)
-    limits.memory: 16Gi
+    limits.memory: 24Gi
 
     # persistentvolumeclaims: Max PVCs (20)
     persistentvolumeclaims: "20"

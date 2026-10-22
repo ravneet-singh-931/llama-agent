@@ -35,7 +35,8 @@ class DatabaseConfig:
 
     @classmethod
     def from_env(cls) -> "DatabaseConfig":
-        db_url = get_secret("DATABASE_URL", default=os.getenv("DATABASE_URL", cls.url))
+        from modules.secrets import resolve_database_url
+        db_url = resolve_database_url(default=cls.url)
         return cls(
             url=db_url,
             echo=os.getenv("DB_ECHO", "false").lower() == "true",

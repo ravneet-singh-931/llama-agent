@@ -1,88 +1,16 @@
-# ============================================================================
-# 📚 LEARNER GUIDE: Nginx Dockerfile — Dockerfile.nginx (Reverse Proxy)
-# ============================================================================
-# WHAT IS THIS DOCKERFILE?
-# ------------------------
-# Builds a Docker image for Nginx (reverse proxy, load balancer, SSL termination).
-# Nginx sits in front of all services and routes traffic:
-#   - Browser → Nginx (80/443) → API (8000), Frontend (3000), Streamlit (8501), MCP (8001)
-#
-# WHAT DOES IT DO?
-# ----------------
-# 1. Start from nginx:1.27-alpine (lightweight Nginx)
-# 2. Remove default config
-# 3. Copy custom nginx.conf
-# 4. Create SSL directory
-# 5. Expose 80 (HTTP) and 443 (HTTPS)
-# 6. Run Nginx in foreground (daemon off)
-#
-# WHY NGINX?
-# ----------
-# - SSL/TLS termination (HTTPS)
-# - Load balancing (across API replicas)
-# - Rate limiting, security headers, CDN-ready
-# - Single entry point (vs exposing each service directly)
-#
-# DOCKER CONCEPTS:
-# ----------------
-# - FROM nginx:1.27-alpine (official Nginx, Alpine variant)
-# - RUN rm (remove default config)
-# - COPY nginx.conf (custom config)
-# - RUN mkdir -p (create SSL dir)
-# - EXPOSE 80 443 (HTTP/HTTPS)
-# - CMD ["nginx", "-g", "daemon off;"] (run in foreground, not background)
-#
-# HOW IT CONNECTS:
-# ----------------
-# - Built by: docker-compose.yml (nginx service, build: context: ., dockerfile: Dockerfile.nginx)
-# - Used by: docker-compose.yml (nginx service, ports 80:80, 443:443)
-# - Config: config/nginx/nginx.conf (proxies to api:8000, frontend:3000, etc.)
-# - SSL: config/nginx/ssl/cert.pem, key.pem (generated via generate-ssl.sh or Let's Encrypt)
-#
-# FLOW:
-# -----
-# 1. docker build -f Dockerfile.nginx -t my-nginx .
-# 2. Image contains Nginx + custom config
-# 3. docker run -p 80:80 -p 443:443 my-nginx
-# 4. Nginx listens on 80/443, proxies to backends via Docker DNS (api, frontend, etc.)
-# 5. Verify: docker run --rm -p 80:80 my-nginx && curl http://localhost/api/health
-# ============================================================================
-
-# Base image: Nginx 1.27 Alpine (lightweight, ~20MB)
-#   - `nginx:1.27-alpine` = Official Nginx 1.27 on Alpine Linux
-#   - Alpine = minimal, fast, secure
+# Nginx reverse proxy (TLS termination, routing, rate limiting)
 FROM nginx:1.27-alpine
 
-# Remove default Nginx config (we'll use our own)
-#   - Default is at /etc/nginx/conf.d/default.conf (serves "Welcome to nginx" page)
-#   - We remove it so only our custom config is used
-RUN rm /etc/nginx/conf.d/default.conf
+# openssl: generate a self-signed cert on first start when none is mounted
+RUN apk add --no-cache openssl \
+    && rm /etc/nginx/conf.d/default.conf \
+    && mkdir -p /etc/nginx/ssl /etc/nginx/ssl-provided /var/www/certbot
 
-# Copy custom Nginx config from host to image
-#   - `config/nginx/nginx.conf` (host) → `/etc/nginx/conf.d/default.conf` (image)
-#   - This config defines upstreams (api_backend, frontend_backend, etc.) and server blocks
-#   - See config/nginx/nginx.conf for detailed comments
 COPY config/nginx/nginx.conf /etc/nginx/conf.d/default.conf
+# Executed by the official image's entrypoint before nginx starts
+COPY config/nginx/ensure-cert.sh /docker-entrypoint.d/05-ensure-cert.sh
+RUN chmod +x /docker-entrypoint.d/05-ensure-cert.sh
 
-# Create SSL directory and certbot webroot
-#   - `/etc/nginx/ssl` = Where SSL certs are stored (cert.pem, key.pem)
-#   - `/var/www/certbot` = Where Let's Encrypt challenges are served (/.well-known/acme-challenge/)
-#   - `mkdir -p` = Create parent dirs if needed, no error if exists
-RUN mkdir -p /etc/nginx/ssl /var/www/certbot
-
-# Expose HTTP and HTTPS ports (documentation)
-#   - `EXPOSE 80` = HTTP (redirects to HTTPS)
-#   - `EXPOSE 443` = HTTPS (main server)
-#   - Actually publish via `docker run -p 80:80 -p 443:443` or `ports:` in compose
 EXPOSE 80 443
 
-# Default command: Run Nginx in foreground (not as daemon)
-#   - `daemon off;` = Stay in foreground (required for Docker, so container doesn't exit)
-#   - Without this, Nginx would fork to background and container would stop
 CMD ["nginx", "-g", "daemon off;"]
-
-# 💡 LEARNER TIP: Nginx in Docker
-#   - Config test: docker run --rm my-nginx nginx -t  (test config syntax)
-#   - Logs: docker logs <nginx-container>
-#   - Reload: docker exec <nginx-container> nginx -s reload
-#   - SSL: Generate self-signed via config/nginx/generate-ssl.sh, or use Let's Encrypt
