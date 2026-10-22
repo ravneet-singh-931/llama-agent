@@ -270,6 +270,8 @@ class CostTracker:
     # checked 2026-10). Override/extend with GROQ_PRICING='{"model": {"input":
     # 0.1, "output": 0.2}}'; unknown models use GROQ_DEFAULT_PRICE_IN/OUT.
     DEFAULT_PRICING = {
+        # STRONG tier default (modules/model_tiers.py). Preview model on Groq.
+        "qwen/qwen3.8-27b": {"input": 0.80, "output": 4.00},
         "openai/gpt-oss-20b": {"input": 0.075, "output": 0.30},
         "openai/gpt-oss-120b": {"input": 0.15, "output": 0.60},
         "qwen/qwen3-32b": {"input": 0.29, "output": 0.59},

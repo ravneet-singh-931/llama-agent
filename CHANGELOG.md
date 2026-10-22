@@ -5,6 +5,23 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] - 2026-10-23
+
+### Fixed
+- **Redis in Kubernetes:** added a `redis` Service alias next to `redis-service`. The
+  `REDIS_URL` secret used the docker-compose host (`redis://redis:6379/0`), which did not
+  resolve in the cluster. Every Redis call failed silently and each API Pod fell back to
+  its own memory, so WebSocket logins could fail with 2 replicas, and rate limits, lockouts
+  and facts weren't shared. Both hostnames now work.
+- **CD rollout timeout:** the deploy jobs waited 300s, but the API's 2 replicas start one
+  after another with a 10-minute startup budget each, so a healthy rollout was reported as
+  failed. Waiting now lives in `k8s/wait-rollout.sh`: 900s for the API, 600s for the others.
+  On failure it prints Pod status, events and logs (also as GitHub annotations), and it
+  warns when the API can't reach Redis.
+- **Cost tracking:** `qwen/qwen3.8-27b` (the STRONG tier default) now has its Groq price
+  ($0.80 in / $4.00 out per 1M tokens) instead of the generic $0.15 / $0.60 fallback, which
+  under-reported its cost by about 6x.
+
 ## [3.3.0] - 2026-10-22
 
 ### Security & multi-user isolation
