@@ -24,7 +24,7 @@
 #
 # DOCKER CONCEPTS:
 # ----------------
-# - FROM: Base image (python:3.10-slim = lightweight Python 3.10)
+# - FROM: Base image (python:3.11-slim = lightweight Python 3.11)
 # - RUN: Execute command during build (install gcc, pip install, etc.)
 # - WORKDIR: Set working directory inside image (/app)
 # - COPY: Copy files from host to image
@@ -50,10 +50,11 @@
 #            docker run --rm -it ravneet231/llama-agent:latest python -c "import groq; print('ok')"
 # ============================================================================
 
-# Base image: Python 3.10 slim (Debian-based, small, ~50MB)
-#   - `python:3.10-slim` = Python 3.10 + minimal Debian (no extra tools)
-#   - Alternative: `python:3.10` (full, larger), `python:3.10-alpine` (even smaller, but needs musl)
-FROM python:3.10-slim
+# Base image: Python 3.11 slim (Debian-based, small, ~50MB)
+#   - `python:3.11-slim` = Python 3.11 + minimal Debian (no extra tools)
+#   - Alternative: `python:3.11` (full, larger), `python:3.11-alpine` (even smaller, but needs musl)
+# Python 3.11: 3.10 is EOL (Oct 2026) and pillow 13 / streamlit 1.66 need >= 3.11
+FROM python:3.11-slim
 
 # Install system dependencies (needed for Python packages that compile C extensions)
 #   - `apt-get update` = Update package list

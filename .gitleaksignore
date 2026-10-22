@@ -1,0 +1,4 @@
+# False positives reviewed by hand (format: <commit>:<file>:<rule>:<line>).
+# k8s/deploy.sh:127 is `kubectl wait --for=condition=Available ...` - a kubectl
+# flag that the generic-api-key rule mistakes for a key. No secret involved.
+060d49c12161e3240b895dab211c77a633c81e3d:k8s/deploy.sh:generic-api-key:127

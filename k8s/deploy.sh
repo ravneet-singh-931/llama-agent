@@ -124,7 +124,7 @@ if [ "$ESO_ENABLED" = "true" ]; then
     kubectl wait --for=condition=Established --timeout=180s \
         crd/externalsecrets.external-secrets.io \
         crd/clustersecretstores.external-secrets.io
-    kubectl -n external-secrets wait --for=condition=Available deployment --all --timeout=300s
+    kubectl -n external-secrets wait --for=condition=Available deployment --all --timeout=300s  # gitleaks:allow (kubectl flag, not a secret)
     kubectl get secret aws-creds -n external-secrets >/dev/null 2>&1 || \
       kubectl get secret aws-creds -n "$NAMESPACE" >/dev/null 2>&1 || \
       echo "⚠️  Secret 'aws-creds' not found - the ClusterSecretStore cannot authenticate until you create it."

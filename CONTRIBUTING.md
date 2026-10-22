@@ -46,7 +46,7 @@ We expect all contributors to:
 ## Development Setup
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.11+
 - Docker Desktop
 - Git
 - Node.js 20+ (only needed for frontend work)

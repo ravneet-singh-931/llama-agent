@@ -16,7 +16,7 @@ Covers:
 
 import hashlib
 import os
-import subprocess
+import subprocess  # nosec B404 - tests spawn the current interpreter only
 import sys
 
 import pytest
@@ -56,7 +56,7 @@ def _chroma_client(tmp_path):
             for t in input:
                 v = [0.0] * 64
                 for w in t.lower().split():
-                    v[int(hashlib.md5(w.encode()).hexdigest(), 16) % 64] += 1.0
+                    v[int(hashlib.md5(w.encode(), usedforsecurity=False).hexdigest(), 16) % 64] += 1.0
                 v[0] += 0.01  # never a zero vector
                 out.append(v)
             return out
@@ -299,7 +299,7 @@ def test_jwt_secret_read_from_file_secret(tmp_path):
     secret_file.write_text("file-secret-value-1234567890")
     env = {**os.environ, "JWT_SECRET_KEY_FILE": str(secret_file)}
     env.pop("JWT_SECRET_KEY", None)
-    out = subprocess.run(
+    out = subprocess.run(  # nosec B603 - fixed argv, sys.executable, no shell
         [sys.executable, "-c", "import modules.auth as a; print(a.SECRET_KEY)"],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
     )
@@ -310,7 +310,7 @@ def test_default_jwt_secret_refused_in_production():
     env = {**os.environ, "ENVIRONMENT": "production"}
     env.pop("JWT_SECRET_KEY", None)
     env.pop("JWT_SECRET_KEY_FILE", None)
-    out = subprocess.run(
+    out = subprocess.run(  # nosec B603 - fixed argv, sys.executable, no shell
         [sys.executable, "-c", "import modules.auth"],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
     )

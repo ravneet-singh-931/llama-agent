@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.11']
+        python-version: ['3.11']
 
     steps:
       - name: "\U0001F4E5 Checkout code"
@@ -44,7 +44,7 @@ jobs:
             --cov=. --cov-report=xml --cov-report=term
 
       - name: "\U0001F4CA Upload coverage"
-        if: matrix.python-version == '3.10'
+        if: matrix.python-version == '3.11'
         uses: codecov/codecov-action@v4
         with:
           file: ./coverage.xml
@@ -64,7 +64,7 @@ jobs:
       - name: "\U0001F40D Set up Python"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
           cache: 'pip'
 
       - name: "\U0001F50D Scan for vulnerabilities"
@@ -74,7 +74,8 @@ jobs:
           #  - PYSEC-2025-217, PYSEC-2026-2288/2289/2290, PYSEC-2026-3929: transformers (<5 pinned by
           #    llama-index-llms-openai-like; no 4.x/5.10 fix exists upstream yet)
           #  - PYSEC-2026-311, PYSEC-2026-3813/3814/3815: chromadb (latest 1.5.9, no upstream fix yet)
-          #  - PYSEC-2026-1325: ecdsa (latest 0.19.2, no upstream fix yet)
+          #  - PYSEC-2026-4174: transformers load_custom_generate() remote code (no fix; the app
+          #    never calls it - transformers is only a transitive dep of llama-index-llms-openai-like)
           #  - PYSEC-2026-3740: nltk (latest 3.10.3, no upstream fix yet)
           # Re-evaluate on every dependency bump; new CVEs still fail the build.
           pip-audit -r requirements.txt --progress-spinner off \
@@ -87,7 +88,7 @@ jobs:
             --ignore-vuln PYSEC-2026-3813 \
             --ignore-vuln PYSEC-2026-3814 \
             --ignore-vuln PYSEC-2026-3815 \
-            --ignore-vuln PYSEC-2026-1325 \
+            --ignore-vuln PYSEC-2026-4174 \
             --ignore-vuln PYSEC-2026-3740
           # bandit: skip known non-issues (documented):
           #  B101 assert in tests (pytest standard), B105/B106/B107 hardcoded
@@ -154,7 +155,7 @@ jobs:
       - name: "\U0001F40D Set up Python"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: "\U0001F4E6 Install linting tools"
         run: pip install flake8
@@ -202,16 +203,16 @@ jobs:
       - name: "\U0001F40D Set up Python"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
           cache: 'pip'
 
       - name: "\U0001F4E6 Install dependencies"
         run: |
           pip install groq llama-index-core llama-index-llms-groq
-          pip install chromadb pydantic fastapi uvicorn python-jose bcrypt
+          pip install chromadb pydantic fastapi uvicorn PyJWT bcrypt
           pip install python-dotenv pypdf python-docx pandas
           pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
-          pip install pytest sqlalchemy psycopg2-binary asyncpg redis "mcp<2" prometheus-client fastmcp
+          pip install pytest sqlalchemy psycopg2-binary asyncpg redis "mcp<2" prometheus-client "fastmcp<4"
 
       - name: "\U0001F517 Test all modules import"
         run: |

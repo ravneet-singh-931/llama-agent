@@ -16,7 +16,8 @@ from typing import Optional, Dict, Any
 from functools import wraps
 
 # JWT for token-based auth
-from jose import JWTError, jwt
+import jwt  # PyJWT (python-jose is unmaintained: PYSEC-2026-4298, no fix)
+from jwt import PyJWTError as JWTError
 import bcrypt as _bcrypt
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader

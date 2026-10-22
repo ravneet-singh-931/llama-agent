@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml/badge.svg)](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009639.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Next.js](https://img.shields.io/badge/Next.js-16+-000000.svg?logo=nextdotjs)](https://nextjs.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.40+-FF4B4B.svg?logo=streamlit)](https://streamlit.io/)
@@ -257,7 +257,7 @@ Both keep ChromaDB cluster-internal (no published host port).
 | Layer | Technology |
 |-------|-----------|
 | **Frontend** | Next.js 16 (main UI), Streamlit (legacy) |
-| **Backend** | FastAPI, Python 3.10, asyncpg |
+| **Backend** | FastAPI, Python 3.11, asyncpg |
 | **Database** | PostgreSQL 15 (+ pgvector), Redis 7, ChromaDB |
 | **AI/ML** | Groq (Llama 3.3-70b / 3.1-8b), LlamaIndex |
 | **Agents** | 5 specialized agents (Research, Coder, Writer, Planner, Analyzer) via MCP/SSE |

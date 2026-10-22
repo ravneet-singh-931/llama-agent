@@ -72,6 +72,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - k8s API memory raised (512Mi → 1.5Gi limit); uploads use an emptyDir (documents live
   in ChromaDB). Streamlit runs 1 replica (in-process sessions).
 
+### Dependencies & runtime
+- **Python 3.11 is now required** (Docker image and CI). Python 3.10 reaches end-of-life in
+  October 2026, and the security fixes below (Pillow 13, Streamlit 1.66) need 3.11 or newer.
+- `python-jose` → `PyJWT` 2.15.1. python-jose is unmaintained and has an unfixed HMAC/RSA
+  key-confusion bug (PYSEC-2026-4298). Dropping it also removes `ecdsa` (PYSEC-2026-1325).
+  Existing tokens stay valid (same HS256 format).
+- `arize-phoenix` → `arize-phoenix-otel`. The API only uses the tracing client; the Phoenix
+  UI runs as its own container. This removes the strawberry-graphql and pydantic-ai-slim
+  CVEs. It also fixes tracing on Python 3.11, where the full package's `phoenix/__init__`
+  crashed at import, so tracing was silently switched off.
+- Pillow 13.0.0 (35 CVEs), Streamlit 1.66.1, mcp 1.30.0 (CVE-2026-59951),
+  opentelemetry-instrumentation-fastapi 0.66b1 → opentelemetry-api 1.45.1 (CVE-2026-114603).
+- CI: `pip-audit` ignores transformers PYSEC-2026-4174 (no upstream fix; it only affects
+  `load_custom_generate`, which this project never calls). `.gitleaksignore` records one
+  reviewed false positive (a `kubectl wait --for=condition=…` flag in `k8s/deploy.sh`).
+
 ## [3.2.0] - 2026-08-13
 
 ### Added
