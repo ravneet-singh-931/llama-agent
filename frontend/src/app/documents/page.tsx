@@ -19,7 +19,6 @@ import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
 
 const fileIcons: Record<string, typeof File> = {
   pdf: FileText,

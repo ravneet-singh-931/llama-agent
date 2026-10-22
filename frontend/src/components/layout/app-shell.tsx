@@ -3,7 +3,7 @@
 import { Sidebar } from "./sidebar";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
-import { Menu, Brain } from "lucide-react";
+import { Menu } from "lucide-react";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (

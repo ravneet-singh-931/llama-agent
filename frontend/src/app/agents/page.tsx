@@ -26,7 +26,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { api } from "@/lib/api";
+import { api, UnauthorizedError } from "@/lib/api";
+
+// Running MCP tools requires a signed-in user (the API protects POST /mcp/tools).
+const mcpErrorText = (err: unknown) =>
+  err instanceof UnauthorizedError
+    ? "Sign in to run MCP tools."
+    : `Error: ${(err as Error).message}`;
 import { AgentCollaborationDashboard } from "@/components/chat/AgentCollaborationDashboard";
 import { Markdown } from "@/components/markdown/markdown";
 
@@ -165,7 +171,7 @@ export default function AgentsPage() {
     } catch (err) {
       setToolResults((prev) => ({
         ...prev,
-        [name]: `Error: ${(err as Error).message}`,
+        [name]: mcpErrorText(err),
       }));
     } finally {
       setToolLoading(null);
@@ -179,7 +185,7 @@ export default function AgentsPage() {
       const res = await api.mcpToolCall("team_status", {});
       setTeamStatus(res.isError ? `Error: ${res.result}` : res.result);
     } catch (err) {
-      setTeamStatus(`Error: ${(err as Error).message}`);
+      setTeamStatus(mcpErrorText(err));
     } finally {
       setTeamStatusLoading(false);
     }

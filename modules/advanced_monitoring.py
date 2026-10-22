@@ -266,23 +266,33 @@ class CostTracker:
     - Daily/monthly spending
     """
     
+    # Groq list prices, USD per 1M tokens (console.groq.com/docs/models,
+    # checked 2026-10). Override/extend with GROQ_PRICING='{"model": {"input":
+    # 0.1, "output": 0.2}}'; unknown models use GROQ_DEFAULT_PRICE_IN/OUT.
+    DEFAULT_PRICING = {
+        "openai/gpt-oss-20b": {"input": 0.075, "output": 0.30},
+        "openai/gpt-oss-120b": {"input": 0.15, "output": 0.60},
+        "qwen/qwen3-32b": {"input": 0.29, "output": 0.59},
+        "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
+        "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
+    }
+
     def __init__(self):
-        # Groq pricing (per 1M tokens)
-        self.pricing = {
-            "llama3-8b-8192": {
-                "input": 0.05,  # $0.05 per 1M input tokens
-                "output": 0.10,  # $0.10 per 1M output tokens
-            },
-            "llama3-70b-8192": {
-                "input": 0.59,
-                "output": 0.79,
-            },
-            "mixtral-8x7b-32768": {
-                "input": 0.24,
-                "output": 0.24,
-            },
+        import threading
+        self._lock = threading.Lock()
+        self.pricing = {k: dict(v) for k, v in self.DEFAULT_PRICING.items()}
+        try:
+            extra = json.loads(os.getenv("GROQ_PRICING", "") or "{}")
+            for model, price in extra.items():
+                self.pricing[model] = {"input": float(price["input"]),
+                                       "output": float(price["output"])}
+        except Exception:
+            pass
+        self.default_price = {
+            "input": float(os.getenv("GROQ_DEFAULT_PRICE_IN", "0.15")),
+            "output": float(os.getenv("GROQ_DEFAULT_PRICE_OUT", "0.60")),
         }
-        
+
         self.usage = {
             "total_input_tokens": 0,
             "total_output_tokens": 0,
@@ -304,17 +314,14 @@ class CostTracker:
         query_type: str = "general",
     ) -> float:
         """Record API usage and return cost."""
-        # Calculate cost
-        if model in self.pricing:
-            input_cost = (input_tokens / 1_000_000) * self.pricing[model]["input"]
-            output_cost = (output_tokens / 1_000_000) * self.pricing[model]["output"]
-            total_cost = input_cost + output_cost
-        else:
-            # Default pricing
-            input_cost = (input_tokens / 1_000_000) * 0.05
-            output_cost = (output_tokens / 1_000_000) * 0.10
-            total_cost = input_cost + output_cost
-        
+        price = self.pricing.get(model, self.default_price)
+        total_cost = ((input_tokens / 1_000_000) * price["input"]
+                      + (output_tokens / 1_000_000) * price["output"])
+        with self._lock:
+            self._apply(model, input_tokens, output_tokens, total_cost, user_id, query_type)
+        return total_cost
+
+    def _apply(self, model, input_tokens, output_tokens, total_cost, user_id, query_type):
         # Update totals
         self.usage["total_input_tokens"] += input_tokens
         self.usage["total_output_tokens"] += output_tokens
@@ -332,8 +339,6 @@ class CostTracker:
         
         # Update by query type
         self.usage["cost_by_query_type"][query_type] += total_cost
-        
-        return total_cost
     
     def get_cost_summary(self) -> Dict:
         """Get cost summary."""

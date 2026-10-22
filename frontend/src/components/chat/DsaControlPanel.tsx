@@ -10,6 +10,7 @@ const AGENTS = [
   { key: "writer", label: "Writer" },
   { key: "analyzer", label: "Analyzer" },
   { key: "planner", label: "Planner" },
+  { key: "team", label: "Whole team" },
 ];
 
 const TOGGLES: { key: keyof DsaOptions; label: string }[] = [
@@ -17,6 +18,9 @@ const TOGGLES: { key: keyof DsaOptions; label: string }[] = [
   { key: "use_reflection", label: "Reflect" },
   { key: "use_parallel", label: "Parallel" },
 ];
+
+// Exported so other controls (agent quick-picks) stay in sync with the panel.
+export const DSA_AGENTS = AGENTS;
 
 export function DsaControlPanel() {
   const dsaOptions = useChatStore((s) => s.dsaOptions);
@@ -53,6 +57,7 @@ export function DsaControlPanel() {
             agent: e.target.value || undefined,
           })
         }
+        aria-label="Agent"
         className="rounded-full border border-border bg-background px-2.5 py-1 text-xs text-foreground"
       >
         {AGENTS.map((a) => (

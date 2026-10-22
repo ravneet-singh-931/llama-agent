@@ -200,12 +200,17 @@ class HybridSearcher:
         self._bm25_index = None
         self._all_docs: List[Dict] = []
 
+    # Rebuild the BM25 index at least this often, so documents indexed by
+    # OTHER replicas (shared ChromaDB) become keyword-searchable here too.
+    BM25_TTL_SECONDS = float(os.getenv("RAG_BM25_TTL", "300"))
+
     def _build_bm25_index(self):
         """Build BM25 index from all documents in the collection.
 
         Sets self._bm25_index to None if rank_bm25 is unavailable or
         the collection is empty, so callers can gracefully skip BM25.
         """
+        self._bm25_built_at = time.monotonic()
         try:
             from rank_bm25 import BM25Okapi
         except ImportError:
@@ -219,7 +224,9 @@ class HybridSearcher:
             return
 
         docs = all_data.get("documents", []) if all_data else []
+        metas = (all_data.get("metadatas") if all_data else None) or [{} for _ in docs]
         self._all_docs = docs
+        self._all_meta = [m or {} for m in metas]
         if not docs:
             self._bm25_index = None
             return
@@ -232,24 +239,30 @@ class HybridSearcher:
         (called whenever documents are added or removed)."""
         self._bm25_index = None
         self._all_docs = []
+        self._all_meta = []
+
+    def _index_stale(self) -> bool:
+        built = getattr(self, "_bm25_built_at", None)
+        return built is None or (time.monotonic() - built) > self.BM25_TTL_SECONDS
 
     def search(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> List[Dict]:
         """Search using both BM25 and vector similarity, then re-rank.
 
-        Returns top_k results ranked by combined score.
+        Candidates = vector top-(2k) UNION BM25 top-k (so exact keyword hits
+        such as IDs, error codes or names surface even when the embedding
+        misses them). Both candidate sets are restricted to ``owner``.
+        Returns top_k results ranked by combined score (then the reranker).
         If BM25 is unavailable, falls back to vector-only search.
-        ``owner`` restricts the vector candidates to one tenant's chunks.
         """
         # Get vector results (semantic)
         vector_results = call_with_owner(
             self._store.search, query, top_k=top_k * 2, owner=owner
         )
 
-        # Get BM25 results (keyword) — build lazily, may stay None
-        if self._bm25_index is None:
+        # Get BM25 results (keyword) - build lazily / refresh when stale
+        if self._bm25_index is None or self._index_stale():
             self._build_bm25_index()
 
-        # If BM25 is available, compute and merge scores by content match
         if self._bm25_index is not None and self._all_docs:
             tokenized_query = query.lower().split()
             bm25_scores = self._bm25_index.get_scores(tokenized_query)
@@ -257,27 +270,47 @@ class HybridSearcher:
             # Normalize BM25 scores to [0, 1]
             max_bm25 = float(max(bm25_scores)) if len(bm25_scores) else 1.0
             if max_bm25 > 0:
-                bm25_norm = [s / max_bm25 for s in bm25_scores]
+                bm25_norm = [float(s) / max_bm25 for s in bm25_scores]
             else:
                 bm25_norm = [0.0] * len(bm25_scores)
 
-            # Build a content -> bm25_score lookup so we can match
-            # vector results (which are a subset) to their BM25 scores.
             content_to_bm25 = {}
             for doc, score in zip(self._all_docs, bm25_norm):
-                content_to_bm25[doc] = score
+                content_to_bm25[doc] = max(score, content_to_bm25.get(doc, 0.0))
 
-            # Combine vector + BM25 scores
             combined = []
+            seen = set()
             for vec_result in vector_results:
                 content = vec_result.get("content", "")
-                bm25_score = content_to_bm25.get(content, 0.0)
+                seen.add(content)
+                combined.append({**vec_result, "bm25_score": content_to_bm25.get(content, 0.0)})
+
+            # Keyword-only candidates (same tenant only).
+            metas = getattr(self, "_all_meta", None) or [{} for _ in self._all_docs]
+            ranked = sorted(range(len(self._all_docs)), key=lambda i: bm25_norm[i], reverse=True)
+            added = 0
+            for i in ranked:
+                if added >= top_k or bm25_norm[i] <= 0:
+                    break
+                doc = self._all_docs[i]
+                meta = metas[i] if i < len(metas) else {}
+                doc_owner = (meta or {}).get("owner") or None
+                if owner is not None and doc_owner != owner:
+                    continue
+                if doc in seen:
+                    continue
+                seen.add(doc)
+                added += 1
                 combined.append({
-                    **vec_result,
-                    "bm25_score": bm25_score,
+                    "content": doc,
+                    "file": meta.get("file", "unknown"),
+                    "owner": doc_owner,
+                    "chunk_index": meta.get("chunk_index", 0),
+                    "similarity": 0.0,
+                    "bm25_score": bm25_norm[i],
                 })
         else:
-            # BM25 unavailable — use vector results with bm25_score = 0
+            # BM25 unavailable - use vector results with bm25_score = 0
             combined = [
                 {**r, "bm25_score": 0.0} for r in vector_results
             ]

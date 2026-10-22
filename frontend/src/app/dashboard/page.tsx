@@ -2,24 +2,13 @@
 
 import { AppShell } from "@/components/layout/app-shell";
 import { EnhancedChatInterface } from "@/components/chat/EnhancedChatInterface";
-import { useChatStore } from "@/store/chat-store";
 
 export default function DashboardPage() {
-  const { messages, currentConversationId } = useChatStore();
-
+  // The chat reads messages / conversation / DSA options from the shared
+  // chat store, so switching conversations in the sidebar updates it live.
   return (
     <AppShell>
-      {/* key forces a fresh chat component when switching conversations */}
-      <EnhancedChatInterface
-        key={currentConversationId || "new"}
-        conversationId={currentConversationId}
-        initialMessages={messages.map((m) => ({
-          id: m.id,
-          role: m.role,
-          content: m.content,
-          timestamp: new Date(m.timestamp),
-        }))}
-      />
+      <EnhancedChatInterface />
     </AppShell>
   );
 }

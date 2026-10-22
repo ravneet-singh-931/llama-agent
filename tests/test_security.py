@@ -213,14 +213,14 @@ class TestInputValidation:
             email="test@test.com",
             password="strongpassword123"
         )
-        assert len(valid.password) >= 4
+        assert len(valid.password) >= 8
 
         # Too short
         with pytest.raises(ValidationError):
             RegisterRequest(
                 username="testuser",
                 email="test@test.com",
-                password="ab"
+                password="short12"  # 7 chars: below the 8-char minimum
             )
 
         print("  ✅ Password strength enforced")

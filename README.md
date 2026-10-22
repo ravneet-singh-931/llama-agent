@@ -66,13 +66,22 @@ AI:   "Japan has a vending machine culture, with over 5.5 million vending
 The deployed API uses **OptimizedRAG** — a drop-in replacement for the basic RAG
 pipeline that layers seven production-grade optimizations on top of ChromaDB:
 
-1. **Hybrid Search** — BM25 keyword + dense-vector retrieval, fused
-2. **Cross-Encoder Reranker** — re-ranks candidates by true relevance
-3. **Contextual Retrieval** — LLM-generated context per chunk (semantic chunking)
-4. **Query Decomposition** — splits complex questions into sub-questions
-5. **Corrective RAG (CRAG)** — self-checks retrieval and retries on weak context
-6. **Conversational Retrieval** — history-aware answers across turns
-7. **Semantic Cache** — near-duplicate questions return the cached answer (skips the LLM)
+1. **Hybrid Search** — BM25 keyword (`rank_bm25`) + dense-vector retrieval; keyword-only
+   hits (IDs, error codes, names) are added as candidates, always restricted to the
+   requesting user's documents. The BM25 index is rebuilt on upload/delete and every
+   `RAG_BM25_TTL` seconds (so other replicas' uploads become searchable).
+2. **Reranker** — `BAAI/bge-reranker-base` cross-encoder when `sentence-transformers` is
+   installed (not in the default image: it pulls in PyTorch); otherwise a fast keyword
+   reranker is used automatically.
+3. **Contextual Retrieval** — LLM-generated summary per document prepended to each
+   semantic chunk (summaries are cached; restarts skip already-indexed files)
+4. **Query Decomposition** — splits complex questions into sub-questions (`RAG_DECOMPOSE=1`)
+5. **Corrective RAG (CRAG)** — verifies the answer against the context and retries with a
+   reformulated query when it is unsupported (`RAG_CRAG=1`)
+6. **Conversational Retrieval** — follow-ups ("what about the other file?") are rewritten
+   into standalone queries using the chat history (`RAG_QUERY_REWRITE`, on by default)
+7. **Semantic Cache** — near-duplicate questions return the cached answer (per user;
+   invalidated when that user's documents change)
 
 It is activated with the `USE_OPTIMIZED_RAG=true` environment variable (already set
 in `k8s/api.yaml` and `docker-compose.yml`). The HTTP API (`POST /documents/ask`)
@@ -97,9 +106,11 @@ cd llama-agent
 ### 2️⃣ Deploy — choose your path
 
 #### ☸️ Kubernetes (this repo's live deployment)
-1. **Add secrets** — open `k8s/secrets.yaml` and replace every `REPLACE_ME_*` placeholder
-   with a real value (Groq key, JWT secret, Postgres password, Grafana password, Tavily key).
-   > 🔐 These are placeholders only; real values are supplied at deploy time and never committed.
+1. **Add secrets** — create the same `secrets/*.txt` files as in the Docker Compose path
+   below (Groq key, JWT secret, Postgres password, Grafana password, optional Tavily key).
+   `deploy.sh` turns them into Kubernetes Secrets and **refuses to deploy** if a file is
+   missing, empty, or still a placeholder. (`k8s/secrets.yaml` is only a template.)
+   With `ESO_ENABLED=true` the Secrets come from AWS Secrets Manager instead.
 2. **Deploy:**
    ```bash
    ./k8s/deploy.sh
@@ -108,9 +119,9 @@ cd llama-agent
 4. **Open the app:**
    | Service | URL |
    |---------|-----|
-   | **Main App (Next.js)** | http://llama-agent.local/ |
-   | **API Docs (Swagger)** | http://llama-agent.local/api/docs |
-   | **Streamlit UI (legacy)** | http://llama-agent.local/streamlit/ |
+   | **Main App (Next.js)** | https://llama-agent.local/ |
+   | **API Docs (Swagger)** | https://llama-agent.local/api/docs |
+   | **Streamlit UI (legacy)** | https://llama-agent.local/streamlit/ |
 
 #### 🐳 Docker Compose (alternative — not running by default here)
 1. **Add your secrets** (never committed):
@@ -140,8 +151,8 @@ cd llama-agent
    |---------|-----|
    | **Main App (Next.js)** | http://localhost:3001 |
    | **API Docs (Swagger)** | http://localhost:8000/docs |
-   | **Streamlit UI (legacy)** | http://localhost:8501 |
-   | **Nginx (SSL/LB)** | https://localhost |
+   | **Streamlit UI (legacy)** | http://localhost:8501/streamlit/ |
+   | **Nginx (SSL/LB)** | https://localhost (self-signed cert generated on first start; put real certs in `config/nginx/ssl/`) |
 
 ### 3️⃣ Create an account
 1. Open the app → **Sign Up**
@@ -152,28 +163,17 @@ cd llama-agent
 
 ## 🛡️ Secure-by-default
 
-The committed `docker-compose.yml` publishes **only** the user-facing ports
-(`3001`, `8000`, `8501`, `80/443`). Infrastructure ports (Postgres, Redis,
-Phoenix, Grafana, Prometheus, Loki, node-exporter, MCP) are **internal to the
-Docker network** — cloned copies are secure out of the box.
+The committed `docker-compose.yml` publishes the user-facing ports
+(`3001`, `8000`, `8501`, `80/443`). The monitoring UIs are bound to **localhost only**
+(`127.0.0.1`), so you can open them on your own machine but nobody else can:
+Grafana http://localhost:3002, Prometheus http://localhost:9090,
+Phoenix http://localhost:6006. Postgres, Redis, Loki, node-exporter and the MCP server
+are **internal to the Docker network**.
 
 The Kubernetes deployment is locked down the same way: the ingress exposes only the
-app routes (`/`, `/api`, `/ws`, `/mcp`, `/streamlit`); observability (Phoenix, Prometheus,
-Grafana, Loki) runs internally and is **never published** to the public.
-
-For local debugging, the owner can add a **gitignored** override (this file is
-**not** committed and never ships to users):
-
-```yaml
-# docker-compose.override.yml (local only — DO NOT COMMIT)
-services:
-  phoenix:
-    ports: ["6006:6006"]
-  grafana:
-    ports: ["3002:3000"]
-  prometheus:
-    ports: ["9090:9090"]
-```
+app routes (`/`, `/api`, `/ws`, `/streamlit`). The MCP server is internal-only,
+`/metrics` refuses proxied requests, and the observability UIs sit behind basic-auth
+(or SSO with `OIDC_ENABLED=true`).
 
 ---
 
@@ -205,8 +205,8 @@ services:
 └──────────────┘ └──────────────────┘ └─────────────┘ └─────────────┘
                                  ▼
                         ┌────────────────┐
-                        │  Groq (LLMs)   │  llama-3.3-70b (strong)
-                        │                │  llama-3.1-8b (fast)
+                        │  Groq (LLMs)   │  qwen/qwen3.8-27b (strong)
+                        │                │  openai/gpt-oss-20b (fast)
                         └────────────────┘
         ┌───────────────────────────────┬───────────────────────────────┐
         ▼                               ▼                               ▼
@@ -280,12 +280,12 @@ Both keep ChromaDB cluster-internal (no published host port).
 | `llama-agent-web` | `web` | Streamlit UI (legacy) | **8501** |
 | `llama-agent-frontend` | `frontend` | Next.js 16 UI | **3001** |
 | `llama-agent-nginx` | `nginx` | SSL + Load Balancer + CDN headers | **80, 443** |
-| `llama-agent-prometheus` | `prometheus` | Metrics collection + alert rules | internal |
-| `llama-agent-grafana` | `grafana` | Monitoring dashboards | internal |
+| `llama-agent-prometheus` | `prometheus` | Metrics collection + alert rules | 127.0.0.1:9090 |
+| `llama-agent-grafana` | `grafana` | Monitoring dashboards | 127.0.0.1:3002 |
 | `llama-agent-loki` | `loki` | Log aggregation | internal |
 | `llama-agent-promtail` | `promtail` | Log shipping → Loki | internal |
 | `llama-agent-node-exporter` | `node-exporter` | System metrics | internal |
-| `llama-agent-phoenix` | `phoenix` | LLM observability (Arize Phoenix) | internal |
+| `llama-agent-phoenix` | `phoenix` | LLM observability (Arize Phoenix) | 127.0.0.1:6006 |
 
 ---
 
@@ -293,14 +293,15 @@ Both keep ChromaDB cluster-internal (no published host port).
 
 | Feature | Description |
 |---------|-------------|
-| 🔑 **JWT Authentication** | Secure signup/login with token-based auth |
+| 🔑 **JWT Authentication** | HttpOnly-cookie JWTs (short-lived access + refresh), bearer tokens for scripts |
+| 👥 **Multi-user isolation** | Per-user (and per-guest) history, facts, documents, RAG caches and WebSocket sessions |
 | 🔐 **Docker Secrets** | API keys mounted at `/run/secrets/*` — never in code or images |
 | 📁 **File Validation** | Upload type/size checks + threat scanning |
 | 🚦 **Rate Limiting** | Per-IP/per-user limits with configurable thresholds |
 | 🛡️ **Brute-Force Protection** | Automatic IP/username lockout after repeated failures |
 | 🛡️ **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options |
 | 🧼 **Input Sanitization** | SQL injection / XSS / command-injection detection |
-| 🛡️ **CSRF Protection** | Token-based request validation |
+| 🛡️ **CSRF Protection** | `SameSite=Lax` HttpOnly auth cookies + same-origin API |
 | 📝 **Audit Logging** | Login, registration, uploads, rate-limit events |
 | 🔒 **Secure-by-default** | Infra ports never published to the host in committed config |
 
@@ -308,7 +309,7 @@ Both keep ChromaDB cluster-internal (no published host port).
 
 ## ✅ Verification
 
-I verified the core flows (chat, agent routing, RAG, upload, MCP, monitoring) end-to-end in the browser, and confirmed the **multi-replica state fix**: `remember` on one replica is visible to `list facts` on another, and document `search` / `list documents` return consistent results across both API replicas (shared Redis + shared ChromaDB server). The 14 tools / 5 agents are covered by the passing test suite (`257 passed, 0 failed`).
+I verified the core flows (chat, agent routing, RAG, upload, MCP, monitoring) end-to-end in the browser, and confirmed the **multi-replica state fix**: `remember` on one replica is visible to `list facts` on another, and document `search` / `list documents` return consistent results across both API replicas (shared Redis + shared ChromaDB server). The 14 tools / 5 agents are covered by the passing test suite (`290 passed, 17 deselected`).
 
 ## 🔐 Security & Cloud Hardening
 
@@ -411,20 +412,24 @@ In addition:
 
 ## 🔌 API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/auth/register` | Create account |
-| `POST` | `/auth/login` | Get JWT token |
-| `GET` | `/health` | Health check |
-| `POST` | `/chat` | Send message |
-| `POST` | `/chat/stream` | SSE streaming chat |
-| `WebSocket` | `/ws/{user_id}` | Real-time chat |
-| `GET` | `/mcp/status` | MCP server + tools status |
-| `POST` | `/mcp/tools` | Invoke an MCP agent tool (e.g. `coder_agent`) |
-| `GET` | `/documents` | Uploaded-document listing |
-| `GET` | `/monitoring/dashboard` | Business metrics, costs, SLA, alerts |
-| `GET` | `/metrics` | Prometheus metrics |
-| `GET` | `/metrics/json` | Metrics as JSON |
+Full reference: [API_DOCUMENTATION.md](API_DOCUMENTATION.md) (or `/docs` on the API).
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| `POST` | `/auth/register`, `/auth/login` | – | Create account / log in (sets HttpOnly cookies) |
+| `POST` | `/auth/refresh`, `/auth/logout` | – | Renew access cookie / log out |
+| `GET` | `/health` | – | Health check |
+| `POST` | `/chat`, `/chat/stream` | optional | Chat (SSE stream); `agent` = research/coder/writer/analyzer/planner/team |
+| `POST` | `/ws/ticket` → `WebSocket /ws/x?ticket=…` | login | Real-time chat |
+| `GET/POST` | `/documents`, `/documents/upload`, `/documents/ask` | optional | Per-user RAG |
+| `GET/POST/DELETE` | `/conversations…`, `/facts…`, `/memory` | optional | Per-user history & facts |
+| `GET` | `/mcp/status` · `POST` `/mcp/tools` | optional · login | MCP server status / run a tool |
+| `GET` | `/metrics` | internal | Prometheus (404 through proxies) |
+| `GET` | `/metrics/json`, `/monitoring/dashboard` | admin | Metrics JSON, costs, SLA, alerts |
+
+"optional" endpoints work for guests (each browser gets its own private `guest_id`).
+Admin endpoints need `users.is_admin = true`
+(`UPDATE users SET is_admin = true WHERE username = '...';`).
 
 ---
 
@@ -435,11 +440,19 @@ In addition:
 | `GROQ_API_KEY_FILE` | Path to Groq API key (Docker secret) | `/run/secrets/groq_api_key` |
 | `JWT_SECRET_KEY_FILE` | Path to JWT secret (Docker secret) | `/run/secrets/jwt_secret_key` |
 | `TAVILY_API_KEY_FILE` | Path to Tavily key (Docker secret) | `/run/secrets/tavily_api_key` |
-| `DATABASE_URL` | PostgreSQL async connection | `postgresql+asyncpg://postgres:...` |
+| `DATABASE_URL` | PostgreSQL async connection — **without** a password; it is injected from `POSTGRES_PASSWORD(_FILE)` | `postgresql+asyncpg://postgres@postgres:5432/llama_agent` |
+| `POSTGRES_PASSWORD_FILE` / `POSTGRES_PASSWORD` | Postgres password (Docker secret / k8s Secret) | `/run/secrets/postgres_password` |
 | `REDIS_URL` | Redis connection (also the shared fact store) | `redis://redis:6379` |
 | `CHROMA_SERVER_URL` | ChromaDB server for the shared vector index (all replicas) | unset → local `PersistentClient` |
-| `LLM_MODEL_STRONG` | Strong model (agents, one-shot answers, RAG) | `llama-3.3-70b-versatile` |
-| `LLM_MODEL_FAST` | Fast model (streaming chat, reformulation) | `llama-3.1-8b-instant` |
+| `LLM_MODEL_STRONG` | Strong model (agents, one-shot answers, RAG) | `qwen/qwen3.8-27b` |
+| `LLM_MODEL_FAST` | Fast model (streaming chat, reformulation, 429 fallback) | `openai/gpt-oss-20b` |
+| `JWT_EXPIRE_MINUTES` / `JWT_REFRESH_EXPIRE_DAYS` | Access / refresh token lifetime | `30` / `7` |
+| `USE_OPTIMIZED_RAG` | Hybrid BM25+vector search, reranker, contextual chunks, semantic cache | `true` (Compose/k8s) |
+| `RAG_CRAG` / `RAG_DECOMPOSE` / `RAG_QUERY_REWRITE` | Corrective-RAG answer check / sub-question decomposition / follow-up rewrite | `0` / `0` / `1` |
+| `RAG_BM25_TTL` | Seconds before the BM25 keyword index is rebuilt (picks up other replicas' uploads) | `300` |
+| `GROQ_PRICING` | JSON price overrides for cost tracking, e.g. `{"qwen/qwen3.8-27b":{"input":0.2,"output":0.6}}` (USD / 1M tokens) | built-in Groq list prices |
+| `METRICS_ALLOW_PROXIED` | `1` = serve `/metrics` even through a proxy (off: proxied requests get 404) | `0` |
+| `SSL_CN` | Common name for the auto-generated self-signed Nginx cert | `localhost` |
 | `MCP_SERVER_URL` | MCP agent server base URL (SSE) | `http://mcp-server:8001/sse` (k8s: `http://llama-agent-mcp-server-service:8001/sse`) |
 | `ENVIRONMENT` | `development` or `production` | `production` |
 | `LLM_PROVIDER_CHAIN` | **(Point 9)** Ordered providers to try, comma-separated; Groq appended as fallback | `groq` |
@@ -471,7 +484,7 @@ llama-agent/
 │   ├── memory.py             # Per-user conversation memory
 │   ├── mcp_client.py         # MCP client (SSE → agent server)
 │   └── secrets.py            # Docker-secret reader (env/file fallback)
-├── tests/                    # 200+ tests (257 passing, pytest)
+├── tests/                    # 300+ tests (290 passing, pytest)
 ├── config/
 │   ├── nginx/                # SSL + reverse proxy config
 │   ├── prometheus/           # Metrics + alert rules
@@ -496,8 +509,9 @@ pytest tests/ -q -m "not mcp"
 pytest tests/ -q
 ```
 
-**Current status:** 265 passing, 17 deselected (`-m "not mcp"`), across 9 test
-modules — covering security hardening, rate limiting, monitoring, RAG,
+**Current status:** 290 passing, 17 deselected (`-m "not mcp"`), across 11 test
+modules (including `test_multitenancy.py`: tenant isolation, guest identity, WS
+tickets, metrics exposure, hybrid search, cost tracking, streaming) — covering security hardening, rate limiting, monitoring, RAG,
 multi-agent routing/streaming, the Phoenix span-instrumentation path, and the
 Point 9 multi-provider LLM chain/fallback logic.
 
@@ -511,18 +525,25 @@ PostgreSQL, Redis, secrets, namespace, and ingress.
 ```bash
 ./k8s/deploy.sh            # one-command deploy (kubectl + nginx ingress)
 
-# or step by step
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/secrets.yaml          # replace placeholders with real values!
-kubectl apply -f k8s/postgres.yaml k8s/redis.yaml
-kubectl apply -f k8s/api.yaml k8s/mcp-server.yaml k8s/web.yaml k8s/frontend.yaml
-kubectl apply -f k8s/ingress.yaml
 ```
 
+`deploy.sh` applies the namespace first, installs optional operators (cert-manager / ESO)
+and waits for their CRDs, creates Secrets from `secrets/*.txt`, then rolls out infra →
+app → ingress → monitoring → backups/HPA/PDB → NetworkPolicies.
+
 > **Note:** add `llama-agent.local` → ingress IP to your `hosts` file. Ingress routes
-> `/` → Next.js, `/api/*` + `/ws/*` → API, `/mcp/*` → MCP, `/streamlit/*` → Streamlit.
-> Images come from Docker Hub (`ravneet231/llama-agent*`) — build & push first, and
-> **replace all placeholders in `k8s/secrets.yaml`** before applying.
+> `/` → Next.js, `/api/*` → API (prefix stripped), `/ws/*` → API WebSocket,
+> `/streamlit/*` → Streamlit. MCP stays internal.
+> Images come from Docker Hub (`ravneet231/llama-agent*`). CI pushes `:latest`, `:v7` and an
+> immutable `:<git sha>`; the CD job runs `kubectl set image …:<sha>` so every deploy
+> actually rolls out (and `kubectl rollout undo` works).
+>
+> **Upgrading an existing cluster:** uploads moved from a PVC to the shared ChromaDB
+> index, so the old `uploads-pvc` can be removed: `kubectl -n llama-agent delete pvc uploads-pvc`.
+>
+> **Staging vs production:** give the GitHub `staging` and `production` environments
+> their own `KUBE_CONFIG` (and app secrets) as *environment* secrets, so the two deploy
+> jobs never target the same cluster.
 
 > ⚠️ **Port 80 clash:** the Compose stack's `nginx` service also binds host port
 > 80/443, which conflicts with the Kubernetes ingress. Run **either** Compose

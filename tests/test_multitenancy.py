@@ -402,3 +402,167 @@ def test_expired_access_cookie_is_silently_refreshed(api_client):
     new_access = r.cookies.get("access_token")
     assert new_access
     assert jwt_manager.verify_token(new_access)["type"] == "access"
+
+
+def test_prometheus_metrics_hidden_behind_proxy(api_client, monkeypatch):
+    api, TestClient = api_client
+    c = TestClient(api.app)
+    monkeypatch.delenv("METRICS_ALLOW_PROXIED", raising=False)
+    # Direct scrape (Prometheus on the internal network): allowed.
+    assert c.get("/metrics").status_code == 200
+    # Through Nginx / ingress / Next.js rewrite (adds X-Forwarded-For): hidden.
+    assert c.get("/metrics", headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 404
+    monkeypatch.setenv("METRICS_ALLOW_PROXIED", "1")
+    assert c.get("/metrics", headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 200
+
+
+def test_hybrid_bm25_adds_keyword_hits_for_same_owner_only():
+    from modules.rag_optimizations import HybridSearcher
+
+    docs = [
+        "alpha report quarterly revenue",            # alice, vector hit
+        "error code ZX-4471 means disk quota",       # alice, keyword-only
+        "error code ZX-4471 secret bob runbook",     # bob, keyword-only
+    ]
+    metas = [
+        {"file": "a.txt", "owner": "alice", "chunk_index": 0},
+        {"file": "b.txt", "owner": "alice", "chunk_index": 0},
+        {"file": "c.txt", "owner": "bob", "chunk_index": 0},
+    ]
+
+    class FakeCollection:
+        def get(self, include=None):
+            return {"documents": docs, "metadatas": metas}
+
+    class FakeStore:
+        collection = FakeCollection()
+
+        def search(self, query, top_k=5, owner=None):
+            return [{"content": docs[0], "file": "a.txt", "owner": "alice",
+                     "chunk_index": 0, "similarity": 0.4}]
+
+    hs = HybridSearcher(vector_store=FakeStore(), reranker=None)
+    res = hs.search("ZX-4471", top_k=3, owner="alice")
+    contents = [r["content"] for r in res]
+    assert docs[1] in contents          # keyword-only hit surfaced
+    assert docs[2] not in contents      # other tenant never leaks
+    assert all(r.get("owner") in ("alice",) for r in res)
+
+
+def test_llm_usage_is_costed_and_route_labels_are_templates(api_client):
+    api, TestClient = api_client
+    from modules.prometheus_metrics import record_llm_usage
+    from modules.advanced_monitoring import cost_tracker
+
+    before = cost_tracker.usage["total_cost"]
+    cost = record_llm_usage("openai/gpt-oss-20b", 1_000_000, 1_000_000)
+    assert abs(cost - (0.075 + 0.30)) < 1e-9
+    assert cost_tracker.usage["total_cost"] - before >= cost - 1e-9
+
+    c = TestClient(api.app)
+    c.get("/conversations/some-random-id-123")
+    body = c.get("/metrics").text
+    assert "some-random-id-123" not in body
+    assert 'llama_agent_llm_cost_usd_total{model="openai/gpt-oss-20b"}' in body
+
+
+def test_aiter_in_thread_does_not_block_event_loop():
+    import asyncio
+    import time as _t
+    import api
+
+    def slow_tokens():
+        for i in range(3):
+            _t.sleep(0.15)  # blocking network read in the real Groq stream
+            yield f"t{i}"
+
+    async def main():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        tk = asyncio.create_task(ticker())
+        out = [t async for t in api._aiter_in_thread(slow_tokens)]
+        tk.cancel()
+        return out, ticks
+
+    out, ticks = asyncio.run(main())
+    assert out == ["t0", "t1", "t2"]
+    assert ticks > 10  # loop kept running while tokens were produced
+
+
+def _sse_text(body: str):
+    import json as _json
+    events, text = [], ""
+    for line in body.splitlines():
+        if not line.startswith("data: "):
+            continue
+        data = line[6:]
+        if data.strip() == "[DONE]":
+            break
+        if data.startswith("{"):
+            try:
+                events.append(_json.loads(data))
+                continue
+            except ValueError:
+                pass
+        text += data
+    return events, text
+
+
+def test_stream_agent_override_and_team(api_client, monkeypatch):
+    api, TestClient = api_client
+    import multi_agent
+
+    calls = []
+
+    class FakeAgent:
+        def __init__(self, key):
+            self.name = key.title()
+            self.key = key
+
+        def execute_stream(self, task):
+            calls.append((self.key, task))
+            yield {"type": "token", "content": f"[{self.key}]"}
+
+        def critique(self, task, text):
+            return ""
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.agents = {k: FakeAgent(k) for k in api.AGENT_KEYS}
+
+        def collaborate_stream(self, task):
+            calls.append(("team", task))
+            for k in ("research", "writer"):
+                yield {"type": "agent_start", "agent": k.title(), "step": k}
+                yield {"type": "token", "content": f"<{k}>"}
+                yield {"type": "agent_done", "agent": k.title(), "step": k, "content": k}
+            yield {"type": "final", "content": "FINAL"}
+
+    monkeypatch.setattr(multi_agent, "MultiAgentOrchestrator", FakeOrchestrator)
+    monkeypatch.setenv("GROQ_API_KEY", os.getenv("GROQ_API_KEY") or "test-key")
+    from modules.memory import ConversationMemory, FactMemory
+    monkeypatch.setattr(api.app.state, "memory", ConversationMemory(), raising=False)
+    monkeypatch.setattr(api.app.state, "facts", FactMemory(), raising=False)
+    c = TestClient(api.app)
+
+    # Explicit agent from the UI wins even without routing keywords.
+    r = c.post("/chat/stream", json={"message": "hello there friend", "agent": "coder",
+                                     "use_critic": False})
+    events, text = _sse_text(r.text)
+    assert "[coder]" in text
+    assert events[0]["type"] == "config" and events[0]["agent"] == "coder"
+
+    # "@team" runs the whole collaboration, with agent_start/agent_done events.
+    r = c.post("/chat/stream", json={"message": "@team plan a product launch", "use_critic": False})
+    events, text = _sse_text(r.text)
+    assert ("team" in [k for k, _ in calls])
+    assert "plan a product launch" in [t for k, t in calls if k == "team"][0]
+    assert "<research>" in text and "<writer>" in text
+    assert [e["type"] for e in events].count("agent_start") == 2
+    assert api.detect_team_prefix("@team") == (False, "@team")

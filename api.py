@@ -422,7 +422,8 @@ class RegisterRequest(BaseModel):
     """User registration request"""
     username: str = Field(..., min_length=3, max_length=50, pattern=r'^[a-zA-Z0-9_-]+$')
     email: EmailStr
-    password: str = Field(..., min_length=4, max_length=128)
+    # New accounts need >= 8 chars (login still accepts older, shorter ones).
+    password: str = Field(..., min_length=8, max_length=128)
     full_name: Optional[str] = Field(default=None, max_length=100)
 
 
@@ -1221,6 +1222,17 @@ def detect_agent_prefix(message: str) -> tuple:
     if m:
         return _AGENT_PREFIX_MAP[m.group(1).lower()], m.group(2)
     return None, message
+
+
+_TEAM_PREFIX_RE = re.compile(r"^@\s*team\b[\s:,-]*(.*)", re.IGNORECASE | re.DOTALL)
+
+
+def detect_team_prefix(message: str) -> tuple:
+    """'@team build a launch plan' -> (True, 'build a launch plan')."""
+    m = _TEAM_PREFIX_RE.match(message.strip())
+    if m and m.group(1).strip():
+        return True, m.group(1).strip()
+    return False, message
 
 
 # ---------- shared multi-agent routing keywords (tight, intent-based) ---------
@@ -2463,6 +2475,59 @@ async def chat_stream(
         from multi_agent import MultiAgentOrchestrator
 
         use_multi_agent, agent_type = route_multi_agent(request.message)
+        team_mode, team_task = detect_team_prefix(request.message)
+        if (agent_override or "").lower() == "team":
+            team_mode = True
+        elif agent_override in AGENT_KEYS:
+            # An explicit agent picked in the UI always wins over keyword routing.
+            use_multi_agent, agent_type = True, agent_override
+
+        if team_mode:
+            # "@team ..." / agent=team: plan a DAG and run the whole agent team,
+            # streaming each agent's tokens with agent_start/agent_done events.
+            await _persist_message(user_id, conversation_id, "user", request.message)
+            orchestrator = MultiAgentOrchestrator()
+            task = await _with_context(team_task, memory, user_id, conversation_id)
+            yield (
+                "data: "
+                + json.dumps({"type": "reasoning", "stage": "route",
+                              "content": "Collaborating with the full agent team"})
+                + "\n\n"
+            )
+            final_text = ""
+            streamed = ""
+            used_agents = set()
+            try:
+                async for ev in _aiter_in_thread(lambda: orchestrator.collaborate_stream(task)):
+                    if time.monotonic() - start > STREAM_MAX_DURATION:
+                        yield f"data: {escape_sse(f'⚠️ Stream timed out after {int(STREAM_MAX_DURATION)}s.')}\n\n"
+                        break
+                    etype = ev.get("type")
+                    if etype == "token":
+                        streamed += ev.get("content", "")
+                        yield f"data: {escape_sse(ev.get('content', ''))}\n\n"
+                    elif etype == "tool":
+                        yield f"data: {escape_sse(ev.get('content', ''))}\n\n"
+                    elif etype == "agent_start":
+                        used_agents.add(ev.get("agent"))
+                        header = f"\n\n### {ev.get('agent', 'Agent')}\n\n"
+                        streamed += header
+                        yield "data: " + json.dumps({"type": "agent_start", "agent": ev.get("agent"), "step": ev.get("step")}) + "\n\n"
+                        yield f"data: {escape_sse(header)}\n\n"
+                    elif etype == "agent_done":
+                        yield "data: " + json.dumps({"type": "agent_done", "agent": ev.get("agent"), "step": ev.get("step")}) + "\n\n"
+                    elif etype == "final":
+                        final_text = ev.get("content", "")
+            except Exception as e:
+                logging.getLogger(__name__).exception("team collaboration failed")
+                err = "⚠️ The agent team could not complete this task."
+                streamed += "\n\n" + err
+                yield f"data: {escape_sse(err)}\n\n"
+            await _record_agent_usage(sorted(
+                k for k, a in orchestrator.agents.items() if a.name in used_agents))
+            await _persist_message(user_id, conversation_id, "assistant", final_text or streamed)
+            yield "data: [DONE]\n\n"
+            return
 
         if use_multi_agent:
             # Stream the agent-team run: tool activity first, then answer
@@ -2478,6 +2543,7 @@ async def chat_stream(
             _, clean_message = detect_agent_prefix(request.message)
             task = await _with_context(clean_message, memory, user_id, conversation_id)
             agent = orchestrator.agents[agent_type]
+            await _record_agent_usage([agent_type])
             yield (
                 "data: "
                 + json.dumps(
@@ -2491,7 +2557,7 @@ async def chat_stream(
             )
             full = ""
             try:
-                for event in agent.execute_stream(task):
+                async for event in _aiter_in_thread(lambda: agent.execute_stream(task)):
                     if time.monotonic() - start > STREAM_MAX_DURATION:
                         yield f"data: {escape_sse(f'⚠️ Stream timed out after {int(STREAM_MAX_DURATION)}s.')}\n\n"
                         break
@@ -2534,13 +2600,13 @@ async def chat_stream(
                 + "\n\n"
             )
             full_response = ""
-            for token in run_agent_stream(
+            async for token in _aiter_in_thread(lambda: run_agent_stream(
                 request.message,
                 memory=memory,
                 facts=facts,
                 user_id=user_id,
                 conversation_id=conversation_id,
-            ):
+            )):
                 if time.monotonic() - start > STREAM_MAX_DURATION:
                     yield f"data: {escape_sse(f'⚠️ Stream timed out after {int(STREAM_MAX_DURATION)}s.')}\n\n"
                     break
@@ -2571,6 +2637,63 @@ def escape_sse(text: str) -> str:
     line framing). Escape both so multi-line tokens stream safely.
     """
     return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
+class _StreamFailure:
+    __slots__ = ("exc",)
+
+    def __init__(self, exc: BaseException):
+        self.exc = exc
+
+
+_STREAM_END = object()
+
+
+async def _aiter_in_thread(make_iter):
+    """Consume a *blocking* iterator (Groq token streams, agent tool loops)
+    on a worker thread and yield its items asynchronously.
+
+    Iterating a sync generator directly inside an async SSE generator blocks
+    the event loop for every network read, stalling all other users' requests
+    and streams. The worker carries the caller's contextvars (tenant/owner).
+    If the consumer stops early (client disconnect, timeout) the worker is
+    told to stop at the next item; the queue is unbounded so it never blocks.
+    """
+    import threading
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    stop = threading.Event()
+    ctx = contextvars.copy_context()
+
+    def _put(item):
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+        except RuntimeError:  # loop closed
+            stop.set()
+
+    def _worker():
+        try:
+            for item in make_iter():
+                if stop.is_set():
+                    break
+                _put(item)
+        except BaseException as e:  # surfaced to the consumer
+            _put(_StreamFailure(e))
+        finally:
+            _put(_STREAM_END)
+
+    loop.run_in_executor(None, ctx.run, _worker)
+    try:
+        while True:
+            item = await queue.get()
+            if item is _STREAM_END:
+                return
+            if isinstance(item, _StreamFailure):
+                raise item.exc
+            yield item
+    finally:
+        stop.set()
 
 
 # ============ FACTS ENDPOINTS ============

@@ -7,9 +7,9 @@ groups:
   # ---- Application Alerts ----
   - name: llama_agent_app
     rules:
-      # Alert: API is down (no requests for 2 minutes)
+      # Alert: API is down (scrape failing, or target missing entirely)
       - alert: ApiDown
-        expr: absent(up{job="llama-agent-api"})
+        expr: up{job="llama-agent-api"} == 0 or absent(up{job="llama-agent-api"})
         for: 2m
         labels:
           severity: critical
@@ -17,6 +17,17 @@ groups:
         annotations:
           summary: "API is DOWN"
           description: "Llama Agent API has not been reachable for 2 minutes."
+
+      # Alert: estimated Groq spend > $10 over 24h (llama_agent_llm_cost_usd_total)
+      - alert: HighLLMSpend
+        expr: sum(increase(llama_agent_llm_cost_usd_total[24h])) > 10
+        for: 10m
+        labels:
+          severity: warning
+          service: llama-agent
+        annotations:
+          summary: "LLM spend above $10 in 24h"
+          description: "Estimated Groq spend over the last 24h is ${{ $value | printf \"%.2f\" }}."
 
       # Alert: High error rate (>5 errors/sec for 5 minutes)
       - alert: HighErrorRate

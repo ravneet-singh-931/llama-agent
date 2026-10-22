@@ -1,508 +1,253 @@
 # Llama Agent API Documentation
 
+The interactive OpenAPI docs are always the source of truth:
+`/docs` (Swagger UI) and `/openapi.json` on the API (through Nginx: `https://<host>/docs`).
+
 ## Base URL
 
-```
-http://localhost:8000
-```
+| How you run it | Base URL |
+|---|---|
+| API directly (dev) | `http://localhost:8000` |
+| Behind Nginx (Compose) / Ingress (k8s) | `https://<host>/api` (the `/api` prefix is stripped) |
+| Next.js frontend | same-origin `/api` (rewritten to the API) |
 
 ## Authentication
 
-All endpoints (except `/health` and `/auth/*`) require a JWT token in the header:
+Browsers use **HttpOnly cookies**. `POST /auth/login` and `POST /auth/register` set
+`access_token` (short-lived, `JWT_EXPIRE_MINUTES`, default 30) and `refresh_token`
+(`JWT_REFRESH_EXPIRE_DAYS`, default 7). An expired access cookie is renewed
+automatically from the refresh cookie on the next request. You can also call
+`POST /auth/refresh` yourself.
 
-```
-Authorization: Bearer <your_jwt_token>
-```
+Scripts and other non-browser clients can send `Authorization: Bearer <access_token>`.
+
+Auth levels used below:
+
+| Level | Meaning |
+|---|---|
+| **public** | No identity needed |
+| **optional** | Works anonymously. Anonymous visitors get a per-browser `guest_id` cookie, so each guest has private history, facts and documents. When logged in, data belongs to your user. |
+| **login** | Requires a logged-in user (`401` otherwise) |
+| **admin** | Requires a user with `is_admin = true` (`403` otherwise) |
+
+To make an admin, set the flag in Postgres:
+`UPDATE users SET is_admin = true WHERE username = 'alice';`
+
+Every user's data is isolated: history, facts, uploaded documents, RAG and semantic caches, and WebSocket sessions.
 
 ---
 
 ## Endpoints
 
-### 1. Health Check
+### Health & info
 
-Check if the API is running.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/` | public | Name, version, feature list |
+| GET | `/health` | public | `{status, uptime, version, modules}` |
+| GET | `/tools` | public | Tools available to the ReAct agent |
+| GET | `/ws/status` | public | `{total_connections, total_users}` (no identities) |
 
-```
-GET /health
-```
+### Auth
 
-**Response:**
+| Method | Path | Auth | Body | Response |
+|---|---|---|---|---|
+| POST | `/auth/register` | public | `{username, email, password, full_name?}` | `{status:"ok", user}` + cookies |
+| POST | `/auth/login` | public | `{username, password}` (username **or** email) | `{status:"ok", user}` + cookies |
+| POST | `/auth/refresh` | public | `{}` or `{refresh_token}` (cookie used by default) | `{status:"ok"}` + new access cookie |
+| POST | `/auth/logout` | public | – | clears cookies |
+| GET | `/auth/me` | login | – | `{user: {id, username, email, is_admin, ...}}` |
+
+Validation:
+- `username`: 3–50 characters from `[A-Za-z0-9_-]`.
+- `email`: a valid email.
+- `password`: 8–128 characters.
+
+Login is brute-force protected: 5 failures lock the account for 15 minutes (`429`).
+
+### Chat
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/chat` | optional | One-shot answer: `{response, timestamp, tools_used, response_time}` |
+| POST | `/chat/stream` | optional | Server-Sent Events stream (used by the frontend) |
+
+Request body (`ChatRequest`):
+
 ```json
 {
-  "status": "healthy",
-  "version": "1.0.0",
-  "timestamp": "2026-07-23T10:00:00Z"
+  "message": "Plan a product launch",
+  "conversation_id": "optional-id",
+  "agent": "planner",
+  "use_critic": true,
+  "use_reflection": false,
+  "use_parallel": true
 }
 ```
 
-**Status Codes:**
-- `200` — API is healthy
-- `503` — API is down
+- `agent` selects the agent explicitly. It is one of `research`, `coder`, `writer`, `analyzer`, `planner`, or `team` (the whole team collaborates). When omitted, the message is routed automatically.
+- A message starting with `@team ...` also runs the whole team.
+- `@Coder Agent ...` (and the other agent names) selects a single agent.
+- `use_*` override the server's DSA defaults.
+
+**SSE format** (`/chat/stream`): each event is a line `data: <payload>` followed by a blank line.
+- Plain-text payloads are answer tokens. Newlines are escaped as `\n`.
+- JSON payloads are structured events:
+  - `{"type":"config","critic":..,"reflection":..,"parallel":..,"agent":..}`: the configuration that actually ran.
+  - `{"type":"reasoning","stage":"route|critic|...","content":"..."}`: a reasoning step.
+  - `{"type":"agent_start","agent":"Research","step":"s1"}` and `{"type":"agent_done",...}`: team progress.
+- `data: [DONE]` ends the stream.
+
+Special chat commands: `remember key = value`, `recall key`, `show facts`, `search <query>`.
+
+### Facts & memory
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/remember` | optional | `{key, value}`: store a fact |
+| POST | `/recall` | optional | `{key}` → `{key, value}` |
+| GET | `/facts` | optional | `{facts: {key: value}}` |
+| DELETE | `/facts/{key}` | optional | Delete one fact (URL-encode the key) |
+| GET | `/memory?limit=50` | optional | `{stats, recent_messages}` |
+| DELETE | `/memory` | optional | Clear your conversation memory |
+
+### Conversations (sidebar history)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/conversations?limit=50&offset=0` | optional | `{conversations: [...], total, limit, offset}` |
+| GET | `/conversations/{id}` | optional | Conversation with `messages` |
+| POST | `/conversations` | optional | `{title?}`: create a conversation |
+| DELETE | `/conversations/{id}` | optional | Delete a conversation |
+
+### Documents (RAG)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/documents/upload` | optional | multipart `file`; indexed for **you only** |
+| GET | `/documents` | optional | `{documents: ["report.pdf", ...]}` |
+| POST | `/documents/search` | optional | `{query, top_k (1–20, default 3)}` → `{query, results}` |
+| POST | `/documents/ask` | optional | `{query}` → `{query, answer}` (RAG + LLM) |
+| POST | `/documents/read?file_path=report.pdf` | optional | Index one of *your* uploads by name |
+
+Upload limits:
+- Maximum size is 10 MB.
+- Allowed types: `.txt .md .py .json .csv .pdf .docx`.
+- Executables and scripts are rejected.
+
+There is no document-delete endpoint. Re-uploading a file with the same name replaces it.
+
+### Agents & MCP
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/agents/stats` | optional | Tasks handled per agent + API health |
+| GET | `/mcp/status` | optional | MCP server info + tool list |
+| POST | `/mcp/tools` | **login** | `{name, arguments}`: run an MCP tool (LLM cost) |
+
+The MCP server itself (`mcp-server:8001`) is internal-only. Nginx and the Ingress do not expose it.
+
+### WebSocket
+
+1. `POST /ws/ticket` (**login**) returns `{ticket}`, which is single-use and valid for 60 s.
+2. Connect to `wss://<host>/ws/<anything>?ticket=<ticket>`.
+
+Identity is **never** taken from the path. Without a ticket, the server uses the access cookie if present, and otherwise the browser's guest id. An invalid ticket or token closes the socket with code `1008`.
+
+- Client → server: `{"type": "chat", "data": {"content": "Hello"}}`, `{"type": "typing"}`, `{"type": "heartbeat"}`, `{"type": "history"}`
+- Server → client: `connect` (welcome), `response` (`{"data": {"content": "..."}}`), `typing`, `agent_status`, `history`, `heartbeat`, `error`
+
+With more than one API replica, tickets require Redis (`REDIS_URL`); otherwise each pod only knows its own tickets.
+
+### Monitoring
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/metrics` | public, **internal only** | Prometheus format. Returns `404` when the request came through a proxy (`X-Forwarded-For` present), so it is never public. Set `METRICS_ALLOW_PROXIED=1` to opt out. |
+| GET | `/metrics/json` | admin | JSON metrics |
+| GET | `/monitoring/dashboard` | admin | Business metrics, LLM cost, SLA, security counters |
+
+Useful Prometheus series:
+- `llama_agent_requests_total{method,endpoint}`: `endpoint` is the route template, e.g. `/conversations/{conversation_id}`.
+- `llama_agent_response_time_seconds_bucket`
+- `llama_agent_llm_tokens_total{model,kind}`
+- `llama_agent_llm_cost_usd_total{model}`
 
 ---
 
-### 2. Register User
-
-Create a new account.
-
-```
-POST /auth/register
-```
-
-**Request Body:**
-```json
-{
-  "username": "ravneet",
-  "password": "securepassword123"
-}
-```
-
-**Response:**
-```json
-{
-  "message": "User created successfully",
-  "user_id": 1
-}
-```
-
-**Status Codes:**
-- `201` — Account created
-- `400` — Username already exists
-- `422` — Invalid input (username too short, password too weak)
-
-**Validation Rules:**
-- Username: 3-50 characters, alphanumeric + underscore
-- Password: 8-100 characters
-
----
-
-### 3. Login
-
-Get a JWT token for authentication.
-
-```
-POST /auth/login
-```
-
-**Request Body:**
-```json
-{
-  "username": "ravneet",
-  "password": "securepassword123"
-}
-```
-
-**Response:**
-```json
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "token_type": "bearer",
-  "expires_in": 86400
-}
-```
-
-**Status Codes:**
-- `200` — Login successful
-- `401` — Invalid username or password
-
-**Usage:**
-```bash
-# Save token
-TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-
-# Use in subsequent requests
-curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/chat
-```
-
----
-
-### 4. Send Chat Message
-
-Send a message to the AI and get a response.
-
-```
-POST /chat
-Authorization: Bearer <token>
-```
-
-**Request Body:**
-```json
-{
-  "message": "What is the refund policy?",
-  "context": {
-    "document_ids": ["doc_123", "doc_456"]
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "response": "Based on the uploaded documents, our refund policy allows returns within 30 days of purchase...",
-  "sources": [
-    {
-      "document": "refund_policy.pdf",
-      "similarity": 0.85,
-      "chunk": "Refund Policy: All products can be returned within 30 days..."
-    }
-  ],
-  "metadata": {
-    "model": "llama3-8b-8192",
-    "tokens_used": 256,
-    "processing_time_ms": 1200
-  }
-}
-```
-
-**Status Codes:**
-- `200` — Success
-- `401` — Invalid or expired token
-- `422` — Invalid input
-
----
-
-### 5. WebSocket Chat
-
-Real-time streaming chat connection.
-
-```
-WebSocket: ws://localhost:8000/ws/{token}
-```
-
-**Connection:**
-```javascript
-const token = "your_jwt_token";
-const ws = new WebSocket(`ws://localhost:8000/ws/${token}`);
-
-ws.onopen = () => {
-  console.log("Connected!");
-  ws.send(JSON.stringify({
-    message: "What is the refund policy?"
-  }));
-};
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log(data.response); // Streaming response chunks
-};
-
-ws.onclose = () => {
-  console.log("Disconnected");
-};
-```
-
-**Message Format (Client → Server):**
-```json
-{
-  "message": "What is the refund policy?",
-  "context": {
-    "document_ids": ["doc_123"]
-  }
-}
-```
-
-**Message Format (Server → Client):**
-```json
-{
-  "type": "chunk",
-  "content": "Based on "
-}
-```
-```json
-{
-  "type": "chunk",
-  "content": "the uploaded "
-}
-```
-```json
-{
-  "type": "complete",
-  "full_response": "Based on the uploaded documents...",
-  "metadata": {
-    "tokens_used": 256
-  }
-}
-```
-
-**Status Codes:**
-- `101` — Connection upgraded (success)
-- `4001` — Invalid token
-- `4002` — Token expired
-
----
-
-### 6. Upload Document
-
-Upload a file for the AI to read.
-
-```
-POST /documents/upload
-Authorization: Bearer <token>
-Content-Type: multipart/form-data
-```
-
-**Request Body (Form Data):**
-```
-file: @refund_policy.pdf
-```
-
-**Response:**
-```json
-{
-  "message": "Document uploaded and processed",
-  "document_id": "doc_123",
-  "filename": "refund_policy.pdf",
-  "chunks_created": 15,
-  "file_size_kb": 245
-}
-```
-
-**Status Codes:**
-- `201` — Document uploaded
-- `400` — Invalid file type
-- `413` — File too large (max 50MB)
-
-**Supported File Types:**
-- PDF (`.pdf`)
-- Text (`.txt`)
-- CSV (`.csv`)
-- Markdown (`.md`)
-- JSON (`.json`)
-
----
-
-### 7. List Documents
-
-Get all uploaded documents for the current user.
-
-```
-GET /documents
-Authorization: Bearer <token>
-```
-
-**Response:**
-```json
-{
-  "documents": [
-    {
-      "id": "doc_123",
-      "filename": "refund_policy.pdf",
-      "file_type": "pdf",
-      "file_size_kb": 245,
-      "chunks_created": 15,
-      "uploaded_at": "2026-07-23T10:00:00Z"
-    },
-    {
-      "id": "doc_456",
-      "filename": "product_manual.txt",
-      "file_type": "txt",
-      "file_size_kb": 120,
-      "chunks_created": 8,
-      "uploaded_at": "2026-07-23T11:00:00Z"
-    }
-  ],
-  "total": 2
-}
-```
-
----
-
-### 8. Delete Document
-
-Remove a document from the system.
-
-```
-DELETE /documents/{document_id}
-Authorization: Bearer <token>
-```
-
-**Response:**
-```json
-{
-  "message": "Document deleted",
-  "document_id": "doc_123"
-}
-```
-
-**Status Codes:**
-- `200` — Document deleted
-- `404` — Document not found
-
----
-
-### 9. Get Chat History
-
-Retrieve conversation history for the current user.
-
-```
-GET /history
-Authorization: Bearer <token>
-Query Parameters:
-  - limit: Number of messages (default: 50)
-  - offset: Pagination offset (default: 0)
-```
-
-**Response:**
-```json
-{
-  "messages": [
-    {
-      "id": 1,
-      "role": "user",
-      "content": "What is the refund policy?",
-      "timestamp": "2026-07-23T10:00:00Z"
-    },
-    {
-      "id": 2,
-      "role": "assistant",
-      "content": "Based on the uploaded documents...",
-      "timestamp": "2026-07-23T10:00:02Z",
-      "metadata": {
-        "tokens_used": 256
-      }
-    }
-  ],
-  "total": 2,
-  "has_more": false
-}
-```
-
----
-
-### 10. Get Metrics
-
-Prometheus metrics endpoint (no auth required).
-
-```
-GET /metrics
-```
-
-**Response:**
-```
-# HELP http_requests_total Total HTTP requests
-# TYPE http_requests_total counter
-http_requests_total{method="POST",endpoint="/chat",status="200"} 150
-
-# HELP http_request_duration_seconds Request duration
-# TYPE http_request_duration_seconds histogram
-http_request_duration_seconds_bucket{le="0.1"} 120
-http_request_duration_seconds_bucket{le="0.5"} 145
-...
-```
-
----
-
-## Error Responses
-
-All errors follow this format:
+## Errors
 
 ```json
-{
-  "detail": "Error message explaining what went wrong"
-}
+{ "detail": "Error message" }
 ```
-
-**Common Error Codes:**
 
 | Code | Meaning |
-|------|---------|
-| `400` | Bad request - check your input |
-| `401` | Unauthorized - login again |
-| `403` | Forbidden - you don't have access |
-| `404` | Not found - resource doesn't exist |
-| `413` | Payload too large - file is too big |
-| `422` | Validation error - check field constraints |
-| `429` | Rate limited - slow down |
-| `500` | Server error - try again later |
+|---|---|
+| 400 | Bad request (e.g. rejected upload) |
+| 401 | Not logged in / token invalid |
+| 403 | Not allowed (admin only) |
+| 404 | Not found |
+| 422 | Validation error |
+| 429 | Rate limited (`retry_after` seconds) or login locked |
+| 500 | Server error |
 
----
+## Rate limits
 
-## Rate Limits
+Rate limits apply per client IP, across all endpoints except `/`, `/health` and `/metrics`:
+- 60 requests per minute.
+- 1000 requests per hour.
 
-| Endpoint | Limit | Window |
-|----------|-------|--------|
-| `/auth/login` | 5 requests | 1 minute |
-| `/auth/register` | 3 requests | 1 minute |
-| `/chat` | 30 requests | 1 minute |
-| `/documents/upload` | 10 requests | 1 minute |
-
-**Rate Limit Headers:**
-```
-X-RateLimit-Limit: 30
-X-RateLimit-Remaining: 25
-X-RateLimit-Reset: 1690108800
-```
-
----
-
-## WebSocket Events
-
-| Event | Direction | Description |
-|-------|-----------|-------------|
-| `connect` | Client → Server | Establish connection |
-| `message` | Client → Server | Send chat message |
-| `chunk` | Server → Client | Streaming response chunk |
-| `complete` | Server → Client | Response finished |
-| `error` | Server → Client | Error occurred |
-| `ping` | Both | Keep-alive |
+With `REDIS_URL` set, the limits are shared across replicas.
 
 ---
 
 ## Examples
 
+### cURL (cookie jar)
+
+```bash
+# Register (or /auth/login) and keep the cookies
+curl -c jar.txt -H "Content-Type: application/json" \
+  -d '{"username":"ravneet","email":"r@example.com","password":"a-long-password"}' \
+  http://localhost:8000/auth/register
+
+# Chat
+curl -b jar.txt -H "Content-Type: application/json" \
+  -d '{"message":"What is the refund policy?"}' http://localhost:8000/chat
+
+# Upload, then ask
+curl -b jar.txt -F file=@refund_policy.pdf http://localhost:8000/documents/upload
+curl -b jar.txt -H "Content-Type: application/json" \
+  -d '{"query":"How many days do I have to return an item?"}' \
+  http://localhost:8000/documents/ask
+```
+
 ### Python
+
 ```python
 import requests
 
-# Login
-response = requests.post("http://localhost:8000/auth/login", json={
-    "username": "ravneet",
-    "password": "securepassword123"
-})
-token = response.json()["access_token"]
-
-# Chat
-response = requests.post("http://localhost:8000/chat",
-    headers={"Authorization": f"Bearer {token}"},
-    json={"message": "What is the refund policy?"}
-)
-print(response.json()["response"])
+s = requests.Session()                       # keeps the auth cookies
+s.post("http://localhost:8000/auth/login",
+       json={"username": "ravneet", "password": "a-long-password"}).raise_for_status()
+print(s.post("http://localhost:8000/chat",
+             json={"message": "@team plan a product launch"}).json()["response"])
 ```
 
-### JavaScript
+### JavaScript (browser, same origin)
+
 ```javascript
-// Login
-const loginRes = await fetch("http://localhost:8000/auth/login", {
+await fetch("/api/auth/login", {
   method: "POST",
+  credentials: "include",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ username: "ravneet", password: "securepassword123" })
+  body: JSON.stringify({ username: "ravneet", password: "a-long-password" }),
 });
-const { access_token } = await loginRes.json();
-
-// Chat
-const chatRes = await fetch("http://localhost:8000/chat", {
+const res = await fetch("/api/chat", {
   method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "Authorization": `Bearer ${access_token}`
-  },
-  body: JSON.stringify({ message: "What is the refund policy?" })
+  credentials: "include",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ message: "What is the refund policy?", agent: "research" }),
 });
-const { response } = await chatRes.json();
-console.log(response);
-```
-
-### cURL
-```bash
-# Login
-TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"ravneet","password":"securepassword123"}' \
-  | jq -r '.access_token')
-
-# Chat
-curl -X POST http://localhost:8000/chat \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"message":"What is the refund policy?"}'
+console.log((await res.json()).response);
 ```

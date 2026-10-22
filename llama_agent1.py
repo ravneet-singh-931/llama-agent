@@ -211,12 +211,23 @@ class GroqLLM(LLM):
             raw=response,
         )
 
+    def _record_usage(self, usage: Any) -> None:
+        if usage is None:
+            return
+        try:
+            from modules.prometheus_metrics import record_llm_usage
+            get = (lambda k: usage.get(k)) if isinstance(usage, dict) else (lambda k: getattr(usage, k, 0))
+            record_llm_usage(self.model, get("prompt_tokens") or 0, get("completion_tokens") or 0)
+        except Exception:
+            pass
+
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
         response = self._client.chat.completions.create(
             model=self.model,
             messages=self._format_messages(messages),
             **kwargs,
         )
+        self._record_usage(getattr(response, "usage", None))
         return self._parse_response(response)
 
     async def achat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
@@ -240,9 +251,17 @@ class GroqLLM(LLM):
         )
         def generate():
             for chunk in response:
-                if chunk.choices[0].delta.content:
+                # Groq reports token usage on the final chunk (x_groq.usage);
+                # that chunk may carry no choices at all.
+                x_groq = getattr(chunk, "x_groq", None)
+                usage = getattr(chunk, "usage", None) or (
+                    getattr(x_groq, "usage", None) if x_groq is not None else None)
+                if usage is not None:
+                    self._record_usage(usage)
+                choices = getattr(chunk, "choices", None) or []
+                if choices and choices[0].delta.content:
                     yield CompletionResponse(
-                        text=chunk.choices[0].delta.content,
+                        text=choices[0].delta.content,
                         raw=chunk,
                     )
         return generate()

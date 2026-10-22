@@ -57,8 +57,10 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   output: "standalone",
   env: {
-    NEXT_PUBLIC_API_URL:
-      process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
+    // Same-origin "/api" by default: the rewrite below proxies it to FastAPI,
+    // so HttpOnly auth cookies work and the CSP (connect-src 'self') allows it.
+    // Never default to http://localhost:8000 - that is the *user's* machine.
+    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || "/api",
   },
   // Proxy /api/* to the FastAPI backend so the standalone Next.js server
   // (port 3001) works without Nginx in front. Nginx also proxies /api/* to

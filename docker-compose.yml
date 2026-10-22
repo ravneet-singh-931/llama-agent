@@ -304,6 +304,8 @@ services:
       # Optional real certs (cert.pem/key.pem). If absent, the container
       # generates a self-signed cert on start (config/nginx/ensure-cert.sh).
       - ./config/nginx/ssl:/etc/nginx/ssl-provided:ro
+    environment:
+      - SSL_CN=${SSL_CN:-localhost}  # CN of the auto-generated self-signed cert
     depends_on:
       - api
       - web

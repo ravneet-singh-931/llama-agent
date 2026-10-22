@@ -61,6 +61,52 @@ START_TIME = Gauge(
 )
 
 
+LLM_TOKENS = Counter(
+    "llama_agent_llm_tokens_total",
+    "LLM tokens consumed (Groq)",
+    ["model", "kind"],  # kind = input | output
+)
+
+LLM_COST = Counter(
+    "llama_agent_llm_cost_usd_total",
+    "Estimated LLM spend in USD (Groq list prices)",
+    ["model"],
+)
+
+
+def record_llm_usage(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Record one LLM call's token usage in Prometheus + the CostTracker
+    (/monitoring/dashboard). Never raises - metrics must not break chat."""
+    try:
+        input_tokens = int(input_tokens or 0)
+        output_tokens = int(output_tokens or 0)
+        if not (input_tokens or output_tokens):
+            return 0.0
+        from modules.advanced_monitoring import cost_tracker
+        try:
+            from modules.request_context import get_owner
+            user = get_owner() or "anonymous"
+        except Exception:
+            user = "anonymous"
+        cost = cost_tracker.record_usage(model or "unknown", input_tokens, output_tokens,
+                                         user_id=user)
+        LLM_TOKENS.labels(model=model or "unknown", kind="input").inc(input_tokens)
+        LLM_TOKENS.labels(model=model or "unknown", kind="output").inc(output_tokens)
+        LLM_COST.labels(model=model or "unknown").inc(cost)
+        return cost
+    except Exception:
+        return 0.0
+
+
+def _route_label(request: Request) -> str:
+    """Use the matched route TEMPLATE (/conversations/{conversation_id}), not
+    the raw path, so label cardinality stays bounded (raw ids / scanner
+    paths would create unbounded time series)."""
+    route = request.scope.get("route")
+    path = getattr(route, "path", None) or getattr(route, "path_format", None)
+    return path or "unmatched"
+
+
 def init_metrics():
     """Initialize metrics on app startup."""
     START_TIME.set(time.time())
@@ -81,7 +127,6 @@ async def prometheus_middleware(request: Request, call_next):
         return await call_next(request)
 
     method = request.method
-    endpoint = request.url.path
 
     ACTIVE_CONNECTIONS.inc()
     start = time.time()
@@ -89,6 +134,7 @@ async def prometheus_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
         elapsed = time.time() - start
+        endpoint = _route_label(request)
 
         # Track request count
         REQUEST_COUNT.labels(method=method, endpoint=endpoint).inc()
