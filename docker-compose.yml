@@ -157,7 +157,10 @@ services:
     ports:
       - "8000:8000"  # Publish 8000 to host (for direct access, though Nginx also proxies)
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent  # Postgres via service name
+      # No password in the URL: modules/secrets.resolve_database_url injects
+      # the real one from POSTGRES_PASSWORD_FILE (same secret postgres uses)
+      - DATABASE_URL=postgresql+asyncpg://postgres@postgres:5432/llama_agent  # Postgres via service name
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
       - REDIS_URL=redis://redis:6379  # Redis via service name
       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key  # Read from secret file
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key
@@ -166,8 +169,9 @@ services:
       # Enable 7-feature OptimizedRAG pipeline (Hybrid Search, Cross-Encoder Reranker, etc.)
       - USE_OPTIMIZED_RAG=true
       # Tiered defaults for one-shot answers/agents and streaming
-      - LLM_MODEL_STRONG=qwen/qwen3.8-27b
-      - LLM_MODEL_FAST=qwen/qwen3.8-27b
+      # Override via .env; FAST should be a smaller/cheaper model than STRONG
+      - LLM_MODEL_STRONG=${LLM_MODEL_STRONG:-qwen/qwen3.8-27b}
+      - LLM_MODEL_FAST=${LLM_MODEL_FAST:-openai/gpt-oss-20b}
       # Shared ChromaDB server so every api replica uses SAME vector index
       - CHROMA_SERVER_URL=http://chromadb:8000  # ChromaDB service DNS
     secrets:
@@ -211,18 +215,22 @@ services:
     ports:
       - "8501:8501"  # Publish Streamlit port
     environment:
-       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/llama_agent
-       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
-       - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
-         - LLM_MODEL_STRONG=qwen/qwen3.8-27b
-         - LLM_MODEL_FAST=qwen/qwen3.8-27b
+      - DATABASE_URL=postgresql+asyncpg://postgres@postgres:5432/llama_agent
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - POSTGRES_HOST=postgres  # app.py connects with psycopg2 via POSTGRES_* vars
+      - REDIS_URL=redis://redis:6379
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
+      - LLM_MODEL_STRONG=${LLM_MODEL_STRONG:-qwen/qwen3.8-27b}
+      - LLM_MODEL_FAST=${LLM_MODEL_FAST:-openai/gpt-oss-20b}
     secrets:
       - groq_api_key
       - tavily_api_key
       - postgres_password
     depends_on:
       - api  # Wait for api (though not strictly needed, but ensures DB is ready)
-    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0  # Override Dockerfile CMD
+    # baseUrlPath=streamlit so it works behind Nginx at /streamlit/
+    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.baseUrlPath=streamlit
     volumes:
       - ./data:/app/data
       - ./data/memory:/app/memory  # Same shared memory as api
@@ -241,10 +249,10 @@ services:
     container_name: llama-agent-mcp
     restart: unless-stopped
     environment:
-       - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
-       - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
-       - LLM_MODEL_STRONG=qwen/qwen3.8-27b
-       - LLM_MODEL_FAST=qwen/qwen3.8-27b
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
+      - LLM_MODEL_STRONG=${LLM_MODEL_STRONG:-qwen/qwen3.8-27b}
+      - LLM_MODEL_FAST=${LLM_MODEL_FAST:-openai/gpt-oss-20b}
     secrets:
       - groq_api_key
       - tavily_api_key

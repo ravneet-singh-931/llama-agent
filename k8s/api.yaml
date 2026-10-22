@@ -84,15 +84,16 @@ spec:
 
           # image: Docker image for the API
           #   - Built by CI (.github/workflows/main.yml) on every main push
-          #   - Tag :v7 is pinned (Point 4: immutable, not :latest which drifts)
-          #   - For max reproducibility, use digest: ravneet231/llama-agent@sha256:...
+          #   - CD (.github/workflows/main.yml) pushes an immutable tag per commit
+          #     (:<git sha>) and rolls it out with `kubectl set image`, so every
+          #     deploy is a real, traceable rollout. :v7 is only the bootstrap tag.
           image: ravneet231/llama-agent:v7
 
           # imagePullPolicy: When to pull image
           #   - IfNotPresent: Only pull if not already cached on node
           #   - Always: Always pull (for :latest)
           #   - Never: Never pull (for local images)
-          #   - Here, IfNotPresent + :v7 means re-pushed :v7 needs `kubectl rollout restart`
+          #   - Safe here because CD always deploys a NEW immutable sha tag
           imagePullPolicy: IfNotPresent
 
           # command: Override Docker CMD (what to run)
@@ -117,6 +118,15 @@ spec:
                   name: app-secrets
                   key: database-url
 
+            # POSTGRES_PASSWORD: the SAME secret Postgres was initialised with.
+            #   modules/secrets.resolve_database_url injects it into DATABASE_URL,
+            #   so the app and the DB password can never drift apart.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secrets
+                  key: password
+
             # REDIS_URL: Redis connection, from Secret
             - name: REDIS_URL
               valueFrom:
@@ -138,6 +148,15 @@ spec:
                   name: app-secrets
                   key: jwt-secret-key
 
+            # TAVILY_API_KEY: optional web-search key (agents fall back to
+            #   DuckDuckGo when absent)
+            - name: TAVILY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: tavily-api-key
+                  optional: true
+
             # MCP_SERVER_URL: Where to find MCP agent server (Service DNS)
             #   - http://llama-agent-mcp-server-service:8001/sse
             #   - The API calls this for multi-agent tasks
@@ -150,7 +169,7 @@ spec:
 
             # LLM_MODEL_FAST: Fast model for streaming chat
             - name: LLM_MODEL_FAST
-              value: qwen/qwen3.8-27b
+              value: openai/gpt-oss-20b
 
             # ENVIRONMENT: Tells app it's in production (affects CORS, etc.)
             - name: ENVIRONMENT
@@ -175,11 +194,11 @@ spec:
           # resources: CPU/Memory for scheduling and limits
           resources:
             requests:
-              memory: "256Mi"  # Guaranteed
+              memory: "512Mi"  # Guaranteed (torch/chromadb client/BM25 live in RAM)
               cpu: "250m"      # 0.25 CPU
             limits:
-              memory: "512Mi"  # Max, else OOMKill
-              cpu: "500m"
+              memory: "1536Mi" # Max, else OOMKill (512Mi OOM-killed under RAG load)
+              cpu: "1000m"
 
           # startupProbe: Gives slow-starting app time to become ready
           #   - OptimizedRAG downloads embedding model (~80MB) on first boot
@@ -215,9 +234,13 @@ spec:
               mountPath: /app/logs     # Where logs are written
 
       volumes:
+        # uploads: scratch space only. Uploaded files are chunked + embedded
+        #   into the shared ChromaDB server (CHROMA_SERVER_URL), which is the
+        #   source of truth, so every replica sees every document. A RWO PVC
+        #   can't be mounted by 2-10 replicas spread over several nodes.
         - name: uploads
-          persistentVolumeClaim:
-            claimName: uploads-pvc  # PVC defined below (shared uploads)
+          emptyDir:
+            sizeLimit: 1Gi
         - name: logs
           emptyDir: {}  # Ephemeral (lost on Pod restart) — for logs shipped via Promtail
 
@@ -240,26 +263,3 @@ spec:
       targetPort: 8000  # Container port
       name: http
   type: ClusterIP  # Internal only (Ingress exposes it externally)
-
----
-# --------------------------------------------------------------------------
-# RESOURCE 3: PVC — Persistent Storage for Uploads
-# --------------------------------------------------------------------------
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: uploads-pvc
-  namespace: llama-agent
-spec:
-  accessModes:
-    - ReadWriteOnce  # One node read-write
-  resources:
-    requests:
-      storage: 1Gi  # 1Gi for uploaded PDFs, etc.
-
-# 💡 LEARNER TIP: Why 2 replicas but ReadWriteOnce PVC?
-#   ReadWriteOnce means only one node can mount it. If 2 Pods land on different
-#   nodes, one will fail to mount! Solutions:
-#   - Use ReadWriteMany (needs shared storage like NFS/EFS)
-#   - Or use object storage (S3) for uploads (better for production)
-#   - For Docker Desktop (single node), it's fine — both Pods on same node.

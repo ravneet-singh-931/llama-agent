@@ -19,6 +19,7 @@ import re
 import sys
 import time
 import uuid
+import contextvars
 from datetime import datetime, timezone
 from typing import Any, Optional, List, Dict
 from collections import OrderedDict
@@ -50,6 +51,7 @@ from modules.model_tiers import resolve_model, should_fallback
 from modules.auth import (
     get_current_user,
     optional_auth,
+    require_admin,
     user_manager,
     jwt_manager,
     authenticate_ws_token,
@@ -92,6 +94,8 @@ from modules.advanced_monitoring import (
 
 # Enterprise operations (feature flags, A/B testing, deployment tracking)
 from modules.cicd_improvements import feature_flags
+from modules.doc_scope import owner_dir_name, scoped
+from modules.request_context import bind_owner
 
 # Module logger (used by the best-effort Postgres/Redis persistence mirror)
 _log = logging.getLogger("llama_agent.api")
@@ -197,14 +201,32 @@ def heap_top_k(items, key=lambda x: x, k: int = 5):
     if k <= 0:
         return []
     heap = []
-    for it in items:
+    # (value, -seq, item): the sequence number breaks ties so the items
+    # themselves (often dicts, which are not orderable) are never compared,
+    # and among equal scores the EARLIER item wins (stable, deterministic).
+    for seq, it in enumerate(items):
         v = key(it)
+        entry = (v, -seq, it)
         if len(heap) < k:
-            heapq.heappush(heap, (v, it))
-        elif v > heap[0][0]:
-            heapq.heapreplace(heap, (v, it))
+            heapq.heappush(heap, entry)
+        elif (v, -seq) > heap[0][:2]:
+            heapq.heapreplace(heap, entry)
     # Min-heap -> return largest-first.
-    return [it for _, it in sorted(heap, reverse=True)]
+    heap.sort(key=lambda e: (e[0], e[1]), reverse=True)
+    return [it for _, _, it in heap]
+
+
+def chunk_score(chunk: Dict[str, Any]) -> float:
+    """Best available relevance signal for a retrieved chunk.
+
+    SimpleRAG emits ``relevance_score``; OptimizedRAG emits ``rerank_score``
+    (cross-encoder), ``similarity`` (vector) and ``bm25_score``.
+    """
+    for field in ("relevance_score", "rerank_score", "similarity", "bm25_score"):
+        val = chunk.get(field)
+        if isinstance(val, (int, float)):
+            return float(val)
+    return 0.0
 
 
 class BoundedLRUCache:
@@ -243,6 +265,52 @@ class BoundedLRUCache:
 
 # Fast in-memory LRU for repeated document questions (exact-match, TTL-bounded).
 _doc_answer_cache = BoundedLRUCache(maxsize=256, ttl=600)
+
+
+# ============ Request identity + per-user document scoping ============
+
+UPLOAD_ROOT = os.getenv("UPLOAD_DIR", "uploads")
+GUEST_COOKIE = "guest_id"
+_GUEST_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+# Set by guest_identity_middleware for every HTTP request.
+_guest_id_ctx: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "guest_id", default=None
+)
+# owner -> generation counter; bumped on upload so exact-match answer-cache
+# entries for that owner are never served after their documents change.
+_doc_generation: Dict[str, int] = {}
+
+
+def _guest_uid(guest_id: Optional[str]) -> str:
+    gid = guest_id if guest_id and _GUEST_ID_RE.match(guest_id) else uuid.uuid4().hex
+    return f"guest-{gid}"
+
+
+def _request_uid(user: Optional[Dict[str, Any]]) -> str:
+    """Stable identity for the current request, bound for downstream code.
+
+    - Registered user -> their UUID.
+    - Anonymous       -> "guest-<per-browser id>" from the HttpOnly guest
+      cookie, so two anonymous visitors NEVER share history, facts or
+      documents (pg_store skips persistence for non-UUID ids).
+    """
+    uid = str(user["id"]) if user and user.get("id") else _guest_uid(_guest_id_ctx.get())
+    bind_owner(uid)
+    return uid
+
+
+def _user_rag(user_id: str):
+    """app.state.rag scoped to one owner (see modules/doc_scope.py)."""
+    return scoped(app.state.rag, user_id)
+
+
+def _bump_doc_generation(user_id: str) -> None:
+    _doc_generation[user_id] = _doc_generation.get(user_id, 0) + 1
+
+
+def _doc_cache_key(rag, query: str) -> str:
+    owner = getattr(rag, "owner", None) or "_global"
+    return f"{owner}|{_doc_generation.get(owner, 0)}|{query}"
 
 
 def _match_fact_question(all_facts: Dict, message: str):
@@ -395,10 +463,8 @@ def _run_db_health_check() -> Dict:
         import psycopg2
         from modules.database_improvements import db_health_check
 
-        db_url = os.getenv(
-            "DATABASE_URL",
-            "postgresql+asyncpg://postgres:postgres@localhost:5432/llama_agent",
-        )
+        from modules.secrets import resolve_database_url
+        db_url = resolve_database_url()
         sync_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
         conn = psycopg2.connect(sync_url, connect_timeout=3)
         try:
@@ -467,19 +533,35 @@ async def lifespan(app: FastAPI):
     # answerer instead of general chat. In-memory like agent_stats.
     app.state.doc_followup = {}
     
-    # Re-index previously uploaded files so RAG knowledge survives restarts
-    # (SimpleRAG keeps its index in memory, but files persist on disk)
+    # Re-index previously uploaded files so RAG knowledge survives restarts.
+    # Uploads live in uploads/<owner>/<file>; each file is indexed for its
+    # owner only. Files already present in a shared/persistent vector store
+    # (e.g. ChromaDB server) are skipped, so restarts don't re-embed (or
+    # re-summarize via the LLM) everything.
     try:
-        uploads_dir = "uploads"
+        uploads_dir = UPLOAD_ROOT
         if os.path.isdir(uploads_dir):
-            for fname in sorted(os.listdir(uploads_dir)):
-                fpath = os.path.join(uploads_dir, fname)
-                if os.path.isfile(fpath):
+            legacy = [f for f in os.listdir(uploads_dir)
+                      if os.path.isfile(os.path.join(uploads_dir, f))]
+            if legacy:
+                print(f"⚠️  {len(legacy)} legacy upload(s) in {uploads_dir}/ have no owner "
+                      f"and are NOT indexed (re-upload them or move into {uploads_dir}/<user_id>/)")
+            for owner in sorted(os.listdir(uploads_dir)):
+                owner_path = os.path.join(uploads_dir, owner)
+                if not os.path.isdir(owner_path):
+                    continue
+                view = scoped(app.state.rag, owner)
+                for fname in sorted(os.listdir(owner_path)):
+                    fpath = os.path.join(owner_path, fname)
+                    if not os.path.isfile(fpath):
+                        continue
                     try:
-                        result = app.state.rag.add_document(fpath)
-                        print(f"📄 Re-indexed uploaded file: {fname} ({result})")
+                        if view.has_document(fname):
+                            continue
+                        result = view.add_document(fpath)
+                        print(f"📄 Re-indexed {owner}/{fname} ({result})")
                     except Exception as e:
-                        print(f"⚠️  Failed to re-index {fname}: {e}")
+                        print(f"⚠️  Failed to re-index {owner}/{fname}: {e}")
     except Exception as e:
         print(f"⚠️  Could not re-index uploads directory: {e}")
     
@@ -631,6 +713,64 @@ async def security_headers_middleware(request: Request, call_next):
         response.headers.setdefault(header, value)
     return response
 
+# Identity middleware: per-browser guest id + silent access-token refresh
+@app.middleware("http")
+async def identity_middleware(request: Request, call_next):
+    """
+    1. Guest identity: every browser gets an HttpOnly ``guest_id`` cookie,
+       so anonymous visitors are isolated from each other (history, facts,
+       documents, caches) instead of all sharing one "guest" bucket.
+    2. Silent refresh: when the short-lived access cookie is missing or
+       expired but a valid refresh cookie exists, mint a new access token,
+       inject it into THIS request (so auth dependencies see it) and set it
+       on the response. Logged-in users therefore don't silently degrade to
+       guests after ACCESS_TOKEN_EXPIRE_MINUTES.
+    """
+    cookies = request.cookies
+    new_guest: Optional[str] = None
+    guest_id = cookies.get(GUEST_COOKIE)
+    if not guest_id or not _GUEST_ID_RE.match(guest_id):
+        guest_id = new_guest = uuid.uuid4().hex
+    _guest_id_ctx.set(guest_id)
+
+    new_access: Optional[str] = None
+    path = request.url.path
+    if (not request.headers.get("authorization")
+            and not path.rstrip("/").endswith(("/auth/logout", "/auth/refresh"))):
+        access = cookies.get("access_token")
+        payload = jwt_manager.verify_token(access) if access else None
+        if not payload or payload.get("type") != "access":
+            refresh = cookies.get("refresh_token")
+            rpayload = jwt_manager.verify_token(refresh) if refresh else None
+            if rpayload and rpayload.get("type") == "refresh" and rpayload.get("sub"):
+                new_access = jwt_manager.create_access_token(data={"sub": rpayload["sub"]})
+
+    if new_guest or new_access:
+        merged = dict(cookies)
+        if new_guest:
+            merged[GUEST_COOKIE] = new_guest
+        if new_access:
+            merged["access_token"] = new_access
+        headers = [(k, v) for k, v in request.scope["headers"] if k != b"cookie"]
+        headers.append((b"cookie", "; ".join(f"{k}={v}" for k, v in merged.items()).encode("latin-1")))
+        request.scope["headers"] = headers
+
+    response = await call_next(request)
+
+    secure = _request_is_https(request)
+    if new_guest:
+        response.set_cookie(
+            key=GUEST_COOKIE, value=new_guest, httponly=True, secure=secure,
+            samesite="lax", max_age=30 * 86400, path="/",
+        )
+    if new_access:
+        response.set_cookie(
+            key="access_token", value=new_access, httponly=True, secure=secure,
+            samesite="lax", max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60, path="/",
+        )
+    return response
+
+
 # Prometheus metrics middleware
 @app.middleware("http")
 async def prometheus_middleware_handler(request: Request, call_next):
@@ -693,6 +833,18 @@ async def health_check():
 # ============ AUTH ENDPOINTS ============
 
 
+def _request_is_https(request: Optional[Request]) -> bool:
+    """True when the client reached us over HTTPS (directly or via ingress)."""
+    if request is None:
+        return False
+    proto = request.headers.get("x-forwarded-proto") or request.headers.get(
+        "x-forwarded-scheme"
+    )
+    if proto and proto.split(",")[0].strip().lower() == "https":
+        return True
+    return request.url.scheme == "https"
+
+
 def _set_auth_cookies(
     response: Response, access_token: str, refresh_token: str, request: Request = None
 ) -> None:
@@ -707,16 +859,7 @@ def _set_auth_cookies(
     The frontend talks to the API same-origin (via the Nginx/Next proxy), so
     `samesite="lax"` is sufficient and avoids the cross-site Secure requirement.
     """
-    is_https = False
-    if request is not None:
-        proto = request.headers.get("x-forwarded-proto") or request.headers.get(
-            "x-forwarded-scheme"
-        )
-        if proto:
-            is_https = proto.split(",")[0].strip().lower() == "https"
-        if not is_https and request.url.scheme == "https":
-            is_https = True
-    secure = is_https
+    secure = _request_is_https(request)
     response.set_cookie(
         key="access_token",
         value=access_token,
@@ -862,27 +1005,44 @@ async def get_me(user = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 _ws_tickets: Dict[str, Dict[str, Any]] = {}
 _WS_TICKET_TTL = 60  # seconds
+_WS_TICKET_PREFIX = "llama:wsticket:"
 
 
-def _issue_ws_ticket(user: Dict[str, Any]) -> Dict[str, Any]:
+async def _issue_ws_ticket(user: Dict[str, Any]) -> Dict[str, Any]:
+    """Issue a single-use ticket. Stored in Redis when configured (so a
+    ticket issued by one API replica can be redeemed on another), with an
+    in-memory fallback for single-process deployments."""
+    from modules import redis_store
+
     ticket = str(uuid.uuid4())
-    _ws_tickets[ticket] = {
+    record = {
         "user_id": str(user["id"]),
         "username": user.get("username", "Anonymous"),
-        "exp": time.monotonic() + _WS_TICKET_TTL,
-        "used": False,
     }
+    if redis_store.is_configured() and await redis_store.set_json(
+        _WS_TICKET_PREFIX + ticket, record, ttl=_WS_TICKET_TTL
+    ):
+        return {"ticket": ticket, "expires_in": _WS_TICKET_TTL}
+    # Opportunistic purge of expired in-memory tickets
+    now = time.monotonic()
+    for t in [t for t, r in _ws_tickets.items() if r["exp"] < now]:
+        _ws_tickets.pop(t, None)
+    _ws_tickets[ticket] = {**record, "exp": now + _WS_TICKET_TTL, "used": False}
     return {"ticket": ticket, "expires_in": _WS_TICKET_TTL}
 
 
-def _consume_ws_ticket(ticket: str) -> Optional[Dict[str, Any]]:
+async def _consume_ws_ticket(ticket: str) -> Optional[Dict[str, Any]]:
+    from modules import redis_store
+
     record = _ws_tickets.pop(ticket, None)
-    if record is None:
-        return None
-    if record["used"] or time.monotonic() > record["exp"]:
-        return None
-    record["used"] = True
-    return record
+    if record is not None:
+        if record["used"] or time.monotonic() > record["exp"]:
+            return None
+        record["used"] = True
+        return record
+    if redis_store.is_configured():
+        return await redis_store.pop_json(_WS_TICKET_PREFIX + ticket)
+    return None
 
 
 @app.post("/ws/ticket")
@@ -892,7 +1052,7 @@ async def ws_ticket(user=Depends(get_current_user)):
     The frontend calls this over HTTPS, then connects to the WebSocket with
     `?ticket=<ticket>` instead of embedding the JWT in the URL.
     """
-    return _issue_ws_ticket(user)
+    return await _issue_ws_ticket(user)
 
 
 @app.websocket("/ws/{user_id}")
@@ -905,14 +1065,13 @@ async def websocket_endpoint(
     """
     WebSocket endpoint for real-time chat
 
-    Connect: wss://<host>/ws/{user_id}?ticket=<ticket>
+    Connect: wss://<host>/ws/<anything>?ticket=<ticket>
 
-    Enterprise auth (prefer `ticket` over `token`):
-    - No token / ticket      -> anonymous connection (backwards compatible)
-    - Valid ticket           -> connected under the ticket's REAL identity
-    - Valid access token     -> connected under the caller's REAL identity
-                                  (username from the JWT, user_id from the JWT;
-                                  path user_id is NOT trusted)
+    Identity is NEVER taken from the path (kept only for URL compatibility):
+    - Valid ticket            -> the ticket's user
+    - Valid access token      -> the token's user (query param or cookie)
+    - Nothing                 -> anonymous: the browser's guest cookie id, or a
+                                 fresh random id (can't read anyone's history)
     - Invalid/expired ticket/token -> connection rejected (WS 1008)
 
     Messages (JSON):
@@ -921,7 +1080,7 @@ async def websocket_endpoint(
     """
     username = "Anonymous"
     if ticket:
-        record = _consume_ws_ticket(ticket)
+        record = await _consume_ws_ticket(ticket)
         if not record:
             await websocket.close(code=1008, reason="Invalid or expired ticket")
             return
@@ -935,17 +1094,24 @@ async def websocket_endpoint(
             return
         user_id = str(user["id"])
         username = user["username"]
+    else:
+        user = await authenticate_ws_token(websocket.cookies.get("access_token"))
+        if user:
+            user_id = str(user["id"])
+            username = user["username"]
+        else:
+            user_id = _guest_uid(websocket.cookies.get(GUEST_COOKIE))
 
+    bind_owner(user_id)
     handler = get_ws_handler()
     await handler.handle_connection(websocket, user_id, username)
 
 
 @app.get("/ws/status")
 async def websocket_status():
-    """Get WebSocket connection status"""
+    """WebSocket connection counts (no user identities are exposed)."""
     handler = get_ws_handler()
     return {
-        "online_users": handler.manager.get_online_users(),
         "total_connections": handler.manager.connection_count,
         "total_users": handler.manager.user_count,
     }
@@ -1777,16 +1943,22 @@ def _compare_documents(query: str, files, rag, client) -> str:
         return f"Could not compare the documents right now: {e}"
 
 
-def _retrieve_context(rag, query: str, top_k: int = 6) -> str:
+def _retrieve_context(rag, query: str, top_k: int = 6, history: str = "") -> str:
     """Retrieve the top-k most relevant chunks for a query, ranked with a heap.
 
-    Uses ``rag.search`` (scored chunks) + ``heap_top_k`` for O(n log k) ranking,
-    then formats the context. Falls back to ``rag.get_context`` (which returns
-    all documents when nothing matches) if ``search`` is unavailable or empty,
-    preserving the prior behavior exactly.
+    Uses ``rag.retrieve`` (OptimizedRAG: history-aware rewrite + optional
+    decomposition + hybrid/reranked search) or ``rag.search`` (scored
+    chunks), then ``heap_top_k`` for O(n log k) ranking on the best
+    available score (see ``chunk_score``). Falls back to ``rag.get_context``
+    (which returns all documents when nothing matches) if retrieval is
+    unavailable or empty.
     """
     try:
-        chunks = rag.search(query, top_k=top_k * 3)
+        retrieve = getattr(rag, "retrieve", None)
+        if callable(retrieve):
+            chunks = retrieve(query, history=history, top_k=top_k * 3)
+        else:
+            chunks = rag.search(query, top_k * 3)
     except Exception:
         chunks = []
     if not chunks:
@@ -1794,7 +1966,7 @@ def _retrieve_context(rag, query: str, top_k: int = 6) -> str:
             return rag.get_context(query, top_k=top_k)
         except Exception:
             return ""
-    top = heap_top_k(chunks, key=lambda c: c.get("relevance_score", 0), k=top_k)
+    top = heap_top_k(chunks, key=chunk_score, k=top_k)
     context = "Relevant document excerpts:\n\n"
     for c in top:
         context += (
@@ -1829,15 +2001,28 @@ def answer_from_documents(query: str, rag) -> str:
         return f"You have {len(files)} uploaded {label}:\n{listing}"
 
     # Fast in-memory LRU (exact-match, TTL-bounded) - checked before the LLM.
-    cached = _doc_answer_cache.get(query)
+    # Keyed by owner + that owner's upload generation: never cross-tenant,
+    # never stale after a re-upload.
+    cache_key = _doc_cache_key(rag, query)
+    cached = _doc_answer_cache.get(cache_key)
     if cached:
         return cached
 
-    # Semantic Cache: serve a cached answer if one exists (skips the LLM call)
-    cached = rag.get_cached_answer(query)
+    # Semantic Cache (owner-scoped): serve a cached answer if one exists
+    get_cached = getattr(rag, "get_cached_answer", None)
+    cached = get_cached(query) if callable(get_cached) else None
     if cached:
-        _doc_answer_cache.put(query, cached)
+        _doc_answer_cache.put(cache_key, cached)
         return cached
+
+    def _remember(answer: str) -> None:
+        cache = getattr(rag, "cache_answer", None)
+        if callable(cache):
+            try:
+                cache(query, answer)
+            except Exception:
+                pass
+        _doc_answer_cache.put(cache_key, answer)
 
     try:
         context = _retrieve_context(rag, query)
@@ -1863,8 +2048,13 @@ def answer_from_documents(query: str, rag) -> str:
 
     first = _ask_doc_question(client, query, context)
 
+    # Corrective RAG (RAG_CRAG=1, OptimizedRAG): an answer the verifier finds
+    # unsupported by the context is treated like a thin answer -> re-retrieve.
+    verify = getattr(rag, "verify_answer", None)
+    unsupported = callable(verify) and not verify(first, context)
+
     # Two-pass RAG: only retry when the first answer is actually thin.
-    if is_thin_answer(first):
+    if unsupported or is_thin_answer(first):
         reformulated = _reformulate_doc_query(query, context, client)
         if reformulated and reformulated.lower() != query.strip().lower():
             try:
@@ -1876,12 +2066,10 @@ def answer_from_documents(query: str, rag) -> str:
                 # substring of the first - i.e. nothing new was found).
                 combined = context if context2 in context else context + "\n\n" + context2
                 answer = _ask_doc_question(client, reformulated, combined)
-                rag.cache_answer(query, answer)
-                _doc_answer_cache.put(query, answer)
+                _remember(answer)
                 return answer
 
-    rag.cache_answer(query, first)
-    _doc_answer_cache.put(query, first)
+    _remember(first)
     return first
 
 
@@ -1897,9 +2085,9 @@ async def chat(
     monitor = app.state.monitor
     memory = app.state.memory
     facts = app.state.facts
-    rag = app.state.rag
     logger = app.state.logger
-    user_id = str(user["id"]) if user else "guest"
+    user_id = _request_uid(user)
+    rag = _user_rag(user_id)  # this caller's documents only
     # Per-user default conversation: two users must never share "default".
     # The storage layer also refuses to rebind a conversation to another user.
     conversation_id = request.conversation_id or _default_conversation_id(user_id)
@@ -2125,12 +2313,15 @@ async def chat_stream(
     # is saved to the same conversation history.
     memory = app.state.memory
     facts = app.state.facts
-    rag = app.state.rag
-    user_id = str(user["id"]) if user else "guest"
+    user_id = _request_uid(user)
+    rag = _user_rag(user_id)  # this caller's documents only
     # Per-user default conversation (never share the legacy "default" id).
     conversation_id = request.conversation_id or _default_conversation_id(user_id)
 
     async def event_generator():
+        # The body is iterated after the handler returns - re-bind the owner
+        # so agent tools / caches stay scoped to this caller.
+        bind_owner(user_id)
         # Hard cap on total stream duration (see STREAM_MAX_DURATION). The agent
         # streaming loops below are synchronous generators, so we check elapsed
         # time between yielded chunks and stop cleanly if the cap is exceeded.
@@ -2390,7 +2581,7 @@ async def remember_fact(request: RememberRequest, user = Depends(optional_auth))
     """Remember a fact"""
     try:
         facts = app.state.facts
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         facts.remember(request.key, request.value, user_id=user_id)
         return {"status": "success", "message": f"Remembered: {request.key} = {request.value}"}
     except Exception as e:
@@ -2402,7 +2593,7 @@ async def recall_fact(request: RecallRequest, user = Depends(optional_auth)):
     """Recall a fact"""
     try:
         facts = app.state.facts
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         value = facts.recall(request.key, user_id=user_id)
         return {"key": request.key, "value": value}
     except Exception as e:
@@ -2414,7 +2605,7 @@ async def list_facts(user = Depends(optional_auth)):
     """List all facts"""
     try:
         facts = app.state.facts
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         all_facts = facts.get_all_facts(user_id=user_id)
         return {"facts": all_facts}
     except Exception as e:
@@ -2426,7 +2617,7 @@ async def delete_fact(key: str, user = Depends(optional_auth)):
     """Delete a fact"""
     try:
         facts = app.state.facts
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         facts.forget(key, user_id=user_id)
         return {"status": "success", "message": f"Deleted: {key}"}
     except Exception as e:
@@ -2434,34 +2625,46 @@ async def delete_fact(key: str, user = Depends(optional_auth)):
 
 
 # ============ DOCUMENTS ENDPOINTS ============
+#
+# Every document endpoint is scoped to the caller (registered user id, or
+# the per-browser guest id). Files are stored under uploads/<owner>/ and
+# indexed with owner metadata, so users never see each other's documents.
+
+
+def _user_upload_dir(user_id: str) -> str:
+    path = os.path.join(UPLOAD_ROOT, owner_dir_name(user_id))
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 @app.post("/documents/read")
-async def read_document(file_path: str):
-    """Read a document (with path traversal protection)"""
+async def read_document(file_path: str, user: Optional[Dict] = Depends(optional_auth)):
+    """(Re-)index one of the caller's OWN uploaded files.
+
+    Only paths inside uploads/<caller>/ are accepted (realpath containment,
+    symlinks neutralized). Arbitrary server paths - data/ (memory & facts
+    JSON), other users' uploads, ../../etc/passwd - are rejected.
+    """
     try:
-        # SECURITY: Restrict reads to the project's data directories.
-        # Arbitrary relative paths (e.g. ../../etc/passwd) are rejected —
-        # the realpath containment check below is authoritative and also
-        # neutralizes symlinks pointing outside the allowed roots.
         from modules.security import is_path_within_roots
 
-        allowed_roots = ["uploads", "data", "documents"]
-        if not is_path_within_roots(file_path, allowed_roots):
+        user_id = _request_uid(user)
+        own_dir = _user_upload_dir(user_id)
+        candidate = file_path
+        if not os.path.isabs(candidate) and not is_path_within_roots(candidate, [own_dir]):
+            # Allow bare filenames: "report.pdf" -> uploads/<me>/report.pdf
+            candidate = os.path.join(own_dir, os.path.basename(file_path))
+        if not is_path_within_roots(candidate, [own_dir]):
             raise HTTPException(
                 status_code=400,
-                detail="Invalid file path: only files under uploads/, data/, or documents/ are allowed",
+                detail="Invalid file path: only your own uploaded files can be read",
             )
+        if not os.path.isfile(candidate):
+            raise HTTPException(status_code=404, detail="File not found")
 
-        # Check if file exists and is readable
-        if not os.path.isfile(file_path):
-            raise HTTPException(
-                status_code=404,
-                detail=f"File not found: {file_path}",
-            )
-        
-        rag = app.state.rag
-        result = rag.add_document(file_path)
+        rag = _user_rag(user_id)
+        result = await asyncio.to_thread(rag.add_document, candidate)
+        _bump_doc_generation(user_id)
         return {"status": "success", "message": result}
     except HTTPException:
         raise
@@ -2475,14 +2678,15 @@ async def upload_document(file: UploadFile = File(...), user: Optional[Dict] = D
     try:
         # SECURITY: Validate file upload
         from modules.security import validate_file_upload, sanitize_filename, get_upload_path
-        
+
+        user_id = _request_uid(user)
         # Resolve user for audit logging (works with or without auth)
         username = (user or {}).get("username") or "anonymous"
-        
+
         # Read file content to check size and validate
         content = await file.read()
         file_size = len(content)
-        
+
         is_valid, error = validate_file_upload(
             file.filename or "unknown",
             file_size,
@@ -2497,27 +2701,26 @@ async def upload_document(file: UploadFile = File(...), user: Optional[Dict] = D
                 reason=error,
             )
             raise HTTPException(status_code=400, detail=f"Upload rejected: {error}")
-        
-        # Sanitize filename and get safe path
-        upload_dir = "uploads"
-        os.makedirs(upload_dir, exist_ok=True)
-        
+
+        # Per-owner directory: two users uploading "report.pdf" never collide
+        upload_dir = _user_upload_dir(user_id)
         safe_filename = sanitize_filename(file.filename or "uploaded_file")
         file_path = get_upload_path(upload_dir, safe_filename)
-        
-        # Save file
+
         with open(file_path, "wb") as f:
             f.write(content)
-        
-        # Read with RAG
-        rag = app.state.rag
-        result = rag.add_document(file_path)
-        
+
+        # Index for this owner only (replaces a previous upload of the same
+        # name) and drop this owner's cached answers.
+        rag = _user_rag(user_id)
+        result = await asyncio.to_thread(rag.add_document, file_path)
+        _bump_doc_generation(user_id)
+
         # Enterprise: audit success + business metrics
         audit_logger.log_file_upload(safe_filename, username, success=True)
         business_metrics.record_document_upload(username)
         business_metrics.record_feature_usage("document_upload")
-        
+
         return {"status": "success", "message": result, "file": safe_filename}
     except HTTPException:
         raise
@@ -2526,22 +2729,22 @@ async def upload_document(file: UploadFile = File(...), user: Optional[Dict] = D
 
 
 @app.post("/documents/search")
-async def search_documents(request: SearchRequest):
-    """Search documents (raw retrieval, for power users)"""
+async def search_documents(request: SearchRequest, user: Optional[Dict] = Depends(optional_auth)):
+    """Search the caller's documents (raw retrieval, for power users)"""
     try:
-        rag = app.state.rag
-        results = await asyncio.wait_for(asyncio.to_thread(rag.search, request.query, top_k=request.top_k), timeout=DOWNSTREAM_TIMEOUT)
+        rag = _user_rag(_request_uid(user))
+        results = await asyncio.wait_for(asyncio.to_thread(rag.search, request.query, request.top_k), timeout=DOWNSTREAM_TIMEOUT)
         return {"query": request.query, "results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/documents/ask")
-async def ask_documents(request: SearchRequest):
-    """Ask a question about uploaded documents and get a clean, LLM-written
-    answer (instead of raw chunk JSON)."""
+async def ask_documents(request: SearchRequest, user: Optional[Dict] = Depends(optional_auth)):
+    """Ask a question about the caller's uploaded documents and get a clean,
+    LLM-written answer (instead of raw chunk JSON)."""
     try:
-        rag = app.state.rag
+        rag = _user_rag(_request_uid(user))
         answer = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, request.query, rag), timeout=DOWNSTREAM_TIMEOUT)
         return {"query": request.query, "answer": answer}
     except Exception as e:
@@ -2549,10 +2752,10 @@ async def ask_documents(request: SearchRequest):
 
 
 @app.get("/documents")
-async def list_documents():
-    """List loaded documents"""
+async def list_documents(user: Optional[Dict] = Depends(optional_auth)):
+    """List the caller's loaded documents"""
     try:
-        rag = app.state.rag
+        rag = _user_rag(_request_uid(user))
         docs = rag.list_documents()
         return {"documents": docs}
     except Exception as e:
@@ -2570,7 +2773,7 @@ async def get_memory(
     """Get conversation memory (scoped to the current user)"""
     try:
         memory = app.state.memory
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         recent = memory.get_recent(min(max(1, limit), 200), user_id=user_id)
         stats = memory.get_stats()
         conversations = await _list_conversations_for(user_id, memory)
@@ -2590,7 +2793,7 @@ async def clear_memory(user = Depends(optional_auth)):
     try:
         memory = app.state.memory
         facts = app.state.facts
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         memory.clear(user_id=user_id)
         facts.clear(user_id=user_id)
         # Clear the durable store + caches too so the sidebar matches.
@@ -2620,7 +2823,7 @@ async def list_conversations(
     """
     try:
         memory = app.state.memory
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         convs = await _list_conversations_for(user_id, memory)
         total = len(convs)
         limit = max(1, min(limit, 200))
@@ -2645,7 +2848,7 @@ async def get_conversation(conversation_id: str, user = Depends(optional_auth)):
     from modules import pg_store, redis_store
     try:
         memory = app.state.memory
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         norm = pg_store.normalize_conversation_id(conversation_id)
         msgs = await redis_store.get_json(redis_store.messages_key(norm))
         if msgs is None:
@@ -2680,7 +2883,7 @@ async def create_conversation(request: CreateConversationRequest = None,
     from modules import pg_store, redis_store
     try:
         memory = app.state.memory
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         title = request.title if request is not None and request.title else "New chat"
         conv = memory.create_conversation(user_id, title=title)
         # Mirror into PostgreSQL + drop the user's cached list so the sidebar
@@ -2698,7 +2901,7 @@ async def delete_conversation(conversation_id: str, user = Depends(optional_auth
     from modules import pg_store, redis_store
     try:
         memory = app.state.memory
-        user_id = str(user["id"]) if user else "guest"
+        user_id = _request_uid(user)
         deleted_mem = memory.delete_conversation(user_id, conversation_id)
         deleted_pg = await pg_store.delete_conversation(user_id, conversation_id)
         await redis_store.invalidate_user(user_id)
@@ -2722,8 +2925,8 @@ async def get_metrics_prometheus():
 
 
 @app.get("/metrics/json")
-async def get_metrics_json():
-    """JSON metrics endpoint for dashboards"""
+async def get_metrics_json(user=Depends(require_admin)):
+    """JSON metrics endpoint for dashboards (admin only)"""
     try:
         monitor = app.state.monitor
         logger = app.state.logger
@@ -2737,10 +2940,11 @@ async def get_metrics_json():
 
 
 @app.get("/monitoring/dashboard")
-async def monitoring_dashboard():
+async def monitoring_dashboard(user=Depends(require_admin)):
     """
     Enterprise monitoring dashboard: business metrics, costs, SLA
-    compliance, recent alerts, feature flags, and DB health.
+    compliance, recent alerts, feature flags, and DB health (admin only -
+    it exposes security counters and cost data).
     """
     try:
         dashboard = get_monitoring_dashboard()
@@ -2842,8 +3046,11 @@ async def mcp_status(user = Depends(optional_auth)):
 
 
 @app.post("/mcp/tools")
-async def mcp_tool_call(request: MCPToolRequest, user = Depends(optional_auth)):
+async def mcp_tool_call(request: MCPToolRequest, user = Depends(get_current_user)):
     """Invoke a tool on the MCP Agent Server over the MCP protocol (SSE).
+
+    Requires login: each call runs LLM-backed agents (real cost), so it is
+    not available to anonymous visitors.
 
     Example body:
         {"name": "coder_agent", "arguments": {"task": "write a python function to sort a list"}}

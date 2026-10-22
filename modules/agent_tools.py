@@ -41,9 +41,22 @@ def set_document_store(store) -> None:
     _document_store = store
 
 
+def get_document_store():
+    """The raw (unscoped) bound store, or None."""
+    return _document_store
+
+
 def _current_store():
+    """The document store, scoped to the current request's owner.
+
+    API handlers bind the caller via modules.request_context.bind_owner, so
+    the agent can only list/read documents that THIS user uploaded.
+    """
+    from modules.doc_scope import scoped
+    from modules.request_context import get_owner
+
     if _document_store is not None:
-        return _document_store
+        return scoped(_document_store, get_owner())
     # No store bound (e.g. tests / streamlit): use an empty one.
     from modules.rag import SimpleRAG
     return SimpleRAG()
@@ -76,7 +89,9 @@ def read_uploaded_document(filename: str) -> str:
         return f"Document '{filename}' not found. Available documents:\n{hint}"
 
     # Rebuild the text from the store's chunks (same content RAG answers from).
-    chunks = [d for d in store.documents if d.get("file") == target]
+    # get_document_chunks is part of the common store interface (SimpleRAG,
+    # VectorStore, KeywordStore, OptimizedRAG) - no reliance on `.documents`.
+    chunks = list(store.get_document_chunks(target) or [])
     chunks.sort(key=lambda d: d.get("chunk_index", 0))
     text = "\n".join(d.get("content", "") for d in chunks)
     if not text:

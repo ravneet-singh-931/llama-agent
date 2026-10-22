@@ -41,6 +41,8 @@ import os
 import re
 import time
 
+from modules.doc_scope import call_with_owner, format_chunks, rank_document_chunks, resolve_filename
+
 
 # =============================================================================
 # 0.  LLM CLIENT (dependency injection — no hardcoded API key)
@@ -225,14 +227,23 @@ class HybridSearcher:
         tokenized = [doc.lower().split() for doc in docs]
         self._bm25_index = BM25Okapi(tokenized)
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict]:
+    def invalidate_index(self) -> None:
+        """Drop the BM25 index so it is rebuilt on the next search
+        (called whenever documents are added or removed)."""
+        self._bm25_index = None
+        self._all_docs = []
+
+    def search(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> List[Dict]:
         """Search using both BM25 and vector similarity, then re-rank.
 
         Returns top_k results ranked by combined score.
         If BM25 is unavailable, falls back to vector-only search.
+        ``owner`` restricts the vector candidates to one tenant's chunks.
         """
         # Get vector results (semantic)
-        vector_results = self._store.search(query, top_k=top_k * 2)
+        vector_results = call_with_owner(
+            self._store.search, query, top_k=top_k * 2, owner=owner
+        )
 
         # Get BM25 results (keyword) — build lazily, may stay None
         if self._bm25_index is None:
@@ -244,7 +255,7 @@ class HybridSearcher:
             bm25_scores = self._bm25_index.get_scores(tokenized_query)
 
             # Normalize BM25 scores to [0, 1]
-            max_bm25 = max(bm25_scores) if bm25_scores else 1.0
+            max_bm25 = float(max(bm25_scores)) if len(bm25_scores) else 1.0
             if max_bm25 > 0:
                 bm25_norm = [s / max_bm25 for s in bm25_scores]
             else:
@@ -292,11 +303,11 @@ class HybridSearcher:
         bm25 = result.get("bm25_score", 0.0)
         return bm25_weight * bm25 + vector_weight * sim
 
-    def get_context(self, query: str, top_k: int = 5) -> str:
+    def get_context(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> str:
         """Get context string for the AI."""
-        results = self.search(query, top_k)
+        results = self.search(query, top_k, owner=owner)
         if not results:
-            if self._store.collection.count() > 0:
+            if self.list_documents(owner):
                 return "No relevant documents found for this query."
             return "No documents have been uploaded."
 
@@ -310,8 +321,8 @@ class HybridSearcher:
 
         return context
 
-    def list_documents(self) -> List[str]:
-        return self._store.list_documents()
+    def list_documents(self, owner: Optional[str] = None) -> List[str]:
+        return call_with_owner(self._store.list_documents, owner=owner)
 
     def get_stats(self) -> Dict:
         return {
@@ -346,12 +357,19 @@ class CrossEncoderReranker:
     def __init__(self, model_name: str = "BAAI/bge-reranker-base"):
         self._model_name = model_name
         self._model = None
+        self._unavailable = False
         self._reranked_count = 0
 
     def _get_model(self):
-        """Load the cross-encoder model (lazy, with fallback)."""
+        """Load the cross-encoder model (lazy, with fallback).
+
+        A failed load is remembered so we don't retry the import/download on
+        every single query.
+        """
         if self._model is not None:
             return self._model
+        if self._unavailable:
+            return None
 
         try:
             from sentence_transformers import CrossEncoder
@@ -359,6 +377,7 @@ class CrossEncoderReranker:
             return self._model
         except Exception:
             # Fallback: use the existing keyword-based reranker
+            self._unavailable = True
             return None
 
     def rerank(
@@ -385,23 +404,18 @@ class CrossEncoderReranker:
             # Fallback: use existing keyword-based reranker
             return self._fallback_rerank(query, results, top_k)
 
-        # Use cross-encoder to score each result against the query
-        scored_results = []
-        for result in results:
-            content = result.get("content", "")
-            try:
-                # CrossEncoder.predict takes a list of (query, doc) tuples
-                score = model.predict([(query, content)])[0]
-                scored_results.append({
-                    **result,
-                    "rerank_score": round(float(score), 4),
-                })
-            except Exception:
-                # If cross-encoder fails, use original similarity
-                scored_results.append({
-                    **result,
-                    "rerank_score": result.get("similarity", 0),
-                })
+        # Score every (query, chunk) pair in ONE batched predict call
+        try:
+            scores = model.predict([(query, r.get("content", "")) for r in results])
+            scored_results = [
+                {**r, "rerank_score": round(float(sc), 4)}
+                for r, sc in zip(results, scores)
+            ]
+        except Exception:
+            # If cross-encoder fails, use original similarity
+            scored_results = [
+                {**r, "rerank_score": r.get("similarity", 0)} for r in results
+            ]
 
         # Sort by rerank score (highest first)
         scored_results.sort(key=lambda x: x["rerank_score"], reverse=True)
@@ -450,7 +464,21 @@ class ContextualRetriever:
             overlap=semantic_chunk_overlap,
         )
 
-    def add_document(self, file_path: str) -> str:
+    def _delete_existing(self, file_name: str, owner: Optional[str]) -> None:
+        """Remove previous chunks of this file for this owner (re-upload)."""
+        conds = [{"file": file_name}]
+        if owner is not None:
+            conds.append({"owner": owner})
+        where = conds[0] if len(conds) == 1 else {"$and": conds}
+        try:
+            existing = self._store.collection.get(where=where, include=[])
+            ids = (existing or {}).get("ids") or []
+            if ids:
+                self._store.collection.delete(ids=ids)
+        except Exception:
+            pass  # minimal/fake collections without where/delete support
+
+    def add_document(self, file_path: str, owner: Optional[str] = None) -> str:
         """Add a document with contextual summary + semantic chunking."""
         from modules.rag import DocumentReader
 
@@ -470,12 +498,13 @@ class ContextualRetriever:
 
         # Prepend summary to each chunk
         file_name = os.path.basename(file_path)
+        self._delete_existing(file_name, owner)
         ids = []
         documents = []
         metadatas = []
 
         for i, chunk in enumerate(chunks):
-            chunk_id = f"{file_name}_{i}"
+            chunk_id = f"{owner}::{file_name}_{i}" if owner else f"{file_name}_{i}"
             if summary:
                 contextual_chunk = f"[Document Summary: {summary}]\n\n{chunk}"
             else:
@@ -484,6 +513,7 @@ class ContextualRetriever:
             documents.append(contextual_chunk)
             metadatas.append({
                 "file": file_name,
+                "owner": owner or "",
                 "chunk_index": i,
                 "total_chunks": len(chunks),
                 "source": file_path,
@@ -499,10 +529,13 @@ class ContextualRetriever:
 
     def _generate_summary(self, file_path: str, text: str) -> str:
         """Generate a 2-line summary of the document."""
-        if file_path in self._summaries:
-            return self._summaries[file_path]
+        import hashlib
 
         truncated = text[:3000]
+        cache_key = hashlib.sha256(truncated.encode("utf-8", "ignore")).hexdigest()
+        if cache_key in self._summaries:
+            return self._summaries[cache_key]
+
         system_prompt = (
             "You are a helpful assistant that summarizes documents. "
             "Write a concise 2-line summary of the document below. "
@@ -512,19 +545,19 @@ class ContextualRetriever:
         user_prompt = f"Document: {os.path.basename(file_path)}\n\n{truncated}"
 
         summary = self._llm.complete(system_prompt, user_prompt, max_tokens=100)
-        self._summaries[file_path] = summary
+        self._summaries[cache_key] = summary
         return summary
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict]:
+    def search(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> List[Dict]:
         """Search using the underlying vector store."""
-        return self._store.search(query, top_k)
+        return call_with_owner(self._store.search, query, top_k, owner=owner)
 
-    def get_context(self, query: str, top_k: int = 5) -> str:
+    def get_context(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> str:
         """Get context string for the AI."""
-        return self._store.get_context(query, top_k)
+        return call_with_owner(self._store.get_context, query, top_k, owner=owner)
 
-    def list_documents(self) -> List[str]:
-        return self._store.list_documents()
+    def list_documents(self, owner: Optional[str] = None) -> List[str]:
+        return call_with_owner(self._store.list_documents, owner=owner)
 
     def get_stats(self) -> Dict:
         return self._store.get_stats()
@@ -915,7 +948,8 @@ class SemanticCache:
             )
         return self._cache_collection
 
-    def lookup(self, query: str, top_k: int = 3, threshold: float = 0.3) -> Optional[str]:
+    def lookup(self, query: str, top_k: int = 3, threshold: float = 0.3,
+               owner: Optional[str] = None) -> Optional[str]:
         """Look up a cached answer for the query.
 
         Returns the cached answer only if the closest stored query is within
@@ -932,12 +966,16 @@ class SemanticCache:
         # embedding (no need for a separate _embed call). The cached
         # *query* is what is embedded (see store), so a repeat of the
         # same question matches at ~0 distance and returns its answer.
+        kwargs = {
+            "query_texts": [query],
+            "n_results": top_k,
+            "include": ["metadatas", "distances"],
+        }
+        if owner is not None:
+            # Tenant isolation: only ever hit answers cached for this owner.
+            kwargs["where"] = {"owner": owner}
         try:
-            results = cache_collection.query(
-                query_texts=[query],
-                n_results=top_k,
-                include=["metadatas", "distances"],
-            )
+            results = cache_collection.query(**kwargs)
         except Exception:
             return None
 
@@ -952,7 +990,7 @@ class SemanticCache:
                 return meta.get("answer")
         return None
 
-    def store(self, query: str, answer: str):
+    def store(self, query: str, answer: str, owner: Optional[str] = None):
         """Store a query-answer pair in the cache.
 
         The *query* is embedded (so repeat questions match at ~0 distance),
@@ -966,20 +1004,45 @@ class SemanticCache:
         # Use a stable hash (md5) so the same query always maps to the
         # same id across Python sessions.
         import hashlib
-        query_hash = hashlib.md5(query.encode(), usedforsecurity=False).hexdigest()
+        query_hash = hashlib.md5(
+            f"{owner or ''}\x00{query}".encode(), usedforsecurity=False
+        ).hexdigest()
         cache_collection.upsert(
             ids=[f"query_{query_hash}"],
             documents=[query],
-            metadatas=[{"query": query, "answer": answer, "timestamp": time.time()}],
+            metadatas=[{
+                "query": query,
+                "answer": answer,
+                "owner": owner or "",
+                "timestamp": time.time(),
+            }],
         )
+
+    def invalidate(self, owner: Optional[str] = None) -> None:
+        """Drop cached answers (for one owner, or all) - called on upload so
+        a re-uploaded/changed document never serves a stale answer."""
+        if owner is None:
+            self.clear()
+            return
+        try:
+            coll = self._get_cache_collection()
+            existing = coll.get(where={"owner": owner}, include=[])
+            ids = (existing or {}).get("ids") or []
+            if ids:
+                coll.delete(ids=ids)
+        except Exception:
+            pass
 
     def clear(self):
         """Clear the cache."""
-        if self._cache_collection is not None:
-            try:
+        client = getattr(self._store, "client", None)
+        try:
+            if client is not None and hasattr(client, "delete_collection"):
+                client.delete_collection("query_cache")
+            elif self._cache_collection is not None:
                 self._cache_collection.delete_collection()
-            except Exception:
-                pass
+        except Exception:
+            pass
         self._cache_collection = None
 
     def get_stats(self) -> Dict:
@@ -1031,16 +1094,17 @@ class OptimizedRAG:
         self._store = vector_store
         self._llm = llm_client or GroqLLMClient()
 
-        # 1. Hybrid Searcher
+        # 2. Cross-Encoder Reranker (falls back to the keyword ReRanker when
+        #    sentence-transformers is not installed)
+        self._cross_encoder = reranker or CrossEncoderReranker()
+
+        # 1. Hybrid Searcher (BM25 + vector, then reranked)
         self._hybrid = HybridSearcher(
             vector_store=vector_store,
             bm25_weight=bm25_weight,
             vector_weight=vector_weight,
-            reranker=reranker,
+            reranker=self._cross_encoder,
         )
-
-        # 2. Cross-Encoder Reranker
-        self._cross_encoder = reranker or CrossEncoderReranker()
 
         # 3. Contextual Retriever
         self._contextual = ContextualRetriever(
@@ -1066,20 +1130,130 @@ class OptimizedRAG:
 
     # ---- Public API ----
 
-    def add_document(self, file_path: str) -> str:
-        """Add a document with all optimizations."""
-        return self._contextual.add_document(file_path)
+    def add_document(self, file_path: str, owner: Optional[str] = None) -> str:
+        """Add a document with all optimizations.
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict]:
+        Rebuilds the BM25 index lazily and invalidates the owner's cached
+        answers so re-uploads never serve stale results.
+        """
+        result = self._contextual.add_document(file_path, owner=owner)
+        self._hybrid.invalidate_index()
+        self._cache.invalidate(owner)
+        return result
+
+    def search(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> List[Dict]:
         """Search using hybrid search + reranking."""
-        return self._hybrid.search(query, top_k)
+        return self._hybrid.search(query, top_k, owner=owner)
 
-    def get_context(self, query: str, top_k: int = 5) -> str:
+    def get_context(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> str:
         """Get context using hybrid search + reranking."""
-        return self._hybrid.get_context(query, top_k)
+        return self._hybrid.get_context(query, top_k, owner=owner)
 
-    def list_documents(self) -> List[str]:
-        return self._store.list_documents()
+    def get_context_for_document(self, query: str, filename: str, top_k: int = 4,
+                                 owner: Optional[str] = None) -> str:
+        """Labeled excerpts from ONE document (multi-document comparison)."""
+        chunks = self.get_document_chunks(filename, owner=owner)
+        if not chunks:
+            return ""
+        return format_chunks(rank_document_chunks(query, chunks, top_k))
+
+    def get_document_chunks(self, filename: str, owner: Optional[str] = None) -> List[Dict]:
+        fn = getattr(self._store, "get_document_chunks", None)
+        if fn is not None:
+            return call_with_owner(fn, filename, owner=owner) or []
+        # Generic Chroma-collection fallback
+        target = resolve_filename(filename, self.list_documents(owner))
+        if not target:
+            return []
+        try:
+            data = self._store.collection.get(include=["documents", "metadatas"])
+        except Exception:
+            return []
+        out = []
+        for doc, meta in zip(data.get("documents") or [], data.get("metadatas") or []):
+            meta = meta or {}
+            if meta.get("file") != target:
+                continue
+            if owner is not None and meta.get("owner") != owner:
+                continue
+            out.append({"file": target, "chunk_index": meta.get("chunk_index", 0), "content": doc})
+        return sorted(out, key=lambda c: c["chunk_index"])
+
+    def delete_document(self, filename: str, owner: Optional[str] = None) -> int:
+        fn = getattr(self._store, "delete_document", None)
+        removed = call_with_owner(fn, filename, owner=owner) if fn else 0
+        self._hybrid.invalidate_index()
+        self._cache.invalidate(owner)
+        return removed or 0
+
+    def has_document(self, filename: str, owner: Optional[str] = None) -> bool:
+        return resolve_filename(filename, self.list_documents(owner)) is not None
+
+    def list_documents(self, owner: Optional[str] = None) -> List[str]:
+        return call_with_owner(self._store.list_documents, owner=owner)
+
+    # ---- History-aware / decomposed retrieval ----
+
+    _FOLLOWUP_RE = re.compile(
+        r"\b(it|its|that|this|those|these|they|them|the other|the second|the first|"
+        r"same|above|previous|earlier|what about|and the|how about)\b",
+        re.IGNORECASE,
+    )
+
+    def retrieve(self, query: str, history: str = "", top_k: int = 5,
+                 owner: Optional[str] = None) -> List[Dict]:
+        """Production retrieval entry point.
+
+        1. Follow-up questions ("what about the other file?") are rewritten
+           into a standalone query using the chat history (one LLM call,
+           only when the query looks like a follow-up and history exists;
+           disable with RAG_QUERY_REWRITE=0).
+        2. Complex multi-part questions are decomposed and the results of
+           every sub-question are merged (RAG_DECOMPOSE=1, default off).
+        3. Hybrid BM25 + vector search, reranked by the cross-encoder.
+        """
+        effective = query
+        if (history and os.getenv("RAG_QUERY_REWRITE", "1") != "0"
+                and len(query.split()) <= 25 and self._FOLLOWUP_RE.search(query)):
+            try:
+                rewritten = self._conversational._rewrite_query_with_history(
+                    query, history[-2000:]
+                )
+                if rewritten and len(rewritten) < 500:
+                    effective = rewritten.strip().strip('"')
+            except Exception:
+                effective = query
+
+        merged: Dict[tuple, Dict] = {}
+
+        def _merge(rows: List[Dict]):
+            for r in rows or []:
+                key = (r.get("file"), r.get("chunk_index"))
+                if key not in merged:
+                    merged[key] = r
+
+        _merge(self.search(effective, top_k, owner=owner))
+        if os.getenv("RAG_DECOMPOSE", "0") == "1":
+            subs = [q for q in self._decomposer.decompose(effective) if q != effective]
+            for sq in subs[:3]:
+                _merge(self.search(sq, max(2, top_k // 2), owner=owner))
+        return list(merged.values())[: max(top_k, 1) * 2]
+
+    def verify_answer(self, answer: str, context: str) -> bool:
+        """Corrective-RAG check (RAG_CRAG=1): ask the LLM whether ``answer``
+        is fully supported by ``context``. Returns True when unsure."""
+        if os.getenv("RAG_CRAG", "0") != "1" or not answer or not context:
+            return True
+        try:
+            verdict = self._llm.complete(
+                "You are a strict fact checker. Reply with exactly SUPPORTED or "
+                "UNSUPPORTED: is every factual claim in the ANSWER backed by the CONTEXT?",
+                f"CONTEXT:\n{context[:6000]}\n\nANSWER:\n{answer[:2000]}",
+                max_tokens=5,
+            )
+        except Exception:
+            return True
+        return "UNSUPPORTED" not in (verdict or "").upper()
 
     def get_stats(self) -> Dict:
         return {
@@ -1092,15 +1266,19 @@ class OptimizedRAG:
         self._store.clear()
         self._contextual._summaries.clear()
         self._cache.clear()
+        self._hybrid.invalidate_index()
 
-    def get_cached_answer(self, query: str):
+    def get_cached_answer(self, query: str, owner: Optional[str] = None):
         """Return a cached answer for the query, or None (Semantic Cache)."""
-        return self._cache.lookup(query)
+        return self._cache.lookup(query, owner=owner)
 
-    def cache_answer(self, query: str, answer: str):
+    def cache_answer(self, query: str, answer: str, owner: Optional[str] = None):
         """Store an answer in the Semantic Cache so repeat queries skip the LLM."""
         if answer:
-            self._cache.store(query, answer)
+            self._cache.store(query, answer, owner=owner)
+
+    def invalidate_cache(self, owner: Optional[str] = None) -> None:
+        self._cache.invalidate(owner)
 
     def query(
         self,

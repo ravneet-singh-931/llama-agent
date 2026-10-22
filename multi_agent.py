@@ -27,6 +27,7 @@ except ImportError:
 
 from llama_index.core.llms import ChatMessage, MessageRole
 from modules.secrets import get_secret
+from modules.request_context import submit_with_context
 from modules.model_tiers import resolve_model, should_fallback
 from modules.security_hardening import PROMPT_INJECTION_GUARD, detect_prompt_injection
 
@@ -42,8 +43,11 @@ if _groq_key:
 # the real RAG store (app.state.rag) at startup.
 try:
     from modules.rag import SimpleRAG
-    from modules.agent_tools import set_document_store, is_frame_response
-    set_document_store(SimpleRAG())
+    from modules.agent_tools import set_document_store, get_document_store, is_frame_response
+    # Never clobber the API's real store if multi_agent is imported lazily
+    # AFTER startup bound app.state.rag.
+    if get_document_store() is None:
+        set_document_store(SimpleRAG())
 except Exception:
     pass
 
@@ -106,8 +110,17 @@ _agent_cache_lock = threading.Lock()
 _embedder = LocalEmbedder()
 
 
+def _tenant_key(cache_key: str) -> str:
+    """Scope cache keys to the current request's owner so one user's cached
+    answers / episodic memory are never served to another user."""
+    from modules.request_context import get_owner
+
+    return f"{get_owner() or '_anon'}|{cache_key}"
+
+
 def _semantic_lookup(task: str, cache_key: str, threshold: float = 0.92) -> Optional[str]:
     """Return a cached answer for a near-duplicate task, or None."""
+    cache_key = _tenant_key(cache_key)
     emb = _embedder.embed(task)
     prefix = cache_key + ":"
     best = None
@@ -126,6 +139,7 @@ def _semantic_lookup(task: str, cache_key: str, threshold: float = 0.92) -> Opti
 
 
 def _agent_cache_put(task: str, cache_key: str, result: str) -> None:
+    cache_key = _tenant_key(cache_key)
     emb = _embedder.embed(task)
     key = cache_key + ":" + task
     with _agent_cache_lock:
@@ -140,6 +154,7 @@ def _agent_cache_put(task: str, cache_key: str, result: str) -> None:
 def _retrieve_memory(task: str, cache_key: str, k: int = 2,
                      threshold: float = 0.80) -> List[str]:
     """Top-K similar past results (episodic memory) for context injection."""
+    cache_key = _tenant_key(cache_key)
     emb = _embedder.embed(task)
     prefix = cache_key + ":"
     scored: List[Tuple[float, str]] = []
@@ -1103,7 +1118,10 @@ class MultiAgentOrchestrator:
                     len(by_id[sid]["instruction"]) // 4 + 256 for sid in level
                 )
                 step_objs = [by_id[sid] for sid in level]
-                outs = list(pool.map(_run_step, step_objs))
+                # Carry the request context (owner) into worker threads so
+                # tools and caches stay tenant-scoped.
+                futures = [submit_with_context(pool, _run_step, st) for st in step_objs]
+                outs = [f.result() for f in futures]
                 for sid, out in zip(level, outs):
                     results[sid] = out
 

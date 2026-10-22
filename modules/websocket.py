@@ -124,19 +124,11 @@ class ConnectionManager:
             data={
                 "connection_id": connection_id,
                 "message": f"Welcome {username}! You are connected.",
-                "online_users": self.get_online_users(),
             }
         )
         await websocket.send_text(welcome.to_json())
-        
-        # Broadcast user joined
-        await self.broadcast(
-            WSMessage(
-                type=MessageType.ONLINE_USERS,
-                data={"users": self.get_online_users()}
-            ),
-            exclude_user=user_id,
-        )
+
+        # Privacy: presence (who is online) is NOT broadcast to other users.
         
         print(f"✅ WebSocket connected: {username} (user_id={user_id})")
         return connection_id
@@ -152,10 +144,12 @@ class ConnectionManager:
                 if user_id in self.user_info:
                     del self.user_info[user_id]
         
-        # Remove from connection mapping
-        for conn_id, uid in list(self.connection_users.items()):
-            if uid == user_id:
-                del self.connection_users[conn_id]
+        # Remove from connection mapping (only when the user has no
+        # connections left - other tabs of the same user stay mapped)
+        if user_id not in self.active_connections:
+            for conn_id, uid in list(self.connection_users.items()):
+                if uid == user_id:
+                    del self.connection_users[conn_id]
         
         print(f"❌ WebSocket disconnected: user_id={user_id}")
 
@@ -184,7 +178,11 @@ class ConnectionManager:
                         pass
 
     async def send_typing(self, user_id: str, is_typing: bool):
-        """Send typing indicator"""
+        """Send typing indicator to the user's OWN other connections (tabs).
+
+        Chats are private 1:1 conversations with the agent, so typing state
+        is never broadcast to other users.
+        """
         message = WSMessage(
             type=MessageType.TYPING,
             data={
@@ -192,7 +190,7 @@ class ConnectionManager:
                 "is_typing": is_typing,
             }
         )
-        await self.broadcast(message, exclude_user=user_id)
+        await self.send_personal(user_id, message)
 
     def get_online_users(self) -> List[Dict[str, Any]]:
         """Get list of online users"""
@@ -269,9 +267,12 @@ class WebSocketHandler:
             print(f"❌ WebSocket error for {username}: {e}")
             error_msg = WSMessage(
                 type=MessageType.ERROR,
-                data={"error": str(e)}
+                data={"error": "Internal error"}
             )
-            await websocket.send_text(error_msg.to_json())
+            try:
+                await websocket.send_text(error_msg.to_json())
+            except Exception:
+                pass
             self.manager.disconnect(websocket, user_id)
 
     async def _process_message(
@@ -331,10 +332,11 @@ class WebSocketHandler:
         if not user_message.strip():
             return
         
-        # Store user message in history
-        if user_id not in self.chat_history:
-            self.chat_history[user_id] = []
-        self.chat_history[user_id].append(message)
+        # Store user message in history (bounded per user)
+        history = self.chat_history.setdefault(user_id, [])
+        history.append(message)
+        if len(history) > 200:
+            del history[:-200]
         
         # Send typing indicator
         typing_msg = WSMessage(
@@ -347,8 +349,13 @@ class WebSocketHandler:
             # Import and use the agent
             from llama_agent1 import run_agent
             
-            # Run agent (this would be async in production)
-            response = await run_agent(user_message)
+            # Run the agent AS this user: their memory, facts and documents
+            # (never the shared "guest" bucket).
+            response = await run_agent(
+                user_message,
+                user_id=user_id,
+                conversation_id=conversation_id or f"ws-{user_id}",
+            )
             
             # Create response message
             response_msg = WSMessage(

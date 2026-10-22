@@ -5,7 +5,7 @@ Two model tiers are used to balance quality vs. latency/cost:
   - "strong": one-shot answers (document summaries, multi-agent tasks,
     non-streaming agent runs). Default: qwen/qwen3.8-27b.
   - "fast": streaming chat and cheap helper calls (query reformulation).
-    Default: qwen/qwen3.8-27b.
+    Default: openai/gpt-oss-20b.
 
 Configuration (env vars, resolved at call time so no restart is needed
 between environments):

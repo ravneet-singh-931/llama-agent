@@ -906,7 +906,11 @@ def _render_standard_chat():
                     st.session_state.advanced_rag = AdvancedRAG(default_store=base_store, phoenix_enabled=True, phoenix_endpoint="http://phoenix:6006")
                 memory_obj.add_message("user", prompt)
 
-                facts_context = facts_obj.get_context_string()
+                # Tenant isolation: only this session's user's facts.
+                _st_uid = str((st.session_state.get("user") or {}).get("id") or "")
+                if not _st_uid or _st_uid == "guest":
+                    _st_uid = st.session_state.setdefault("guest_uid", f"guest-{uuid.uuid4().hex}")
+                facts_context = facts_obj.get_context_string(user_id=_st_uid)
                 
                 # Use Advanced RAG with re-ranking + sub-question decomposition
                 if "advanced_rag" in st.session_state and st.session_state.documents:

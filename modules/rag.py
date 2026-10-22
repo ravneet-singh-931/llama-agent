@@ -6,7 +6,9 @@ This lets your agent READ files and ANSWER questions about them!
 
 import os
 import re
-from typing import List, Dict
+from typing import List, Dict, Optional
+
+from modules.doc_scope import format_chunks, rank_document_chunks, resolve_filename
 from pathlib import Path
 
 
@@ -134,46 +136,89 @@ class SimpleRAG:
     """
     Simple RAG (Retrieval Augmented Generation)
     Stores document chunks and finds relevant ones for questions.
+
+    Owner-aware: every chunk carries an ``owner``; all read methods accept
+    ``owner=None`` (no filter) or an owner id (only that owner's chunks).
     """
-    
+
     def __init__(self):
         self.documents: List[Dict] = []
         self.chunk_size = 500  # Characters per chunk
-    
-    def add_document(self, file_path: str) -> str:
-        """Add a document to the knowledge base"""
+        # (owner, normalized query) -> answer
+        self._answer_cache: Dict[tuple, str] = {}
+
+    # ---------------- helpers ----------------
+    def _docs(self, owner: Optional[str] = None) -> List[Dict]:
+        if owner is None:
+            return self.documents
+        return [d for d in self.documents if d.get("owner") == owner]
+
+    @staticmethod
+    def _cache_key(query: str, owner: Optional[str]) -> tuple:
+        return (owner or "", " ".join((query or "").lower().split()))
+
+    # ---------------- indexing ----------------
+    def add_document(self, file_path: str, owner: Optional[str] = None) -> str:
+        """Add a document to the knowledge base (re-adding replaces it)."""
         text = DocumentReader.read_any(file_path)
-        
+
         if text.startswith("Error"):
             return text
-        
-        # Split into chunks
+
+        file_name = os.path.basename(file_path)
+        # Replace any previous version of the same file for this owner
+        self.documents = [
+            d for d in self.documents
+            if not (d["file"] == file_name and d.get("owner") == owner)
+        ]
+
         chunks = self._split_text(text)
-        
+
         for i, chunk in enumerate(chunks):
             self.documents.append({
-                "file": file_path,
+                "file": file_name,
+                "source": file_path,
+                "owner": owner,
                 "chunk_index": i,
                 "content": chunk,
                 "length": len(chunk)
             })
-        
-        return f"Added {len(chunks)} chunks from {file_path}"
-    
-    def add_text(self, text: str, source: str = "direct_input") -> str:
+
+        self.invalidate_cache(owner)
+        return f"Added {len(chunks)} chunks from {file_name}"
+
+    def add_text(self, text: str, source: str = "direct_input",
+                 owner: Optional[str] = None) -> str:
         """Add raw text to the knowledge base"""
         chunks = self._split_text(text)
-        
+
         for i, chunk in enumerate(chunks):
             self.documents.append({
                 "file": source,
+                "owner": owner,
                 "chunk_index": i,
                 "content": chunk,
                 "length": len(chunk)
             })
-        
+
+        self.invalidate_cache(owner)
         return f"Added {len(chunks)} chunks from direct input"
-    
+
+    def delete_document(self, filename: str, owner: Optional[str] = None) -> int:
+        target = resolve_filename(filename, self.list_documents(owner))
+        if target is None:
+            return 0
+        before = len(self.documents)
+        self.documents = [
+            d for d in self.documents
+            if not (d["file"] == target and (owner is None or d.get("owner") == owner))
+        ]
+        self.invalidate_cache(owner)
+        return before - len(self.documents)
+
+    def has_document(self, filename: str, owner: Optional[str] = None) -> bool:
+        return resolve_filename(filename, self.list_documents(owner)) is not None
+
     def _split_text(self, text: str) -> List[str]:
         """Split text into chunks"""
         chunks = []
@@ -182,13 +227,14 @@ class SimpleRAG:
             if chunk.strip():
                 chunks.append(chunk)
         return chunks
-    
+
     def _query_tokens(self, text: str) -> set:
         """Lowercase alphanumeric tokens, minus stopwords and single chars."""
         tokens = re.findall(r"[a-z0-9]+", text.lower())
         return {t for t in tokens if t not in STOPWORDS and len(t) > 1}
 
-    def search(self, query: str, top_k: int = 3) -> List[Dict]:
+    # ---------------- retrieval ----------------
+    def search(self, query: str, top_k: int = 3, owner: Optional[str] = None) -> List[Dict]:
         """Search for relevant chunks (keyword matching).
 
         Scoring: each query token found in the chunk content scores 1; a
@@ -199,7 +245,7 @@ class SimpleRAG:
         query_words = self._query_tokens(query)
 
         results = []
-        for doc in self.documents:
+        for doc in self._docs(owner):
             content_lower = doc["content"].lower()
             # Tokens in the file path (exact match, e.g. "captainassistant").
             filename_tokens = self._query_tokens(doc["file"])
@@ -215,34 +261,44 @@ class SimpleRAG:
         # Deterministic: best score first, then insertion order.
         results.sort(key=lambda x: (-x["relevance_score"], x["chunk_index"]))
         return results[:top_k]
-    
-    def get_context(self, query: str, top_k: int = 3) -> str:
+
+    def get_context(self, query: str, top_k: int = 3, owner: Optional[str] = None) -> str:
         """Get relevant context as a string for the AI to read.
         If no keyword matches but documents exist, return all documents anyway."""
-        results = self.search(query, top_k)
-        
+        results = self.search(query, top_k, owner=owner)
+        docs = self._docs(owner)
+
         # If no keyword matches, but we have documents, return ALL of them
-        if not results and self.documents:
+        if not results and docs:
             context = "Uploaded documents (full content):\n\n"
-            for doc in self.documents:
+            for doc in docs:
                 context += f"--- Source: {doc['file']} (chunk {doc['chunk_index']}) ---\n"
                 context += f"{doc['content']}\n\n"
             # Truncate if too long (stay under ~8000 chars for LLM context)
             if len(context) > 8000:
                 context = context[:8000] + "\n\n[...truncated, file is too large to include fully...]"
             return context
-        
+
         if not results:
             return "No documents have been uploaded."
-        
+
         context = "Relevant document excerpts:\n\n"
         for i, result in enumerate(results, 1):
             context += f"--- Source: {result['file']} (chunk {result['chunk_index']}) ---\n"
             context += f"{result['content']}\n\n"
-        
+
         return context
-    
-    def get_context_for_document(self, query: str, filename: str, top_k: int = 4) -> str:
+
+    def get_document_chunks(self, filename: str, owner: Optional[str] = None) -> List[Dict]:
+        """All chunks of one document (lenient filename match), in order."""
+        target = resolve_filename(filename, self.list_documents(owner))
+        if target is None:
+            return []
+        chunks = [d for d in self._docs(owner) if d["file"] == target]
+        return sorted(chunks, key=lambda d: d["chunk_index"])
+
+    def get_context_for_document(self, query: str, filename: str, top_k: int = 4,
+                                 owner: Optional[str] = None) -> str:
         """Retrieve context from a SINGLE uploaded document (used for
         multi-document comparison).
 
@@ -251,83 +307,47 @@ class SimpleRAG:
         when the document is not in the store.
 
         Scoring is frequency-based (not just presence): a chunk that mentions
-        the topic several times beats chunks that mention it once, so the
-        section that REALLY discusses the topic wins over incidental mentions.
-        Chunks adjacent to a match are also included, because a topic usually
-        spans a run of chunks and the surrounding context improves citations.
+        the topic several times beats chunks that mention it once, and chunks
+        adjacent to a match are also included.
         """
-        target = None
-        for path in self.list_documents():
-            base = os.path.basename(path)
-            if filename == path or filename == base or filename == os.path.splitext(base)[0]:
-                target = path
-                break
-        if target is None:
-            return ""
-        docs = [d for d in self.documents if d["file"] == target]
+        docs = self.get_document_chunks(filename, owner=owner)
         if not docs:
             return ""
+        return format_chunks(rank_document_chunks(query, docs, top_k))
 
-        query_words = self._query_tokens(query)
-        if not query_words:
-            picked = docs[:top_k]
-        else:
-            scored = []
-            for doc in docs:
-                content_lower = doc["content"].lower()
-                freq = 0
-                matched = 0
-                for w in query_words:
-                    c = content_lower.count(w)
-                    if c:
-                        freq += c
-                        matched += 1
-                # Frequency dominates (topic density); matched count breaks
-                # ties between chunks covering several query aspects.
-                scored.append((freq + matched, doc))
-            # Deterministic: best score first, then insertion (chunk) order.
-            scored.sort(key=lambda x: (-x[0], x[1]["chunk_index"]))
-            best = [d for s, d in scored if s > 0][:top_k]
-            if not best:
-                picked = docs[:top_k]
-            else:
-                picked = list(best)
-                picked_idx = {d["chunk_index"] for d in picked}
-                # Context window: pull in the neighbors of matched chunks so
-                # the section around the topic is available for citing.
-                for _s, d in scored:
-                    if len(picked) >= top_k + 2:
-                        break
-                    if d["chunk_index"] in picked_idx:
-                        continue
-                    if (d["chunk_index"] - 1 in picked_idx
-                            or d["chunk_index"] + 1 in picked_idx):
-                        picked.append(d)
-                        picked_idx.add(d["chunk_index"])
-                # Deterministic output: document order, not score order.
-                picked.sort(key=lambda x: x["chunk_index"])
+    def list_documents(self, owner: Optional[str] = None) -> List[str]:
+        """List loaded documents (optionally only one owner's)."""
+        seen: Dict[str, None] = {}
+        for doc in self._docs(owner):
+            seen.setdefault(doc["file"], None)
+        return list(seen)
 
-        lines = []
-        for d in picked:
-            lines.append(
-                f"--- Source: {d['file']} (chunk {d['chunk_index']}) ---\n{d['content']}"
-            )
-        return "\n\n".join(lines)
+    # ---------------- answer cache ----------------
+    def get_cached_answer(self, query: str, owner: Optional[str] = None) -> Optional[str]:
+        return self._answer_cache.get(self._cache_key(query, owner))
 
-    def list_documents(self) -> List[str]:
-        """List all loaded documents"""
-        files = set(doc["file"] for doc in self.documents)
-        return list(files)
-    
-    def get_stats(self) -> Dict:
+    def cache_answer(self, query: str, answer: str, owner: Optional[str] = None) -> None:
+        if len(self._answer_cache) > 500:
+            self._answer_cache.clear()
+        self._answer_cache[self._cache_key(query, owner)] = answer
+
+    def invalidate_cache(self, owner: Optional[str] = None) -> None:
+        if owner is None:
+            self._answer_cache.clear()
+            return
+        for key in [k for k in self._answer_cache if k[0] == owner]:
+            del self._answer_cache[key]
+
+    def get_stats(self, owner: Optional[str] = None) -> Dict:
         """Get RAG statistics"""
-        files = self.list_documents()
+        files = self.list_documents(owner)
         return {
-            "total_chunks": len(self.documents),
+            "total_chunks": len(self._docs(owner)),
             "total_documents": len(files),
             "documents": files
         }
-    
+
     def clear(self):
         """Clear all documents"""
         self.documents = []
+        self._answer_cache.clear()

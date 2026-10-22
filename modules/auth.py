@@ -33,8 +33,21 @@ from modules.database import (
 
 # ============ CONFIGURATION ============
 
-# JWT settings (from environment or defaults)
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+# JWT settings. The signing key is read through get_secret so Docker/K8s
+# secret files work (JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret_key) as well
+# as a plain JWT_SECRET_KEY env var.
+from modules.secrets import get_secret
+
+_INSECURE_DEFAULT_SECRET = "your-secret-key-change-in-production"
+SECRET_KEY = get_secret("JWT_SECRET_KEY", default=_INSECURE_DEFAULT_SECRET)
+if SECRET_KEY == _INSECURE_DEFAULT_SECRET:
+    if os.getenv("ENVIRONMENT", "development").lower() == "production":
+        # Fail closed: a guessable signing key lets anyone forge tokens.
+        raise RuntimeError(
+            "JWT_SECRET_KEY (or JWT_SECRET_KEY_FILE) must be set in production"
+        )
+    print("[AUTH] WARNING: using the insecure development JWT secret. "
+          "Set JWT_SECRET_KEY or JWT_SECRET_KEY_FILE.")
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_EXPIRE_DAYS", "7"))
@@ -432,7 +445,9 @@ async def get_current_user(
         )
     payload = jwt_manager.verify_token(token)
     
-    if not payload:
+    # Only ACCESS tokens authenticate requests; a (long-lived) refresh token
+    # must never be usable as an access token.
+    if not payload or payload.get("type") != "access":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token"
@@ -448,7 +463,7 @@ async def get_current_user(
     user = await user_manager.get_user(user_id)
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found"
         )
     
@@ -534,10 +549,15 @@ async def optional_auth(
         token = request.cookies.get("access_token")
     if token:
         payload = jwt_manager.verify_token(token)
-        if payload:
+        if payload and payload.get("type") == "access":
             user_id = payload.get("sub")
             if user_id:
-                user = await user_manager.get_user(user_id)
+                try:
+                    user = await user_manager.get_user(user_id)
+                except Exception:
+                    # DB unreachable: optional auth degrades to anonymous
+                    # instead of turning every request into a 500.
+                    user = None
                 if user:
                     return user
 

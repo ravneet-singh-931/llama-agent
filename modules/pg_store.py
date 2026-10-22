@@ -33,11 +33,8 @@ _pool: Any = None
 
 def get_database_url() -> str:
     """Return the asyncpg-compatible DATABASE_URL (no driver suffix)."""
-    url = os.getenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://postgres:postgres@localhost:5432/llama_agent",
-    )
-    return url.replace("+asyncpg", "")
+    from modules.secrets import resolve_database_url
+    return resolve_database_url().replace("+asyncpg", "")
 
 
 def is_registered_user(user_id: Optional[str]) -> bool:
