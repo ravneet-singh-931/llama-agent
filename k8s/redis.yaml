@@ -117,6 +117,29 @@ spec:
       targetPort: 6379  # Container port
   type: ClusterIP  # Internal only (secure, not exposed to internet)
 
+---
+# --------------------------------------------------------------------------
+# RESOURCE 3: Service alias `redis` — same Pods, docker-compose hostname
+# --------------------------------------------------------------------------
+# docker-compose calls this host `redis` (REDIS_URL=redis://redis:6379), and
+# that value often ends up in the REDIS_URL GitHub secret too. Without this
+# alias `redis` does not resolve in k8s: every Redis call fails silently and
+# each API Pod falls back to its own memory (WebSocket tickets issued by one
+# Pod are unknown to the other, rate limits/facts are per-Pod). Both
+# redis://redis:6379 and redis://redis-service:6379 now work.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: llama-agent
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+  type: ClusterIP
+
 # 💡 LEARNER TIP: Test Redis
 #   kubectl exec -n llama-agent deploy/redis -- redis-cli ping
 #   kubectl exec -n llama-agent deploy/redis -- redis-cli set mykey "hello"

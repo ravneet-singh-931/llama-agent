@@ -465,11 +465,10 @@ jobs:
           kubectl -n llama-agent set image deployment/llama-agent-frontend frontend=ravneet231/llama-agent-frontend:$SHA
       - name: "\u23F3 Wait for rollout"
         if: steps.gate.outputs.enabled == 'true'
-        run: |
-          kubectl -n llama-agent rollout status deployment/llama-agent-api --timeout=300s
-          kubectl -n llama-agent rollout status deployment/llama-agent-mcp-server --timeout=300s
-          kubectl -n llama-agent rollout status deployment/llama-agent-web --timeout=300s
-          kubectl -n llama-agent rollout status deployment/llama-agent-frontend --timeout=300s
+        # API gets 900s: its 2 replicas start one after another and each has a
+        # 10-min startupProbe budget. Prints diagnostics + annotations on failure
+        # and warns if the API can't reach Redis.
+        run: bash k8s/wait-rollout.sh llama-agent
 
   # ============================================================
   # JOB 7: DEPLOY PRODUCTION
@@ -602,11 +601,10 @@ jobs:
           kubectl -n llama-agent set image deployment/llama-agent-frontend frontend=ravneet231/llama-agent-frontend:$SHA
       - name: "\u23F3 Wait for rollout"
         if: steps.gate.outputs.enabled == 'true'
-        run: |
-          kubectl -n llama-agent rollout status deployment/llama-agent-api --timeout=300s
-          kubectl -n llama-agent rollout status deployment/llama-agent-mcp-server --timeout=300s
-          kubectl -n llama-agent rollout status deployment/llama-agent-web --timeout=300s
-          kubectl -n llama-agent rollout status deployment/llama-agent-frontend --timeout=300s
+        # API gets 900s: its 2 replicas start one after another and each has a
+        # 10-min startupProbe budget. Prints diagnostics + annotations on failure
+        # and warns if the API can't reach Redis.
+        run: bash k8s/wait-rollout.sh llama-agent
 
   # ============================================================
   # JOB 8: NOTIFY
