@@ -13,7 +13,7 @@ import sys
 import time
 import threading
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional, Iterator, Tuple
 from datetime import datetime
 
@@ -515,24 +515,75 @@ class BaseAgent:
             c = self.critique(task, cur)
             if not c:
                 break
-            messages = [
-                {"role": "system", "content": self._system + "\n\n" + PROMPT_INJECTION_GUARD},
-                {"role": "user", "content": f"<<UNTRUSTED_DATA>>\n{task}\n<</UNTRUSTED_DATA>>"},
-                {"role": "assistant", "content": cur},
-                {"role": "user", "content": (
-                    "A critic flagged issues with your answer:\n" + c +
-                    "\nRevise and improve your answer, addressing each point. "
-                    "Output only the improved final answer."
-                )},
-            ]
-            try:
-                resp = self._chat(messages, max_tokens=2048)
-                cur = resp.choices[0].message.content or cur
-            except Exception:
+            revised = self._revise(task, cur, c)
+            if revised is None:
                 break
+            cur = revised
         return cur
 
-    def _stream_with_tools(self, task: str) -> Iterator[Dict]:
+    def _revise(self, task: str, answer: str, critique_text: str) -> Optional[str]:
+        """One reflexion step: rewrite `answer` to address the critique.
+        Returns None when the revision call fails or comes back empty."""
+        messages = [
+            {"role": "system", "content": self._system + "\n\n" + PROMPT_INJECTION_GUARD},
+            {"role": "user", "content": f"<<UNTRUSTED_DATA>>\n{task}\n<</UNTRUSTED_DATA>>"},
+            {"role": "assistant", "content": answer},
+            {"role": "user", "content": (
+                "A critic flagged issues with your answer:\n" + critique_text +
+                "\nRevise and improve your answer, addressing each point. "
+                "Output only the improved final answer."
+            )},
+        ]
+        try:
+            resp = self._chat(messages, max_tokens=2048)
+            text = (resp.choices[0].message.content or "").strip()
+            return text or None
+        except Exception:
+            return None
+
+    def _review_stream(self, task: str, answer: str, critique: bool,
+                       reflect: bool):
+        """Critic / reflection pass on a finished answer, BEFORE it streams.
+
+        Yields reasoning events for the UI and returns the (possibly revised)
+        answer: ``answer = yield from self._review_stream(...)``. Reflection
+        needs a critique to act on, so reflect implies a critic pass.
+        """
+        if not (critique or reflect) or not answer:
+            return answer
+        try:
+            c = self.critique(task, answer)
+        except Exception:
+            c = ""
+        if not c:
+            yield {"type": "reasoning", "stage": "critic",
+                   "content": "Critic found no issues"}
+            return answer
+        yield {"type": "reasoning", "stage": "critic", "content": c}
+        if not reflect:
+            return answer
+        max_reflect = max(1, int(os.getenv("AGENT_REFLECT_MAX", "1")))
+        cur = answer
+        for i in range(max_reflect):
+            if i:
+                c = self.critique(task, cur)
+                if not c:
+                    break
+            revised = self._revise(task, cur, c)
+            if revised is None:
+                yield {"type": "reasoning", "stage": "reflection",
+                       "content": "Revision failed; keeping the original answer"}
+                break
+            cur = revised
+            yield {"type": "reasoning", "stage": "reflection",
+                   "content": f"Revised the answer to address the critique (pass {i + 1})"}
+        return cur
+
+    EMPTY_ANSWER = ("⚠️ The model returned an empty answer. Please try again, "
+                    "or rephrase the question.")
+
+    def _stream_with_tools(self, task: str, critique: bool = False,
+                           reflect: bool = False) -> Iterator[Dict]:
         """Run a task through the real tool loop with streaming.
 
         Yields dicts: {"type": "tool", "content": ...} for each tool call as
@@ -553,13 +604,30 @@ class BaseAgent:
             ]
 
         def _tokens(stream):
+            """Stream answer tokens; returns how many characters arrived so
+            callers can detect an empty answer (reasoning models sometimes
+            spend the whole budget thinking and emit no content)."""
+            n = 0
             for chunk in stream:
                 choices = getattr(chunk, "choices", None) or []
                 delta = getattr(choices[0], "delta", None) if choices else None
                 text = getattr(delta, "content", None) if delta else None
                 if text:
+                    n += len(text.strip())
                     yield {"type": "token", "content": text}
             yield {"type": "token", "content": ""}
+            return n
+
+        def _fast_rescue(msgs):
+            """Last resort when a stream produced no text: one non-streaming
+            call on the fast tier. Returns the answer or ''."""
+            try:
+                resp = self.client.chat.completions.create(
+                    model=resolve_model("fast"), messages=msgs, max_tokens=2048
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except Exception:
+                return ""
 
         def _text_tokens(text):
             """Emit an already-generated answer as token events so the UI
@@ -600,8 +668,9 @@ class BaseAgent:
                             model=candidate, messages=_initial_messages(),
                             stream=True, max_tokens=2048
                         )
-                        yield from _tokens(stream)
-                        return
+                        got = yield from _tokens(stream)
+                        if got:
+                            return
                     except Exception:  # nosec B112
                         continue
                 yield {"type": "token", "content":
@@ -611,12 +680,19 @@ class BaseAgent:
         for ev in events:
             yield {"type": "tool", "content": ev}
 
+        if final_content and is_frame_response(final_content):
+            final_content = None
+
         # The tool round produced a real answer — stream that text directly.
         # No extra generation call, so a rate-limited / TPM-limited tier can
         # never kill the stream after the work is already done.
-        if (final_content
-                and not self._TOOL_TRANSCRIPT_RE.match(final_content.strip())
-                and not is_frame_response(final_content)):
+        if (final_content and final_content.strip()
+                and not self._TOOL_TRANSCRIPT_RE.match(final_content.strip())):
+            # DSA critic / reflection runs on the finished answer BEFORE it
+            # streams, so a revision replaces the draft instead of being
+            # appended after the user already read it.
+            final_content = yield from self._review_stream(
+                task, final_content, critique, reflect)
             yield from _text_tokens(final_content)
             return
 
@@ -644,7 +720,13 @@ class BaseAgent:
                 model=resolve_model("fast"), messages=stream_messages,
                 stream=True, max_tokens=2048
             )
-        yield from _tokens(stream)
+        got = yield from _tokens(stream)
+        if not got:
+            rescued = _fast_rescue(stream_messages)
+            if rescued:
+                rescued = yield from self._review_stream(
+                    task, rescued, critique, reflect)
+            yield from _text_tokens(rescued or self.EMPTY_ANSWER)
     
     def think(self, task: str) -> str:
         """Think about a task (user input is treated as untrusted data)."""
@@ -719,9 +801,10 @@ class ResearchAgent(BaseAgent):
         """Research a topic with real tool calling (web search + document reads)."""
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
-    def execute_stream(self, task: str) -> Iterator[Dict]:
+    def execute_stream(self, task: str, critique: bool = False,
+                       reflect: bool = False) -> Iterator[Dict]:
         """Research a topic with streaming (tool activity, then answer tokens)."""
-        yield from self._stream_with_tools(task)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
 
 
 class CoderAgent(BaseAgent):
@@ -750,9 +833,10 @@ class CoderAgent(BaseAgent):
         """Write or review code"""
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
-    def execute_stream(self, task: str) -> Iterator[Dict]:
+    def execute_stream(self, task: str, critique: bool = False,
+                       reflect: bool = False) -> Iterator[Dict]:
         """Write/review code with streaming (tool activity, then tokens)."""
-        yield from self._stream_with_tools(task)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
 
 
 class WriterAgent(BaseAgent):
@@ -779,9 +863,10 @@ class WriterAgent(BaseAgent):
         """Write content"""
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
-    def execute_stream(self, task: str) -> Iterator[Dict]:
+    def execute_stream(self, task: str, critique: bool = False,
+                       reflect: bool = False) -> Iterator[Dict]:
         """Write content with streaming (tool activity, then tokens)."""
-        yield from self._stream_with_tools(task)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
 
 
 class AnalyzerAgent(BaseAgent):
@@ -809,9 +894,10 @@ class AnalyzerAgent(BaseAgent):
         """Analyze data or information"""
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
-    def execute_stream(self, task: str) -> Iterator[Dict]:
+    def execute_stream(self, task: str, critique: bool = False,
+                       reflect: bool = False) -> Iterator[Dict]:
         """Analyze with streaming (tool activity, then tokens)."""
-        yield from self._stream_with_tools(task)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
 
 
 class PlannerAgent(BaseAgent):
@@ -838,9 +924,10 @@ class PlannerAgent(BaseAgent):
         """Create a plan"""
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
-    def execute_stream(self, task: str) -> Iterator[Dict]:
+    def execute_stream(self, task: str, critique: bool = False,
+                       reflect: bool = False) -> Iterator[Dict]:
         """Create a plan with streaming (tool activity, then tokens)."""
-        yield from self._stream_with_tools(task)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
 
 
 # ============ MULTI-AGENT ORCHESTRATOR ============
@@ -1145,58 +1232,115 @@ class MultiAgentOrchestrator:
 
         return final_result
 
-    def collaborate_stream(self, task: str) -> Iterator[Dict]:
+    def collaborate_stream(self, task: str, critique: Optional[bool] = None,
+                           reflect: Optional[bool] = None,
+                           parallel: Optional[bool] = None) -> Iterator[Dict]:
         """Streaming multi-agent collaboration (item 10).
 
         Yields events:
+          {"type": "reasoning", "stage": ..., "content": ...} (plan / parallel /
+                                                    critic / reflection notes)
           {"type": "agent_start", "agent": <name>, "step": <id>}
           {"type": "tool", "content": <text>}        (tool activity, if any)
           {"type": "token", "content": <text>}       (per-token from the agent)
           {"type": "agent_done", "agent": <name>, "step": <id>, "content": <full>}
           {"type": "final", "content": <combined summary>}
-        Steps run in topological order; each agent streams its own tokens.
+
+        Steps run level by level in topological order. With ``parallel`` the
+        steps of one level execute concurrently (each agent's events are
+        buffered and emitted when it finishes, in completion order); without
+        it every step runs one after another and streams live. ``critique``
+        adds a critic note on the combined result; ``reflect`` lets each step
+        revise its own answer before it is emitted. Unset flags fall back to
+        AGENT_CRITIQUE / AGENT_REFLECT / AGENT_PARALLEL_STEPS env defaults.
         """
-        critique = os.getenv("AGENT_CRITIQUE", "1") == "1"
+        if critique is None:
+            critique = os.getenv("AGENT_CRITIQUE", "1") == "1"
+        if reflect is None:
+            reflect = os.getenv("AGENT_REFLECT", "1") == "1"
+        if parallel is None:
+            parallel = os.getenv("AGENT_PARALLEL_STEPS", "1") == "1"
 
         steps = self._plan_dag(task)
         if steps is None:
             steps = self._default_dag(task)
         levels, _ok = self._topo_levels(steps)
-        flat = [sid for level in levels for sid in level]
         by_id = {s["id"]: s for s in steps}
+        yield {"type": "reasoning", "stage": "plan", "content": " → ".join(
+            " + ".join(by_id[sid]["agent"] for sid in level) for level in levels)}
 
         results: Dict[str, str] = {}
         combined = ["🎯 **Multi-Agent Collaboration Result:**\n"]
-        for sid in flat:
+
+        def _step_events(sid):
+            """Run one step; yields its events and returns its full text."""
             step = by_id[sid]
             agent = self.agents[step["agent"]]
             prompt = self._build_step_prompt(step, results, task)
-            yield {"type": "agent_start", "agent": agent.name, "step": sid}
             full: List[str] = []
             try:
-                for ev in agent.execute_stream(prompt):
-                    if ev.get("type") == "token":
+                for ev in agent.execute_stream(prompt, critique=False, reflect=reflect):
+                    etype = ev.get("type")
+                    if etype == "token":
                         txt = ev.get("content", "")
                         if txt:
                             full.append(txt)
-                            yield {"type": "token", "content": txt}
-                    elif ev.get("type") == "tool":
+                            yield ev
+                    elif etype in ("tool", "reasoning"):
                         yield ev
             except Exception:
                 full = [f"[The {step['agent']} agent could not complete this step.]"]
                 yield {"type": "token", "content": full[0]}
-            out = "".join(full)
+            return "".join(full)
+
+        def _finish(sid, out):
+            step = by_id[sid]
             results[sid] = out
-            yield {"type": "agent_done", "agent": agent.name, "step": sid, "content": out}
             combined.append(f"### {step['agent'].title()} ({sid}):\n{out}\n\n---\n\n")
+            return {"type": "agent_done", "agent": self.agents[step["agent"]].name,
+                    "step": sid, "content": out}
+
+        for level in levels:
+            if parallel and len(level) > 1:
+                names = ", ".join(self.agents[by_id[sid]["agent"]].name for sid in level)
+                yield {"type": "reasoning", "stage": "parallel",
+                       "content": f"Running {len(level)} agents in parallel: {names}"}
+
+                def _collect(sid):
+                    gen = _step_events(sid)
+                    evs: List[Dict] = []
+                    while True:
+                        try:
+                            evs.append(next(gen))
+                        except StopIteration as stop:
+                            return evs, (stop.value or "")
+
+                with ThreadPoolExecutor(max_workers=min(len(level), int(
+                        os.getenv("AGENT_PARALLEL", "4")))) as pool:
+                    futures = {submit_with_context(pool, _collect, sid): sid
+                               for sid in level}
+                    for fut in as_completed(futures):
+                        sid = futures[fut]
+                        evs, out = fut.result()
+                        yield {"type": "agent_start",
+                               "agent": self.agents[by_id[sid]["agent"]].name, "step": sid}
+                        yield from evs
+                        yield _finish(sid, out)
+            else:
+                for sid in level:
+                    yield {"type": "agent_start",
+                           "agent": self.agents[by_id[sid]["agent"]].name, "step": sid}
+                    out = yield from _step_events(sid)
+                    yield _finish(sid, out)
 
         final = "".join(combined)
         if critique:
             c = self.agents["analyzer"].critique(task, final)
             if c:
+                yield {"type": "reasoning", "stage": "critic", "content": c}
                 final += f"### Quality Note:\n{c}\n\n"
         yield {"type": "final", "content": final}
-    
+
     def get_team_status(self) -> str:
         """Get status of all agents"""
         status = "Agent Team Status:\n\n"

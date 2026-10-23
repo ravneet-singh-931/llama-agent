@@ -2386,26 +2386,35 @@ async def chat_stream(
         parallel = (
             request.use_parallel
             if request.use_parallel is not None
-            else True
+            else _dsa_defaults()["parallel"]
         )
         agent_override = request.agent
-        yield (
-            "data: "
-            + json.dumps(
-                {
+
+        def config_event(applied_critic: bool, applied_reflect: bool,
+                         applied_parallel: bool) -> str:
+            """`config` SSE event describing what ACTUALLY runs on the route
+            this message took (the UI chips), plus what was requested.
+            Direct replies (facts, commands, documents, general chat) run no
+            critic/reflection; a single specialist never runs in parallel;
+            only the @team route can use all three."""
+            return (
+                "data: "
+                + json.dumps({
                     "type": "config",
-                    "critic": critic,
-                    "reflection": reflect,
-                    "parallel": parallel,
+                    "critic": applied_critic,
+                    "reflection": applied_reflect,
+                    "parallel": applied_parallel,
                     "agent": agent_override,
-                }
+                    "requested": {"critic": critic, "reflection": reflect,
+                                  "parallel": parallel},
+                })
+                + "\n\n"
             )
-            + "\n\n"
-        )
 
         # Helper: record the assistant reply, emit it, then signal stream end.
         async def done(text: str):
             await _persist_message(user_id, conversation_id, "assistant", text)
+            yield config_event(False, False, False)
             yield f"data: {escape_sse(text)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -2519,6 +2528,7 @@ async def chat_stream(
             await _persist_message(user_id, conversation_id, "user", request.message)
             orchestrator = MultiAgentOrchestrator()
             task = await _with_context(team_task, memory, user_id, conversation_id)
+            yield config_event(critic, reflect, parallel)
             yield (
                 "data: "
                 + json.dumps({"type": "reasoning", "stage": "route",
@@ -2529,7 +2539,8 @@ async def chat_stream(
             streamed = ""
             used_agents = set()
             try:
-                async for ev in _aiter_in_thread(lambda: orchestrator.collaborate_stream(task)):
+                async for ev in _aiter_in_thread(lambda: orchestrator.collaborate_stream(
+                        task, critique=critic, reflect=reflect, parallel=parallel)):
                     if time.monotonic() - start > STREAM_MAX_DURATION:
                         yield f"data: {escape_sse(f'⚠️ Stream timed out after {int(STREAM_MAX_DURATION)}s.')}\n\n"
                         break
@@ -2537,8 +2548,10 @@ async def chat_stream(
                     if etype == "token":
                         streamed += ev.get("content", "")
                         yield f"data: {escape_sse(ev.get('content', ''))}\n\n"
-                    elif etype == "tool":
-                        yield f"data: {escape_sse(ev.get('content', ''))}\n\n"
+                    elif etype in ("tool", "reasoning"):
+                        # Tool activity / plan / critic notes go to the
+                        # reasoning view, never into the answer text.
+                        yield _reasoning_sse(ev)
                     elif etype == "agent_start":
                         used_agents.add(ev.get("agent"))
                         header = f"\n\n### {ev.get('agent', 'Agent')}\n\n"
@@ -2556,6 +2569,9 @@ async def chat_stream(
                 yield f"data: {escape_sse(err)}\n\n"
             await _record_agent_usage(sorted(
                 k for k, a in orchestrator.agents.items() if a.name in used_agents))
+            if not (final_text or streamed).strip():
+                streamed = "⚠️ The agent team returned an empty answer. Please try again."
+                yield f"data: {escape_sse(streamed)}\n\n"
             await _persist_message(user_id, conversation_id, "assistant", final_text or streamed)
             yield "data: [DONE]\n\n"
             return
@@ -2575,33 +2591,44 @@ async def chat_stream(
             task = await _with_context(clean_message, memory, user_id, conversation_id)
             agent = orchestrator.agents[agent_type]
             await _record_agent_usage([agent_type])
+            yield config_event(critic, reflect, False)
             yield (
                 "data: "
                 + json.dumps(
                     {
                         "type": "reasoning",
                         "stage": "route",
-                        "content": f"Routing to {agent.name} agent",
+                        "content": f"Routing to {agent.name}",
                     }
                 )
                 + "\n\n"
             )
             full = ""
+            reviewed = False  # the agent ran critic/reflection itself
             try:
-                async for event in _aiter_in_thread(lambda: agent.execute_stream(task)):
+                async for event in _aiter_in_thread(lambda: agent.execute_stream(
+                        task, critique=critic, reflect=reflect)):
                     if time.monotonic() - start > STREAM_MAX_DURATION:
                         yield f"data: {escape_sse(f'⚠️ Stream timed out after {int(STREAM_MAX_DURATION)}s.')}\n\n"
                         break
-                    if event.get("type") == "tool":
-                        yield f"data: {escape_sse(event['content'])}\n\n"
+                    etype = event.get("type")
+                    if etype in ("tool", "reasoning"):
+                        if etype == "reasoning" and event.get("stage") in ("critic", "reflection"):
+                            reviewed = True
+                        yield _reasoning_sse(event)
                     else:
-                        full += event["content"]
-                        yield f"data: {escape_sse(event['content'])}\n\n"
-            except Exception as e:
-                full = f"⚠️ Error from {agent_type} agent: {e}"
+                        full += event.get("content", "")
+                        yield f"data: {escape_sse(event.get('content', ''))}\n\n"
+            except Exception:
+                logging.getLogger(__name__).exception("%s agent stream failed", agent_type)
+                full = f"⚠️ The {agent.name} could not complete this task. Please try again."
                 yield f"data: {escape_sse(full)}\n\n"
-            # DSA: critic pass on the produced answer (when enabled).
-            if critic and full and not full.startswith("⚠️"):
+            if not full.strip():
+                full = "⚠️ The model returned an empty answer. Please try again, or rephrase the question."
+                yield f"data: {escape_sse(full)}\n\n"
+            # DSA: critic pass on an answer that streamed live (the agent
+            # reviews pre-generated answers itself, before streaming them).
+            if critic and not reviewed and not full.startswith("⚠️"):
                 try:
                     note = orchestrator.agents["analyzer"].critique(task, full)
                     if note:
@@ -2619,6 +2646,7 @@ async def chat_stream(
         else:
             # Stream from general ReAct agent (it reads + writes the SAME memory
             # instances, so the response is saved to this user's conversation).
+            yield config_event(False, False, False)
             yield (
                 "data: "
                 + json.dumps(
@@ -2661,13 +2689,51 @@ async def chat_stream(
     )
 
 
+def _dsa_defaults() -> Dict[str, bool]:
+    """Server-side defaults for the DSA toggles (request fields override)."""
+    return {
+        "critic": os.getenv("AGENT_CRITIQUE", "1") == "1",
+        "reflection": os.getenv("AGENT_REFLECT", "1") == "1",
+        "parallel": os.getenv("AGENT_PARALLEL_STEPS", "1") == "1",
+    }
+
+
+def _reasoning_sse(event: Dict[str, Any]) -> str:
+    """Forward an agent tool/reasoning event as a structured `reasoning`
+    SSE event, so tool markers never get glued into the answer text."""
+    if event.get("type") == "tool":
+        payload = {"type": "reasoning", "stage": "tool",
+                   "content": str(event.get("content", "")).strip()}
+    else:
+        payload = {"type": "reasoning", "stage": event.get("stage", "note"),
+                   "content": event.get("content", "")}
+    return "data: " + json.dumps(payload) + "\n\n"
+
+
+@app.get("/chat/options")
+async def chat_options():
+    """DSA defaults so the UI toggles show what an unset toggle will do."""
+    return {
+        "defaults": _dsa_defaults(),
+        "applies_to": {
+            "critic": "specialist agents and @team",
+            "reflection": "specialist agents and @team steps",
+            "parallel": "@team (independent steps run concurrently)",
+        },
+    }
+
+
 def escape_sse(text: str) -> str:
     """Escape text for SSE.
 
     SSE data lines must not contain raw CR/LF (they would break the
-    line framing). Escape both so multi-line tokens stream safely.
+    line framing). Escape both so multi-line tokens stream safely, and
+    escape backslashes first so a literal backslash-n in model output
+    (e.g. ``print("a\\nb")`` in code) is not turned into a real newline.
+    The Next.js client reverses this in one pass (frontend/src/lib/api.ts).
     """
-    return text.replace("\r", "\\r").replace("\n", "\\n")
+    return (text.replace("\\", "\\\\")
+            .replace("\r", "\\r").replace("\n", "\\n"))
 
 
 class _StreamFailure:

@@ -122,7 +122,7 @@ EXPOSE 8000 8501 8765
 #   - Override examples:
 #     - `docker run <image> streamlit run app.py --server.port 8501 ...` (for web)
 #     - `docker run <image> python mcp_agents_server.py --transport sse ...` (for mcp)
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "120"]
 
 # 💡 LEARNER TIP: Docker Layer Caching
 #   Order matters! Put least-changing instructions first (FROM, RUN apt-get, COPY requirements, RUN pip)

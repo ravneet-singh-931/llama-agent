@@ -689,6 +689,18 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
             # Never let the stream die silently, and never leak internals.
             logger.log_error(e, context=f"Streaming user input: {user_input}")
             yield "\n\n⚠️ Error while generating response. Please try again."
+        if not full_response.strip():
+            # The model streamed nothing (reasoning models occasionally spend
+            # the whole budget thinking). Retry once without streaming so the
+            # user never gets a blank bubble saved to history.
+            try:
+                rescued = (stream_llm.chat(llm_messages, max_tokens=2048).message.content or "").strip()
+            except Exception:
+                rescued = ""
+            full_response = rescued or (
+                "⚠️ The model returned an empty answer. Please try again, "
+                "or rephrase the question.")
+            yield full_response
 
     # Save to memory after streaming is done
     mem.add_message("user", user_input, user_id=user_id, conversation_id=conversation_id)

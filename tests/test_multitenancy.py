@@ -525,7 +525,7 @@ def test_stream_agent_override_and_team(api_client, monkeypatch):
             self.name = key.title()
             self.key = key
 
-        def execute_stream(self, task):
+        def execute_stream(self, task, critique=False, reflect=False):
             calls.append((self.key, task))
             yield {"type": "token", "content": f"[{self.key}]"}
 
@@ -536,7 +536,7 @@ def test_stream_agent_override_and_team(api_client, monkeypatch):
         def __init__(self):
             self.agents = {k: FakeAgent(k) for k in api.AGENT_KEYS}
 
-        def collaborate_stream(self, task):
+        def collaborate_stream(self, task, critique=None, reflect=None, parallel=None):
             calls.append(("team", task))
             for k in ("research", "writer"):
                 yield {"type": "agent_start", "agent": k.title(), "step": k}
@@ -617,3 +617,87 @@ def test_is_db_unavailable_walks_cause_chain():
         assert api._is_db_unavailable(outer)
     assert api._is_db_unavailable(OperationalError("x"))
     assert not api._is_db_unavailable(ValueError("bug"))
+
+
+def test_chat_options_exposes_server_dsa_defaults(api_client, monkeypatch):
+    api, TestClient = api_client
+    monkeypatch.setenv("AGENT_CRITIQUE", "1")
+    monkeypatch.setenv("AGENT_REFLECT", "0")
+    monkeypatch.setenv("AGENT_PARALLEL_STEPS", "1")
+    r = TestClient(api.app).get("/chat/options")
+    assert r.status_code == 200
+    assert r.json()["defaults"] == {"critic": True, "reflection": False, "parallel": True}
+    assert set(r.json()["applies_to"]) == {"critic", "reflection", "parallel"}
+
+
+def test_stream_config_reports_what_actually_ran(api_client, monkeypatch):
+    """Chips show the route's real behaviour; flags reach the agents; tool
+    markers go to the reasoning view, not the answer text; an empty answer
+    becomes a visible message."""
+    api, TestClient = api_client
+    import multi_agent
+
+    seen = {}
+
+    class FakeAgent:
+        def __init__(self, key):
+            self.name = key.title() + " Agent"
+            self.key = key
+
+        def execute_stream(self, task, critique=False, reflect=False):
+            seen["agent"] = (critique, reflect)
+            yield {"type": "tool", "content": "⚙️ web_search"}
+            yield {"type": "reasoning", "stage": "critic", "content": "ok"}
+            if "empty" not in task:
+                yield {"type": "token", "content": "answer"}
+
+        def critique(self, task, text):
+            raise AssertionError("agent already reviewed; no second critic pass")
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.agents = {k: FakeAgent(k) for k in api.AGENT_KEYS}
+
+        def collaborate_stream(self, task, critique=None, reflect=None, parallel=None):
+            seen["team"] = (critique, reflect, parallel)
+            yield {"type": "reasoning", "stage": "parallel", "content": "2 agents"}
+            yield {"type": "final", "content": "TEAM"}
+
+    monkeypatch.setattr(multi_agent, "MultiAgentOrchestrator", FakeOrchestrator)
+    from modules.memory import ConversationMemory, FactMemory
+    monkeypatch.setattr(api.app.state, "memory", ConversationMemory(), raising=False)
+    monkeypatch.setattr(api.app.state, "facts", FactMemory(), raising=False)
+    c = TestClient(api.app)
+
+    # Direct reply (fact command): nothing ran -> no chips.
+    events, _ = _sse_text(c.post("/chat/stream", json={
+        "message": "remember color = blue", "use_critic": True}).text)
+    cfg = [e for e in events if e["type"] == "config"]
+    assert len(cfg) == 1
+    assert (cfg[0]["critic"], cfg[0]["reflection"], cfg[0]["parallel"]) == (False, False, False)
+    assert cfg[0]["requested"]["critic"] is True
+
+    # Specialist: critic/reflect forwarded, never parallel, clean text.
+    events, text = _sse_text(c.post("/chat/stream", json={
+        "message": "hello", "agent": "coder", "use_critic": True,
+        "use_reflection": True, "use_parallel": True}).text)
+    cfg = [e for e in events if e["type"] == "config"][-1]
+    assert (cfg["critic"], cfg["reflection"], cfg["parallel"]) == (True, True, False)
+    assert seen["agent"] == (True, True)
+    assert text == "answer"  # no "⚙️ web_search" glued into the answer
+    assert {"type": "reasoning", "stage": "tool", "content": "⚙️ web_search"} in events
+    assert any(e.get("content") == "Routing to Coder Agent" for e in events)
+
+    # Empty specialist answer -> visible warning instead of a blank bubble.
+    _, text = _sse_text(c.post("/chat/stream", json={
+        "message": "empty please", "agent": "coder"}).text)
+    assert "empty answer" in text
+
+    # Team: all three flags pass through and show as chips.
+    events, _ = _sse_text(c.post("/chat/stream", json={
+        "message": "@team launch", "use_critic": False,
+        "use_reflection": True, "use_parallel": False}).text)
+    assert seen["team"] == (False, True, False)
+    cfg = [e for e in events if e["type"] == "config"][-1]
+    assert (cfg["critic"], cfg["reflection"], cfg["parallel"]) == (False, True, False)
+    assert {"type": "reasoning", "stage": "parallel", "content": "2 agents"} in events

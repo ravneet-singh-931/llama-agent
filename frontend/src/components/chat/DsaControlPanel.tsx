@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useChatStore } from "@/store/chat-store";
-import type { DsaOptions } from "@/lib/api";
+import { api } from "@/lib/api";
+import type { ChatOptions, DsaDefaults, DsaOptions } from "@/lib/api";
 
 const AGENTS = [
   { key: "", label: "Auto (route)" },
@@ -13,10 +15,12 @@ const AGENTS = [
   { key: "team", label: "Whole team" },
 ];
 
-const TOGGLES: { key: keyof DsaOptions; label: string }[] = [
-  { key: "use_critic", label: "Critic" },
-  { key: "use_reflection", label: "Reflect" },
-  { key: "use_parallel", label: "Parallel" },
+type ToggleKey = "use_critic" | "use_reflection" | "use_parallel";
+
+const TOGGLES: { key: ToggleKey; label: string; server: keyof DsaDefaults }[] = [
+  { key: "use_critic", label: "Critic", server: "critic" },
+  { key: "use_reflection", label: "Reflect", server: "reflection" },
+  { key: "use_parallel", label: "Parallel", server: "parallel" },
 ];
 
 // Exported so other controls (agent quick-picks) stay in sync with the panel.
@@ -26,19 +30,46 @@ export function DsaControlPanel() {
   const dsaOptions = useChatStore((s) => s.dsaOptions);
   const setDsaOptions = useChatStore((s) => s.setDsaOptions);
 
-  const toggle = (key: keyof DsaOptions) =>
-    setDsaOptions({ ...dsaOptions, [key]: !dsaOptions[key] });
+  // Server defaults: an untouched toggle shows what the server will
+  // actually do, instead of looking "off" while the feature runs.
+  const [options, setOptions] = useState<ChatOptions | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .getChatOptions()
+      .then((o) => {
+        if (alive) setOptions(o);
+      })
+      .catch(() => {
+        /* older backend: fall back to "off" display */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const effective = (t: (typeof TOGGLES)[number]) =>
+    dsaOptions[t.key] ?? options?.defaults?.[t.server] ?? false;
+
+  const toggle = (t: (typeof TOGGLES)[number]) =>
+    setDsaOptions({ ...dsaOptions, [t.key]: !effective(t) } as DsaOptions);
 
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-xs">
       <span className="font-medium text-muted-foreground">DSA:</span>
       {TOGGLES.map((t) => {
-        const active = dsaOptions[t.key] === true;
+        const active = effective(t);
+        const scope = options?.applies_to?.[t.server];
+        const isDefault = dsaOptions[t.key] === undefined;
         return (
           <button
             key={t.key}
             type="button"
-            onClick={() => toggle(t.key)}
+            aria-pressed={active}
+            title={`${t.label}: ${active ? "on" : "off"}${
+              isDefault && options ? " (server default)" : ""
+            }${scope ? ` - applies to ${scope}` : ""}`}
+            onClick={() => toggle(t)}
             className={`rounded-full border px-2.5 py-1 transition-colors ${
               active
                 ? "border-primary bg-primary/10 text-foreground"
