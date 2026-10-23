@@ -5,6 +5,27 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.5] - 2026-10-23
+
+From the CRM-3.docx document (RAG) test.
+
+### Fixed
+- **A raw provider error was shown in the chat.** When the free-tier daily token limit was hit,
+  the answer was the full Groq 429 text (organisation ID, quota numbers, upgrade link).
+  Document answers and comparisons now say which limit was hit (daily or per-minute) and
+  roughly when to try again. The full error goes to the logs only.
+- **Errors and cut-off answers were cached.** An error became the cached answer (the semantic
+  cache lives in ChromaDB and survives deploys), so asking again repeated it. Empty, cut-off
+  and error answers are no longer cached, and errors cached by older versions are ignored and
+  answered fresh.
+- **Answers ended mid-sentence.** The fast model's hidden reasoning counts against the token
+  limit, and 1024 tokens could run out after a few words ("CRM-3 is"). The budget is now 2048
+  (`DOC_ANSWER_MAX_TOKENS`). An answer cut off almost at once is retried through the existing
+  second pass. A long answer that is cut off keeps its text plus a visible note.
+- **Every answer began with a "Document description" line.** That line is now only for
+  questions about the whole document (summarise, overview, "what is this file?"). Specific
+  questions get a direct answer.
+
 ## [3.4.4] - 2026-10-23
 
 From a real "Whole Team" chat: a paragraph on pollution plus five years of data.
