@@ -452,6 +452,7 @@ Admin endpoints need `users.is_admin = true`
 | `JWT_EXPIRE_MINUTES` / `JWT_REFRESH_EXPIRE_DAYS` | Access / refresh token lifetime | `30` / `7` |
 | `USE_OPTIMIZED_RAG` | Hybrid BM25+vector search, reranker, contextual chunks, semantic cache | `true` (Compose/k8s) |
 | `RAG_CRAG` / `RAG_DECOMPOSE` / `RAG_QUERY_REWRITE` | Corrective-RAG answer check / sub-question decomposition / follow-up rewrite | `0` / `0` / `1` |
+| `DOC_ANSWER_MAX_TOKENS` | Token budget for a document answer or comparison (min 512) | `2048` |
 | `RAG_BM25_TTL` | Seconds before the BM25 keyword index is rebuilt (picks up other replicas' uploads) | `300` |
 | `GROQ_PRICING` | JSON price overrides for cost tracking, e.g. `{"qwen/qwen3.8-27b":{"input":0.2,"output":0.6}}` (USD / 1M tokens) | built-in Groq list prices |
 | `METRICS_ALLOW_PROXIED` | `1` = serve `/metrics` even through a proxy (off: proxied requests get 404) | `0` |

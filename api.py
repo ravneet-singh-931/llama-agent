@@ -14,6 +14,7 @@ import asyncio
 import heapq
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -1831,18 +1832,113 @@ def _reformulate_doc_query(query: str, context: str, client) -> str:
     return q
 
 
+class DocAnswerUnavailable(Exception):
+    """The model could not answer (rate limit, outage). ``str(e)`` is a
+    user-facing message; such results are never cached."""
+
+
+_RETRY_IN_RE = re.compile(
+    r"try again in\s+(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:([\d.]+)s)?", re.I)
+
+
+def friendly_llm_error(error) -> str:
+    """User-facing text for a failed model call. Never the raw provider
+    error: it carries the organisation ID, quota numbers and an upgrade
+    link. The full error goes to the logs instead."""
+    text = str(error)
+    low = text.lower()
+    if "429" in text or "rate limit" in low or "rate_limit" in low:
+        daily = "per day" in low or "(tpd)" in low or "(rpd)" in low
+        what = ("today's free-tier AI usage limit" if daily
+                else "the free-tier per-minute AI limit")
+        wait = " Please try again shortly."
+        m = _RETRY_IN_RE.search(text)
+        if m and any(m.groups()):
+            h, mins, secs = m.groups()
+            total = int(h or 0) * 3600 + int(mins or 0) * 60 + float(secs or 0)
+            if total < 60:
+                wait = " Please try again in a minute."
+            else:
+                n = math.ceil(total / 60)
+                wait = f" Please try again in about {n} minutes."
+        return f"⚠️ I've hit {what}, so I can't answer right now.{wait}"
+    return "⚠️ The AI model is unavailable right now. Please try again in a moment."
+
+
+# Questions about a document AS A WHOLE ("summarize it", "what is this
+# file?") - only these get a one-line description of the document first.
+_WHOLE_DOC_RE = re.compile(
+    r"\b(summar\w*|sumar\w*|overview|outline|describe|"
+    r"what\s+(is|'s)\s+(this|that|the|my)\s+(\w+\s+)?(file|document|doc)\b|"
+    r"what\s+(are|is)\s+(these|those|the|my)\s+(\w+\s+)?(files|documents|docs)\b|"
+    r"what\s+(does|do)\s+(it|they|this|the\s+\S+\s+(file|document|doc))\s+(contain|cover)|"
+    r"tell\s+me\s+about\s+(this|the|my)\s+(\w+\s+)?(file|document|doc))",
+    re.I,
+)
+
+# Marks an answer cut off by the token limit (such answers are not cached).
+_DOC_CUT_NOTE = "_(The answer was cut off at the length limit. Ask a narrower question for the rest.)_"
+
+
+# Error texts older versions returned as answers - and cached (the semantic
+# cache lives in ChromaDB and survives deploys). Never serve them.
+_LEGACY_DOC_ERRORS = ("Could not summarize the documents right now",
+                      "Could not compare the documents right now")
+
+
+def _usable_doc_answer(text) -> bool:
+    """True for a real answer that may be cached or served from the cache:
+    not empty, not cut off, not an error message."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    t = text.strip()
+    return (_DOC_CUT_NOTE not in t and not t.startswith("⚠️")
+            and not t.startswith(_LEGACY_DOC_ERRORS))
+
+
+def _doc_answer_tokens() -> int:
+    """Answer budget for document questions (DOC_ANSWER_MAX_TOKENS). The fast
+    model is a reasoning model: its hidden thinking counts against this
+    budget, and at 1024 a tricky question could end mid-sentence."""
+    try:
+        return max(512, int(os.getenv("DOC_ANSWER_MAX_TOKENS", "2048")))
+    except ValueError:
+        return 2048
+
+
+def _doc_completion_text(resp) -> str:
+    """The answer text; a truncated answer with almost nothing written is
+    returned as '' (thin -> the caller's second pass retries), a long one
+    keeps what was written plus a visible note."""
+    choice = resp.choices[0]
+    text = (choice.message.content or "").strip()
+    if getattr(choice, "finish_reason", None) == "length":
+        if len(text) < 200:
+            return ""
+        text += "\n\n" + _DOC_CUT_NOTE
+    return text
+
+
 def _ask_doc_question(client, query: str, context: str) -> str:
-    """One LLM answer about uploaded documents from the retrieved context."""
+    """One LLM answer about uploaded documents from the retrieved context.
+    Raises DocAnswerUnavailable (friendly message) when the model can't answer."""
+    if _WHOLE_DOC_RE.search(query or ""):
+        opening = (
+            "First, in one short line, state exactly what this document IS: its "
+            "type (e.g. Python application, CSV dataset, Word/Markdown/PDF "
+            "document), its purpose, and the main technology or content it "
+            "involves. Use the file names and excerpt content shown above - do "
+            "not guess beyond what the excerpts show.\n"
+            "Then answer"
+        )
+    else:
+        opening = ("Answer the question directly - do not start by describing "
+                   "the document. Answer")
     prompt = (
         "You are answering a question about the user's uploaded documents.\n\n"
         f"Document excerpts:\n{context}\n\n"
         f"Question: {query}\n\n"
-        "First, in one short line, state exactly what this document IS: its "
-        "type (e.g. Python application, CSV dataset, Word/Markdown/PDF "
-        "document), its purpose, and the main technology or content it "
-        "involves. Use the file names and excerpt content shown above - do "
-        "not guess beyond what the excerpts show.\n"
-        "Then answer the question using ONLY the excerpts above. Cite the "
+        f"{opening} the question using ONLY the excerpts above. Cite the "
         "source for EVERY claim by appending the exact file name and chunk "
         "from the 'Source:' labels in parentheses, e.g. (CRM-3.docx, chunk "
         "2) - every sentence that makes a factual statement must end with "
@@ -1859,11 +1955,12 @@ def _ask_doc_question(client, query: str, context: str) -> str:
                 {"role": "system", "content": "You are a helpful assistant that answers questions about uploaded documents."},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=1024,
+            max_tokens=_doc_answer_tokens(),
         )
-        return resp.choices[0].message.content
     except Exception as e:
-        return f"Could not summarize the documents right now: {e}"
+        logging.getLogger(__name__).warning("document answer failed: %s", e)
+        raise DocAnswerUnavailable(friendly_llm_error(e)) from e
+    return _doc_completion_text(resp)
 
 
 def _doc_match_score(query_lower: str, path: str) -> int:
@@ -2001,11 +2098,13 @@ def _compare_documents(query: str, files, rag, client) -> str:
                 {"role": "system", "content": "You are a careful document analyst."},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=1200,
+            max_tokens=_doc_answer_tokens(),
         )
-        return resp.choices[0].message.content
     except Exception as e:
-        return f"Could not compare the documents right now: {e}"
+        logging.getLogger(__name__).warning("document comparison failed: %s", e)
+        return friendly_llm_error(e)
+    return (_doc_completion_text(resp)
+            or "⚠️ The comparison couldn't be completed. Please ask again.")
 
 
 def _retrieve_context(rag, query: str, top_k: int = 6, history: str = "") -> str:
@@ -2070,17 +2169,21 @@ def answer_from_documents(query: str, rag) -> str:
     # never stale after a re-upload.
     cache_key = _doc_cache_key(rag, query)
     cached = _doc_answer_cache.get(cache_key)
-    if cached:
+    if _usable_doc_answer(cached):
         return cached
 
     # Semantic Cache (owner-scoped): serve a cached answer if one exists
+    # (an error cached by an older version is ignored -> answered fresh).
     get_cached = getattr(rag, "get_cached_answer", None)
     cached = get_cached(query) if callable(get_cached) else None
-    if cached:
+    if _usable_doc_answer(cached):
         _doc_answer_cache.put(cache_key, cached)
         return cached
 
     def _remember(answer: str) -> None:
+        # Never cache an empty, cut-off or error answer: asking again must retry.
+        if not _usable_doc_answer(answer):
+            return
         cache = getattr(rag, "cache_answer", None)
         if callable(cache):
             try:
@@ -2111,7 +2214,11 @@ def answer_from_documents(query: str, rag) -> str:
     if is_compare:
         return _compare_documents(query, compare_files, rag, client)
 
-    first = _ask_doc_question(client, query, context)
+    try:
+        first = _ask_doc_question(client, query, context)
+    except DocAnswerUnavailable as e:
+        return str(e)  # friendly message; not cached, so asking again retries
+    retry_error = ""  # set if the second pass hits a rate limit/outage
 
     # Corrective RAG (RAG_CRAG=1, OptimizedRAG): an answer the verifier finds
     # unsupported by the context is treated like a thin answer -> re-retrieve.
@@ -2130,10 +2237,19 @@ def answer_from_documents(query: str, rag) -> str:
                 # Combine both retrievals (skip if the second is just a
                 # substring of the first - i.e. nothing new was found).
                 combined = context if context2 in context else context + "\n\n" + context2
-                answer = _ask_doc_question(client, reformulated, combined)
-                _remember(answer)
-                return answer
+                try:
+                    answer = _ask_doc_question(client, reformulated, combined)
+                except DocAnswerUnavailable as e:
+                    answer = ""
+                    retry_error = str(e)
+                if answer:
+                    _remember(answer)
+                    return answer
 
+    if not first:
+        return retry_error or (
+            "⚠️ The answer couldn't be completed (the model ran out of room). "
+            "Please ask again, or ask a narrower question.")
     _remember(first)
     return first
 
