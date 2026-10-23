@@ -13,6 +13,7 @@ agent loop.
 """
 
 import json
+import logging
 import os
 import re
 import urllib.parse
@@ -26,6 +27,8 @@ _USER_AGENT = (
 )
 
 _MAX_RESULTS = 5
+
+_log = logging.getLogger("llama_agent.web_tools")
 
 
 def _assert_http(url: str) -> None:
@@ -49,13 +52,14 @@ def _http_get(url: str, timeout: int = 15) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
-def _http_post_json(url: str, payload: dict, timeout: int = 20) -> dict:
+def _http_post_json(url: str, payload: dict, timeout: int = 20,
+                    headers: dict = None) -> dict:
     _assert_http(url)
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **(headers or {})},
         method="POST",
     )
     # B310: see _http_get - fixed https API endpoint only.
@@ -77,14 +81,21 @@ def _format_results(rows) -> str:
 
 
 def _search_tavily(query: str, key: str, max_results: int) -> str:
+    # Tavily authenticates with "Authorization: Bearer tvly-..."; the old
+    # api_key-in-body form is deprecated and rejected by some keys.
+    # TAVILY_SEARCH_DEPTH: "basic" (1 credit) or "advanced" (2 credits,
+    # better snippets).
+    depth = os.getenv("TAVILY_SEARCH_DEPTH", "basic").strip().lower()
+    if depth not in ("basic", "advanced"):
+        depth = "basic"
     data = _http_post_json(
         "https://api.tavily.com/search",
         {
-            "api_key": key,
             "query": query,
             "max_results": max_results,
-            "search_depth": "basic",
+            "search_depth": depth,
         },
+        headers={"Authorization": f"Bearer {key}"},
     )
     rows = [
         {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
@@ -154,6 +165,9 @@ def web_search(query: str, max_results: int = _MAX_RESULTS) -> str:
         try:
             return _search_tavily(query, tavily_key, max_results)
         except Exception as e:
+            # Visible in `kubectl logs` - e.g. HTTP 401 = bad/expired key,
+            # 432/429 = plan credits or rate limit used up.
+            _log.warning("Tavily search failed, falling back to DuckDuckGo: %s", e)
             return f"Tavily web search failed ({e}); falling back to DuckDuckGo.\n" + _safe_ddg(query, max_results)
 
     serpapi_key = get_secret("SERPAPI_API_KEY", default="")

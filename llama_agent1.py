@@ -36,6 +36,7 @@ from llama_index.core.bridge.pydantic import ConfigDict, PrivateAttr
 from llama_index.core.tools import FunctionTool
 
 # Import our custom modules
+from modules.prompt_rules import common_rules, chat_max_tokens
 from modules.memory import ConversationMemory, FactMemory
 from modules.rag import SimpleRAG, DocumentReader
 from modules.monitoring import AgentLogger, PerformanceMonitor
@@ -650,6 +651,8 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
         "Always respond in English. Be concise and direct: answer the question, "
         "show code when asked, and skip verbose introductions, filler, "
         "redundant headings, and marketing language.\n\n"
+        # Built per request, so the date is always today's.
+        + common_rules() + "\n\n"
         + PROMPT_INJECTION_GUARD
     )
 
@@ -680,7 +683,7 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
     with _span_cm("run_agent_stream", user_id, conversation_id):
         try:
             full_response = ""
-            for chunk in stream_llm.stream_chat(llm_messages, max_tokens=2048):
+            for chunk in stream_llm.stream_chat(llm_messages, max_tokens=chat_max_tokens()):
                 token = chunk.text
                 if token:
                     full_response += token
@@ -694,7 +697,7 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
             # the whole budget thinking). Retry once without streaming so the
             # user never gets a blank bubble saved to history.
             try:
-                rescued = (stream_llm.chat(llm_messages, max_tokens=2048).message.content or "").strip()
+                rescued = (stream_llm.chat(llm_messages, max_tokens=chat_max_tokens()).message.content or "").strip()
             except Exception:
                 rescued = ""
             full_response = rescued or (
