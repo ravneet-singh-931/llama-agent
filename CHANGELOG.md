@@ -5,6 +5,26 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.3] - 2026-10-23
+
+Found by the research_news eval run (2/4 passing, while the grounding rate was 0.99).
+
+### Fixed
+- **The eval judge flagged sourced answers as fabricated (eval tool only).** It saw a blind
+  5,000-char head+tail clip of 11,000+ chars of search results, so the passages an answer came
+  from were often cut out. It also judged recent news by its memory: it marked a correct
+  "Verstappen won the 11 Oct 2026 Singapore GP" as wrong because, by its memory, the US GP came
+  first. That holds for older calendars; the 2026 US GP is on 25 October. Now the judge gets the
+  source passages that share the answer's names, numbers and dates (`EVAL_JUDGE_SOURCE_CHARS`,
+  default 8000), and the rubric tells it to judge against the sources, not its memory.
+- **Answers from the agent's wrap-up path skipped the fact check.** When the tool rounds ended
+  without an answer, the forced wrap-up answer and the fast-tier rescue streamed without the
+  grounding report that every other path has. Example: a markets answer full of Sensex/Nifty
+  figures was never checked. Both are now fact-checked.
+- **Citation markers leaked into answers.** The fast reasoning model sometimes leaves internal
+  markers such as `【4†L1-L3】`. They are removed from streamed and pre-generated answers,
+  including a marker split across stream chunks.
+
 ## [3.4.2] - 2026-10-23
 
 ### Fixed

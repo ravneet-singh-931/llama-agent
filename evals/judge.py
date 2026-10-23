@@ -19,7 +19,10 @@ CRITERIA = ("correctness", "completeness", "relevance", "clarity")
 
 RUBRIC = """You are a strict evaluator of an AI assistant's answer. Score each criterion 1-5:
 - correctness: facts, code and reasoning are right; no invented facts, figures or sources.
-  When SOURCES are given, claims not supported by them count against correctness.
+  When SOURCES are given, judge factual claims against them, not against your memory:
+  events after your training data are expected, and schedules, results and prices change.
+  Never call a claim wrong or fabricated only because it differs from what you remember;
+  "fabrication" means a specific claim that the SOURCES do not support (or contradict).
 - completeness: every part of the request is answered.
 - relevance: stays on what was asked; no filler, no talk about its own process.
 - clarity: well organised and easy to use.
@@ -36,13 +39,45 @@ def _clip(text: str, limit: int) -> str:
     return text[:head] + "\n[...]\n" + text[-(limit - head):]
 
 
+_SALIENT_RE = re.compile(r"\d[\d,.:%]*|[A-Z][\w&.-]+|[a-z]{6,}")
+
+
+def _salient(text: str) -> set:
+    """Names, numbers, dates and long words - what a factual claim is made of."""
+    return {t.lower().strip(".,") for t in _SALIENT_RE.findall(text or "")}
+
+
+def relevant_sources(sources: List[str], answer: str, limit: int) -> str:
+    """The source passages that share the most names/numbers with the answer,
+    up to ``limit`` chars, in their original order. A blind head+tail clip of
+    several web searches hid the passages the answer was built from, so the
+    judge flagged sourced facts as fabricated."""
+    passages = [p.strip() for src in sources or []
+                for p in re.split(r"\n\s*\n", src or "")  # one web result each
+                if p and p.strip()]
+    if sum(len(p) for p in passages) <= limit:
+        return "\n---\n".join(passages)
+    want = _salient(answer)
+    ranked = sorted(range(len(passages)),
+                    key=lambda i: len(_salient(passages[i]) & want), reverse=True)
+    keep, used = set(), 0
+    for i in ranked:
+        size = min(len(passages[i]), 1500)
+        if used + size > limit:
+            continue
+        keep.add(i)
+        used += size
+    return "\n---\n".join(passages[i][:1500] for i in sorted(keep))
+
+
 def build_messages(case: Dict, answer: str, sources: List[str], today: str) -> List[Dict]:
     parts = [f"TODAY: {today}", f"REQUEST:\n{case.get('prompt', '')}"]
     if case.get("reference"):
         parts.append(f"REFERENCE NOTE (what a good answer does):\n{case['reference']}")
     if sources:
-        parts.append("SOURCES (excerpt of what the assistant retrieved):\n"
-                     + _clip("\n---\n".join(sources), 5000))
+        limit = int(os.getenv("EVAL_JUDGE_SOURCE_CHARS", "8000"))
+        parts.append("SOURCES (the passages of what the assistant retrieved that "
+                     "relate to its answer):\n" + relevant_sources(sources, answer, limit))
     parts.append(f"ANSWER:\n{_clip(answer, 9000)}")
     return [{"role": "system", "content": RUBRIC},
             {"role": "user", "content": "\n\n".join(parts)}]

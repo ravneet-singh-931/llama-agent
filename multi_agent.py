@@ -36,6 +36,16 @@ from modules.security_hardening import PROMPT_INJECTION_GUARD, detect_prompt_inj
 logger = logging.getLogger(__name__)
 
 
+# Reasoning models trained on browsing (gpt-oss) sometimes leave their
+# internal citation markers in the text, e.g. "【4†L1-L3】". They point at
+# nothing the user can see, so they are removed from every answer.
+_CITE_MARK_RE = re.compile(r"【[^】\n]{0,80}】")
+
+
+def strip_citation_markers(text: str) -> str:
+    return _CITE_MARK_RE.sub("", text or "")
+
+
 def _evidence_block(sources: Optional[List[str]]) -> str:
     """The tool results an answer was built from, clipped for the critic and
     the reviser (AGENT_REVIEW_SOURCE_CHARS, default 4000). Without them a
@@ -690,18 +700,43 @@ class BaseAgent:
                 )},
             ]
 
-        def _tokens(stream):
+        def _tokens(stream, sink=None):
             """Stream answer tokens; returns how many characters arrived so
             callers can detect an empty answer (reasoning models sometimes
-            spend the whole budget thinking and emit no content)."""
+            spend the whole budget thinking and emit no content). Citation
+            markers are stripped - a marker split across chunks is held back
+            until it closes. ``sink`` (a list) collects the streamed text."""
             n = 0
+            held = ""
+
+            def _emit(text):
+                nonlocal n
+                text = strip_citation_markers(text)
+                if not text:
+                    return None
+                n += len(text.strip())
+                if sink is not None:
+                    sink.append(text)
+                return {"type": "token", "content": text}
+
             for chunk in stream:
                 choices = getattr(chunk, "choices", None) or []
                 delta = getattr(choices[0], "delta", None) if choices else None
                 text = getattr(delta, "content", None) if delta else None
-                if text:
-                    n += len(text.strip())
-                    yield {"type": "token", "content": text}
+                if not text:
+                    continue
+                held += text
+                cut = held.rfind("【")
+                if cut != -1 and "】" not in held[cut:] and len(held) - cut < 80:
+                    out, held = held[:cut], held[cut:]
+                else:
+                    out, held = held, ""
+                ev = _emit(out)
+                if ev:
+                    yield ev
+            ev = _emit(held)
+            if ev:
+                yield ev
             yield {"type": "token", "content": ""}
             return n
 
@@ -720,7 +755,7 @@ class BaseAgent:
             """Emit an already-generated answer as token events so the UI
             streams it without another model call (the call that would fail
             when the tier is rate-limited or TPM-limited)."""
-            for chunk in re.split(r"(?<=\s)", text or ""):
+            for chunk in re.split(r"(?<=\s)", strip_citation_markers(text)):
                 if chunk:
                     yield {"type": "token", "content": chunk}
             yield {"type": "token", "content": ""}
@@ -799,6 +834,8 @@ class BaseAgent:
                        "content": report.summary("answer")}
             return answer
 
+        if final_content:
+            final_content = strip_citation_markers(final_content)
         if final_content and is_frame_response(final_content):
             final_content = None
 
@@ -844,12 +881,19 @@ class BaseAgent:
                 stream=True, max_tokens=self.answer_tokens
             )
         yield from _guard_events()
-        got = yield from _tokens(stream)
-        if not got:
+        streamed: List[str] = []
+        got = yield from _tokens(stream, sink=streamed)
+        if got:
+            # Streamed live, so it can only be reported on, not marked: run
+            # the same fact check as the other paths (they used to skip it).
+            yield from _fact_check("".join(streamed))
+        else:
             rescued = _fast_rescue(stream_messages)
             if rescued:
+                rescued = strip_citation_markers(rescued)
                 rescued = yield from self._review_stream(
                     task, rescued, critique, reflect, sources=tool_texts)
+                rescued = yield from _fact_check(rescued)
             yield from _text_tokens(rescued or self.EMPTY_ANSWER)
     
     def think(self, task: str) -> str:
