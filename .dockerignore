@@ -74,3 +74,6 @@ docs
 *~
 .DS_Store
 Thumbs.db
+
+# Locally downloaded RAG reranker model (scripts/download_reranker.py)
+models/

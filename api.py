@@ -507,6 +507,10 @@ async def lifespan(app: FastAPI):
             vector_store = get_vector_store()
             app.state.rag = OptimizedRAG(vector_store)
             print("✅ OptimizedRAG initialized (Hybrid Search, Cross-Encoder, Contextual Retrieval, Query Decomposition, CRAG, Conversational Retrieval, Semantic Cache)")
+            # Load the reranker now (not on the first question) and say which
+            # backend is really in use - "keyword" means no model was found.
+            print(f"🔎 Reranker: {app.state.rag.reranker_backend()} | "
+                  f"CRAG: {'on' if os.getenv('RAG_CRAG', '1') == '1' else 'off'}")
         except Exception as e:
             print(f"⚠️  Failed to initialize OptimizedRAG, falling back to SimpleRAG: {e}")
             app.state.rag = SimpleRAG()
@@ -1680,6 +1684,49 @@ def is_document_question(message: str, rag=None) -> bool:
         return True
     if rag is not None and _detect_compare_documents(message, rag)[0]:
         return True
+    # A question that names one of the user's uploaded files ("what does the
+    # crm file say about X?", "according to the CRM-3 document, ...").
+    if rag is not None and not _CREATE_REQUEST_RE.match(m) and _names_uploaded_document(m, rag):
+        return True
+    return False
+
+
+# Whole words that refer to a file/document (no "doc" inside "docker").
+_DOC_REF_RE = re.compile(r"\b(files?|documents?|docs?|pdfs?|spreadsheets?|sheets?|uploads?|uploaded)\b")
+
+# "write/create/generate ... a file" is a task for an agent, not a document question.
+_CREATE_REQUEST_RE = re.compile(
+    r"^\s*(please\s+|can\s+you\s+|could\s+you\s+)?"
+    r"(write|create|generate|build|make|code|implement|draft|design)\b")
+
+# File-name words too generic to identify a document.
+_GENERIC_NAME_TOKENS = frozenset(
+    "the and for with file files doc docs document documents copy final new untitled".split())
+
+
+def _names_uploaded_document(message_lower: str, rag) -> bool:
+    """True if the message names one of the uploaded files: its full file name,
+    or a distinctive word of its name within 3 words of a file/document word
+    ("the crm file", "the CRM-3 document", "the sales sheet") - not just both
+    words somewhere ("what file format suits sales data?"). Pure helper."""
+    tokens = re.findall(r"[a-z0-9]+", message_lower)
+    ref_pos = [i for i, t in enumerate(tokens) if _DOC_REF_RE.fullmatch(t)]
+    try:
+        docs = rag.list_documents() or []
+    except Exception:
+        return False
+    for path in docs:
+        base = os.path.basename(str(path)).lower()
+        if base and base in message_lower:
+            return True
+        if not ref_pos:
+            continue
+        stem = os.path.splitext(base)[0]
+        name_words = {t for t in re.findall(r"[a-z0-9]+", stem)
+                      if len(t) >= 3 and not t.isdigit() and t not in _GENERIC_NAME_TOKENS}
+        if any(t in name_words and any(abs(i - r) <= 3 for r in ref_pos)
+               for i, t in enumerate(tokens)):
+            return True
     return False
 
 
@@ -1880,6 +1927,12 @@ _WHOLE_DOC_RE = re.compile(
 _DOC_CUT_NOTE = "_(The answer was cut off at the length limit. Ask a narrower question for the rest.)_"
 
 
+# Marks an answer Corrective RAG could not verify against the excerpts
+# (shown so the user knows, never cached so asking again retries).
+_DOC_UNVERIFIED_NOTE = ("_(Some statements in this answer could not be verified "
+                        "against the document excerpts - please double-check them.)_")
+
+
 # Error texts older versions returned as answers - and cached (the semantic
 # cache lives in ChromaDB and survives deploys). Never serve them.
 _LEGACY_DOC_ERRORS = ("Could not summarize the documents right now",
@@ -1892,7 +1945,8 @@ def _usable_doc_answer(text) -> bool:
     if not isinstance(text, str) or not text.strip():
         return False
     t = text.strip()
-    return (_DOC_CUT_NOTE not in t and not t.startswith("⚠️")
+    return (_DOC_CUT_NOTE not in t and _DOC_UNVERIFIED_NOTE not in t
+            and not t.startswith("⚠️")
             and not t.startswith(_LEGACY_DOC_ERRORS))
 
 
@@ -2220,13 +2274,14 @@ def answer_from_documents(query: str, rag) -> str:
         return str(e)  # friendly message; not cached, so asking again retries
     retry_error = ""  # set if the second pass hits a rate limit/outage
 
-    # Corrective RAG (RAG_CRAG=1, OptimizedRAG): an answer the verifier finds
-    # unsupported by the context is treated like a thin answer -> re-retrieve.
+    # Two-pass RAG: retry with a reformulated search when the first answer is
+    # thin, or when Corrective RAG (OptimizedRAG.verify_answer, RAG_CRAG=1)
+    # finds claims the excerpts don't support. Thin answers skip the check.
     verify = getattr(rag, "verify_answer", None)
-    unsupported = callable(verify) and not verify(first, context)
+    thin = is_thin_answer(first)
+    unsupported = bool(not thin and callable(verify) and not verify(first, context))
 
-    # Two-pass RAG: only retry when the first answer is actually thin.
-    if unsupported or is_thin_answer(first):
+    if unsupported or thin:
         reformulated = _reformulate_doc_query(query, context, client)
         if reformulated and reformulated.lower() != query.strip().lower():
             try:
@@ -2238,10 +2293,14 @@ def answer_from_documents(query: str, rag) -> str:
                 # substring of the first - i.e. nothing new was found).
                 combined = context if context2 in context else context + "\n\n" + context2
                 try:
-                    answer = _ask_doc_question(client, reformulated, combined)
+                    # The reformulation is a SEARCH query; the answer is still
+                    # to the user's own question.
+                    answer = _ask_doc_question(client, query, combined)
                 except DocAnswerUnavailable as e:
                     answer = ""
                     retry_error = str(e)
+                if answer and unsupported and not verify(answer, combined):
+                    return answer + "\n\n" + _DOC_UNVERIFIED_NOTE  # shown, not cached
                 if answer:
                     _remember(answer)
                     return answer
@@ -2250,9 +2309,10 @@ def answer_from_documents(query: str, rag) -> str:
         return retry_error or (
             "⚠️ The answer couldn't be completed (the model ran out of room). "
             "Please ask again, or ask a narrower question.")
+    if unsupported:
+        return first + "\n\n" + _DOC_UNVERIFIED_NOTE  # shown, not cached
     _remember(first)
     return first
-
 
 
 @app.post("/chat", response_model=ChatResponse)

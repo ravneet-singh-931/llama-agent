@@ -94,6 +94,13 @@ GROUNDING_CLAIMS = Counter(
 )
 
 
+RAG_CRAG_VERDICTS = Counter(
+    "llama_agent_rag_crag_verdicts_total",
+    "Corrective-RAG checks of document answers against their excerpts",
+    ["verdict"],  # supported | unsupported | unsure
+)
+
+
 def record_llm_usage(model: str, input_tokens: int, output_tokens: int) -> float:
     """Record one LLM call's token usage in Prometheus + the CostTracker
     (/monitoring/dashboard). Never raises - metrics must not break chat."""

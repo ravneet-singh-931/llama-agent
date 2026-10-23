@@ -38,7 +38,14 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov pytest-asyncio
 
+      # Real ONNX reranker model (same pinned file the image ships), so
+      # tests/test_reranker_onnx.py checks the real model's ranking.
+      - name: "\U0001F50E Download reranker model"
+        run: python scripts/download_reranker.py /tmp/reranker-model
+
       - name: "\U0001F9EA Run tests with coverage"
+        env:
+          RERANKER_TEST_MODEL_DIR: /tmp/reranker-model
         run: |
           pytest tests/ -v -m "not mcp" --tb=short -p no:phoenix \
             --cov=. --cov-report=xml --cov-report=term

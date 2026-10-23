@@ -224,3 +224,221 @@ def test_second_pass_rate_limit_reports_the_limit(use_client):
     out = answer_from_documents("what about capital allocation?", rag)
     assert out.startswith("⚠️") and "usage limit" in out and "org_" not in out
     assert rag.stored == []
+
+
+# ================================================================ v3.4.6 ==
+# Corrective RAG really runs, versioned answer cache, file-name routing.
+
+UNSUPPORTED_ANSWER = ("Shopify peaked at 80x revenue in 2021 and capital allocation "
+                      "covers unit economics (CRM-3.docx, chunk 1).")
+
+
+class _LLM:
+    """Fake GroqLLMClient for OptimizedRAG.verify_answer."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    def complete(self, system_prompt, user_prompt, max_tokens=500):
+        self.calls.append({"system": system_prompt, "user": user_prompt, "max_tokens": max_tokens})
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+def _verifier(reply):
+    from modules.rag_optimizations import OptimizedRAG
+    rag = OptimizedRAG.__new__(OptimizedRAG)  # verify_answer only needs _llm
+    rag._llm = _LLM(reply)
+    return rag
+
+
+@pytest.mark.parametrize("reply,ok", [
+    ("SUPPORTED", True),
+    ("UNSUPPORTED", False),
+    ("Checking each claim... the 80x figure is absent. UNSUPPORTED", False),
+    ("NOT SUPPORTED", False),
+    ("supported", True),
+    ("", True),                  # empty (old 5-token budget) -> unsure -> passes
+    (RuntimeError("429"), True),  # model unavailable -> unsure -> passes
+])
+def test_crag_verdicts(reply, ok, monkeypatch):
+    monkeypatch.delenv("RAG_CRAG", raising=False)  # on by default now
+    rag = _verifier(reply)
+    assert rag.verify_answer("some answer", "Source: CRM-3.docx (chunk 0)\nctx") is ok
+    call = rag._llm.calls[0]
+    # a reasoning model needs room to think before the verdict
+    assert call["max_tokens"] >= 256
+
+
+def test_crag_sees_the_same_excerpts_the_answer_used(monkeypatch):
+    monkeypatch.delenv("RAG_CRAG", raising=False)
+    rag = _verifier("SUPPORTED")
+    context = "Source: CRM-3.docx (chunk 5)\n" + ("x" * 9000) + "LAST-CHUNK-MARKER"
+    rag.verify_answer("answer", context)
+    assert "LAST-CHUNK-MARKER" in rag._llm.calls[0]["user"]
+
+
+def test_crag_can_be_switched_off(monkeypatch):
+    monkeypatch.setenv("RAG_CRAG", "0")
+    rag = _verifier("UNSUPPORTED")
+    assert rag.verify_answer("answer", "ctx") is True and rag._llm.calls == []
+
+
+class _VerifyingRag(_Rag2):
+    """_Rag2 plus a scripted Corrective-RAG verifier."""
+
+    def __init__(self, verdicts):
+        super().__init__()
+        self.verdicts = list(verdicts)
+        self.verified = []
+
+    def verify_answer(self, answer, context):
+        self.verified.append(answer)
+        return self.verdicts.pop(0)
+
+
+def test_unsupported_answer_is_retried_and_the_retry_answers_the_users_question(use_client):
+    from api import answer_from_documents
+    rag = _VerifyingRag([False, True])
+    client = _Client([_resp(UNSUPPORTED_ANSWER), _resp(GOOD)],
+                     reformulated="capital allocation behaviour CRM-3")
+    use_client(client)
+    q = "What is the capital allocation point in the CRM file?"
+    assert answer_from_documents(q, rag) == GOOD
+    assert rag.verified == [UNSUPPORTED_ANSWER, GOOD]
+    assert rag.stored == [GOOD]
+    # the retry still answers the user's question, not the search query
+    answer_calls = [c for c in client.calls if c["max_tokens"] != 120]
+    assert f"Question: {q}" in answer_calls[1]["messages"][-1]["content"]
+
+
+def test_answer_that_stays_unsupported_is_flagged_and_not_cached(use_client):
+    from api import answer_from_documents, _DOC_UNVERIFIED_NOTE
+    rag = _VerifyingRag([False, False])
+    use_client(_Client([_resp(UNSUPPORTED_ANSWER), _resp(UNSUPPORTED_ANSWER)],
+                       reformulated="capital allocation behaviour CRM-3"))
+    out = answer_from_documents("What is the capital allocation point in the CRM file?", rag)
+    assert out.startswith(UNSUPPORTED_ANSWER) and out.endswith(_DOC_UNVERIFIED_NOTE)
+    assert rag.stored == []
+
+
+def test_unsupported_without_a_better_retrieval_is_flagged(use_client):
+    from api import answer_from_documents, _DOC_UNVERIFIED_NOTE
+
+    class _SameContextRag(_Rag):
+        def verify_answer(self, answer, context):
+            return False
+    rag = _SameContextRag()
+    use_client(_Client([_resp(UNSUPPORTED_ANSWER)], reformulated="capital allocation CRM-3"))
+    out = answer_from_documents("What is the capital allocation point in the CRM file?", rag)
+    assert out.endswith(_DOC_UNVERIFIED_NOTE) and rag.stored == []
+
+
+def test_thin_answer_skips_the_paid_check(use_client):
+    from api import answer_from_documents
+    rag = _VerifyingRag([])  # any verify call would pop from an empty list
+    not_there = ("The CRM-3 document does not mention Shopify or its peak multiple "
+                 "(CRM-3.docx, chunk 0).")
+    use_client(_Client([_resp(not_there), _resp(not_there)], reformulated="Shopify peak multiple"))
+    assert answer_from_documents("What is Shopify's peak multiple in the CRM file?", rag) == not_there
+    assert rag.verified == []
+
+
+# ---------------------------------------------------- versioned cache --
+
+class _Collection:
+    """ChromaDB-like: returns stored entries nearest-first with set distances."""
+
+    def __init__(self):
+        self.rows = []  # (distance, metadata)
+
+    def upsert(self, ids, documents, metadatas):
+        self.rows.append((0.0, metadatas[0]))
+
+    def query(self, query_texts, n_results=3, include=None, where=None):
+        rows = sorted(self.rows, key=lambda r: r[0])[:n_results]
+        return {"metadatas": [[m for _d, m in rows]], "distances": [[d for d, _m in rows]]}
+
+
+def _cache_with(rows):
+    from modules.rag_optimizations import SemanticCache
+    coll = _Collection()
+    coll.rows = list(rows)
+    store = SimpleNamespace(client=SimpleNamespace(get_or_create_collection=lambda **kw: coll))
+    return SemanticCache(store), coll
+
+
+def test_answers_cached_by_an_older_version_are_not_served():
+    old = {"answer": "**Document description** CRM-3 is", "owner": ""}  # <= 3.4.5: no "v"
+    cache, _ = _cache_with([(0.05, old)])
+    assert cache.lookup("What is Shopify's peak multiple in the CRM file?") is None
+
+
+def test_a_nearer_old_answer_does_not_hide_a_current_one():
+    from modules.rag_optimizations import SemanticCache
+    old = {"answer": "stale", "owner": ""}
+    new = {"answer": GOOD, "owner": "", "v": SemanticCache.ANSWER_VERSION}
+    cache, _ = _cache_with([(0.02, old), (0.10, new)])
+    assert cache.lookup("q") == GOOD
+    # but never beyond the similarity threshold
+    cache, _ = _cache_with([(0.02, old), (0.50, new)])
+    assert cache.lookup("q") is None
+
+
+def test_new_entries_carry_the_version_and_round_trip():
+    from modules.rag_optimizations import SemanticCache
+    cache, coll = _cache_with([])
+    cache.store("q", GOOD)
+    assert coll.rows[0][1]["v"] == SemanticCache.ANSWER_VERSION
+    assert cache.lookup("q") == GOOD
+
+
+# ------------------------------------------------- file-name routing --
+
+class _Docs:
+    def __init__(self, names):
+        self.names = names
+
+    def list_documents(self):
+        return self.names
+
+
+DOCS = _Docs(["uploads/u1/CRM-3.docx", "uploads/u1/API BOOK.docx", "uploads/u1/sales_2024.csv"])
+
+
+@pytest.mark.parametrize("q", [
+    "What does the crm file say about capital allocation?",
+    "According to the CRM-3 document, what was Shopify's peak multiple?",
+    "What does the CRM-3 document say about cohort durability?",
+    "in the api book doc, how is authentication done?",
+    "does the sales sheet show a drop in Q3?",
+    "Is churn mentioned in CRM-3.docx?",
+])
+def test_questions_naming_an_uploaded_file_are_document_questions(q):
+    from api import is_document_question
+    assert is_document_question(q, DOCS)
+
+
+@pytest.mark.parametrize("q", [
+    "what is a crm?",                                  # no file reference
+    "write a python file that loads crm data",         # a task for the coder
+    "Create a document comparing CRM tools",            # a task for the writer
+    "how do I install docker on ubuntu?",               # "doc" inside "docker"
+    "what file format should I use for sales data?",    # name word far from "file"
+    "which file type is best for exporting crm records?",  # name word far from "file"
+    "summarize today's news about sales tax",           # no file reference
+])
+def test_other_messages_are_not(q):
+    from api import is_document_question
+    assert not is_document_question(q, DOCS)
+
+
+def test_routing_survives_a_failing_store():
+    from api import is_document_question
+
+    class _Broken:
+        def list_documents(self):
+            raise RuntimeError("chroma down")
+    assert not is_document_question("what does the crm file say about pricing?", _Broken())

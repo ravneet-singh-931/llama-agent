@@ -6,8 +6,9 @@ reduce hallucination, and lower cost:
 
 1. Hybrid Search (BM25 + Vector) — fixes keyword-heavy queries
    like "INV-8847", "API_KEY", "Section 4.2" that vector search misses.
-2. Cross-Encoder Reranker — re-ranks top-k results with a local
-   BAAI/bge-reranker-base model (200ms, free, no API cost).
+2. Cross-Encoder Reranker — re-ranks the candidates with a local
+   ms-marco-MiniLM-L-6 cross-encoder run on onnxruntime (no PyTorch,
+   no API cost); keyword reranker if the model is missing.
 3. Contextual Retrieval + Semantic Chunking — prepends a 2-line
    document summary to each chunk AND splits on sentence boundaries.
 4. Query Decomposition + Step-Back — breaks complex queries into
@@ -16,8 +17,8 @@ reduce hallucination, and lower cost:
    unsupported answers and re-retrieves with a rewritten query.
 6. Conversational / History-Aware Retrieval — rewrites follow-up
    queries using chat history.
-7. Semantic Cache + Eval — caches answers by embedding similarity
-   and tracks RAGAS-style metrics via Phoenix traces.
+7. Semantic Cache — caches answers by question similarity (versioned,
+   so answers from an older answer prompt are never served).
 
 All features are OPTIONAL and gracefully degrade when no LLM is
 available or when optional libraries are missing.
@@ -376,25 +377,92 @@ class HybridSearcher:
 # =============================================================================
 
 
-class CrossEncoderReranker:
-    """Reranks search results using a cross-encoder model.
+class OnnxCrossEncoder:
+    """A cross-encoder run with onnxruntime + tokenizers - no PyTorch.
 
-    Uses BAAI/bge-reranker-base (local, free, ~200ms) to re-rank
-    the top-k results.  This is what the existing ReRanker in
-    advanced_rag.py does, but with a better model.
-
-    Falls back to the existing keyword-based reranker if the
-    sentence-transformers model is unavailable.
+    Both libraries already ship with chromadb, so the reranker adds only the
+    model file (~23 MB, ms-marco-MiniLM-L-6-v2 int8, fetched at image build
+    time by scripts/download_reranker.py). ``predict`` matches the
+    sentence-transformers CrossEncoder API: (query, passage) pairs in,
+    one relevance score per pair out (sigmoid of the logit, 0..1).
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-reranker-base"):
+    MODEL_FILES = ("model_quantized.onnx", "model.onnx")
+
+    def __init__(self, model_dir: str, max_length: int = 512, batch_size: int = 16):
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        model_path = next(
+            (os.path.join(model_dir, sub, f) for sub in ("", "onnx")
+             for f in self.MODEL_FILES if os.path.isfile(os.path.join(model_dir, sub, f))),
+            None,
+        )
+        if model_path is None:
+            raise FileNotFoundError(f"no ONNX reranker model in {model_dir}")
+        self.model_path = model_path
+        tok = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
+        # Long chunks are truncated (longest side of the pair first); a batch
+        # is padded to its longest member.
+        tok.enable_truncation(max_length=max_length)
+        pad_id = tok.token_to_id("[PAD]")
+        tok.enable_padding(pad_id=pad_id if pad_id is not None else 0, pad_token="[PAD]")
+        self._tok = tok
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = max(1, int(os.getenv("RERANKER_THREADS", "2")))
+        self._session = ort.InferenceSession(
+            model_path, sess_options=opts, providers=["CPUExecutionProvider"])
+        self._inputs = {i.name for i in self._session.get_inputs()}
+        self._batch_size = max(1, batch_size)
+
+    def predict(self, pairs) -> List[float]:
+        import numpy as np
+
+        pairs = [(str(q), str(p)) for q, p in pairs]
+        scores: List[float] = []
+        for i in range(0, len(pairs), self._batch_size):
+            enc = self._tok.encode_batch(pairs[i:i + self._batch_size])
+            columns = {
+                "input_ids": [e.ids for e in enc],
+                "attention_mask": [e.attention_mask for e in enc],
+                "token_type_ids": [e.type_ids for e in enc],
+            }
+            feeds = {name: np.asarray(col, dtype=np.int64)
+                     for name, col in columns.items() if name in self._inputs}
+            logits = np.asarray(self._session.run(None, feeds)[0], dtype=np.float64)
+            logits = logits.reshape(len(enc), -1)[:, 0]
+            scores.extend((1.0 / (1.0 + np.exp(-logits))).tolist())
+        return scores
+
+
+class CrossEncoderReranker:
+    """Reranks search results with a cross-encoder model.
+
+    A cross-encoder reads the question and each chunk TOGETHER, so it judges
+    relevance far better than vector similarity or keyword overlap. Backends,
+    first available wins:
+
+    1. ONNX (``RERANKER_MODEL_DIR``, set in the Docker image): ms-marco
+       MiniLM-L-6 via onnxruntime - no PyTorch, ~23 MB, CPU.
+    2. sentence-transformers, if installed (``model_name``).
+    3. The keyword-based reranker (advanced_rag.ReRanker).
+
+    ``backend`` reports which one is in use (logged at startup).
+    """
+
+    def __init__(self, model_name: str = "BAAI/bge-reranker-base",
+                 model_dir: Optional[str] = None):
         self._model_name = model_name
+        self._model_dir = model_dir if model_dir is not None else os.getenv("RERANKER_MODEL_DIR", "")
         self._model = None
         self._unavailable = False
         self._reranked_count = 0
+        self.backend = "not loaded"
+        import threading
+        self._load_lock = threading.Lock()
 
     def _get_model(self):
-        """Load the cross-encoder model (lazy, with fallback).
+        """Load the cross-encoder model (lazy, once, with fallback).
 
         A failed load is remembered so we don't retry the import/download on
         every single query.
@@ -403,15 +471,37 @@ class CrossEncoderReranker:
             return self._model
         if self._unavailable:
             return None
+        import logging
+        log = logging.getLogger(__name__)
+        with self._load_lock:
+            if self._model is not None or self._unavailable:
+                return self._model
+            if self._model_dir:
+                try:
+                    self._model = OnnxCrossEncoder(self._model_dir)
+                    self.backend = f"onnx ({os.path.basename(self._model.model_path)})"
+                    log.info("reranker: cross-encoder %s", self.backend)
+                    return self._model
+                except Exception as e:
+                    log.warning("reranker: ONNX model in %s unavailable: %s",
+                                self._model_dir, e)
+            try:
+                from sentence_transformers import CrossEncoder
+                self._model = CrossEncoder(self._model_name)
+                self.backend = f"sentence-transformers ({self._model_name})"
+                log.info("reranker: cross-encoder %s", self.backend)
+                return self._model
+            except Exception:
+                # Fallback: use the existing keyword-based reranker
+                self._unavailable = True
+                self.backend = "keyword (no cross-encoder model available)"
+                log.warning("reranker: %s", self.backend)
+                return None
 
-        try:
-            from sentence_transformers import CrossEncoder
-            self._model = CrossEncoder(self._model_name)
-            return self._model
-        except Exception:
-            # Fallback: use the existing keyword-based reranker
-            self._unavailable = True
-            return None
+    def describe(self) -> str:
+        """Load the model if needed and name the backend in use."""
+        self._get_model()
+        return self.backend
 
     def rerank(
         self,
@@ -940,7 +1030,7 @@ class ConversationalRetriever:
 
 
 # =============================================================================
-# 9.  SEMANTIC CACHE + RAGAS EVAL
+# 9.  SEMANTIC CACHE
 # =============================================================================
 
 
@@ -953,6 +1043,12 @@ class SemanticCache:
 
     This saves 80% cost and 20ms latency.
     """
+
+    # Version of the document-answer format (api._ask_doc_question prompt and
+    # pipeline). Bump it whenever that changes: answers cached under an older
+    # version are then ignored (they persist in ChromaDB across deploys).
+    #   1 = unversioned (<= 3.4.5)   2 = 3.4.6 (direct answers, reranker, CRAG)
+    ANSWER_VERSION = 2
 
     def __init__(self, vector_store):
         self._store = vector_store
@@ -1014,13 +1110,15 @@ class SemanticCache:
 
         if (results and results.get("metadatas") and results["metadatas"][0]
                 and results.get("distances") and results["distances"][0]):
-            # ChromaDB returns metadatas/distances as lists of lists (one per query).
-            # Only return the cached answer if the nearest stored query is close
-            # enough (a near-duplicate question), preventing stale leakage.
-            distance = results["distances"][0][0]
-            if distance <= threshold:
-                meta = results["metadatas"][0][0] or {}
-                return meta.get("answer")
+            # ChromaDB returns metadatas/distances as lists of lists (one per query),
+            # nearest first. Only a near-duplicate question (within `threshold`)
+            # counts, and only an answer cached under the CURRENT answer version.
+            for meta, distance in zip(results["metadatas"][0], results["distances"][0]):
+                if distance > threshold:
+                    break
+                meta = meta or {}
+                if meta.get("v") == self.ANSWER_VERSION:
+                    return meta.get("answer")
         return None
 
     def store(self, query: str, answer: str, owner: Optional[str] = None):
@@ -1048,6 +1146,7 @@ class SemanticCache:
                 "answer": answer,
                 "owner": owner or "",
                 "timestamp": time.time(),
+                "v": self.ANSWER_VERSION,
             }],
         )
 
@@ -1272,21 +1371,51 @@ class OptimizedRAG:
                 _merge(self.search(sq, max(2, top_k // 2), owner=owner))
         return list(merged.values())[: max(top_k, 1) * 2]
 
+    _VERDICT_RE = re.compile(r"\b(UNSUPPORTED|NOT\s+SUPPORTED|SUPPORTED)\b")
+
     def verify_answer(self, answer: str, context: str) -> bool:
-        """Corrective-RAG check (RAG_CRAG=1): ask the LLM whether ``answer``
-        is fully supported by ``context``. Returns True when unsure."""
-        if os.getenv("RAG_CRAG", "0") != "1" or not answer or not context:
+        """Corrective-RAG check (RAG_CRAG, on by default): ask the LLM whether
+        ``answer`` is supported by ``context``. True when supported or unsure.
+
+        The fast model is a reasoning model whose hidden thinking counts
+        against max_tokens, so the budget must leave room for the verdict
+        (at 5 tokens the reply was always empty and every answer "passed").
+        It sees the same excerpts the answer was written from.
+        """
+        if os.getenv("RAG_CRAG", "1") != "1" or not answer or not context:
             return True
+        import logging
         try:
-            verdict = self._llm.complete(
-                "You are a strict fact checker. Reply with exactly SUPPORTED or "
-                "UNSUPPORTED: is every factual claim in the ANSWER backed by the CONTEXT?",
-                f"CONTEXT:\n{context[:6000]}\n\nANSWER:\n{answer[:2000]}",
-                max_tokens=5,
+            ctx_chars = int(os.getenv("RAG_CRAG_CONTEXT_CHARS", "12000"))
+            budget = max(256, int(os.getenv("RAG_CRAG_MAX_TOKENS", "1024")))
+        except ValueError:
+            ctx_chars, budget = 12000, 1024
+        try:
+            reply = self._llm.complete(
+                "You are a strict fact checker. Decide whether every factual claim "
+                "in the ANSWER is stated in, or directly follows from, the CONTEXT. "
+                "Saying that the context does not cover something is not a claim. "
+                "Reply with one word: SUPPORTED or UNSUPPORTED.",
+                f"CONTEXT:\n{context[:ctx_chars]}\n\nANSWER:\n{answer[:4000]}",
+                max_tokens=budget,
             )
         except Exception:
-            return True
-        return "UNSUPPORTED" not in (verdict or "").upper()
+            reply = ""
+        found = self._VERDICT_RE.findall((reply or "").upper())
+        verdict = ("unsure" if not found
+                   else "supported" if found[-1] == "SUPPORTED" else "unsupported")
+        try:
+            from modules.prometheus_metrics import RAG_CRAG_VERDICTS
+            RAG_CRAG_VERDICTS.labels(verdict=verdict).inc()
+        except Exception:
+            pass
+        if verdict == "unsure":
+            logging.getLogger(__name__).info("CRAG: no verdict in reply %r", (reply or "")[:200])
+        return verdict != "unsupported"
+
+    def reranker_backend(self) -> str:
+        """Load the reranker model and name the backend (startup log)."""
+        return self._cross_encoder.describe()
 
     def get_stats(self) -> Dict:
         return {
