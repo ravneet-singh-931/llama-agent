@@ -194,8 +194,15 @@ def check_grounding(answer: str, prompt: str, tool_calls: List[Dict],
             "detail": f"{report.supported}/{report.total} figures found in sources"}
 
 
+def check_route(route: Optional[str], expected: str) -> Dict:
+    """The request reached the intended handler (general / agent:x / team)."""
+    ok = route == expected
+    return {"pass": ok, "detail": "" if ok else f"routed to {route}, expected {expected}"}
+
+
 def evaluate(case: Dict, answer: str, tool_calls: List[Dict],
-             grounding_threshold: float = 0.7) -> Dict[str, Dict]:
+             grounding_threshold: float = 0.7,
+             route: Optional[str] = None) -> Dict[str, Dict]:
     """Run every applicable check for a case; returns {name: result}."""
     spec = case.get("checks", {})
     results = {
@@ -211,6 +218,8 @@ def evaluate(case: Dict, answer: str, tool_calls: List[Dict],
         results["excludes"] = check_excludes(answer, spec["must_not_include"])
     if spec.get("max_words"):
         results["length"] = check_length(answer, spec["max_words"])
+    if case.get("route") and route is not None:
+        results["route"] = check_route(route, case["route"])
     if spec.get("needs_sources"):
         results["used_search"] = check_sources(tool_calls)
     g = check_grounding(answer, case.get("prompt", ""), tool_calls, grounding_threshold)

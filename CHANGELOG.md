@@ -5,6 +5,38 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.1] - 2026-10-23
+
+Fixes found by the first eval baseline (8/9 smoke cases passing) and by the v3.4.0 deploy,
+which got stuck and needed manual pod deletes.
+
+### Fixed
+- **One rollout per deploy.** The workflow applied the app manifests with the bootstrap `:v7`
+  tag, then ran `kubectl set image …:<sha>`. That meant two rollouts per deploy, twice the
+  surge pods on a CPU-tight node, and a brief run of whatever stale `:v7` image the node had
+  cached. The new `k8s/apply-app.sh <tag>` applies api, web, mcp-server and frontend with the
+  commit image already set, in a single apply. Both deploy jobs and `k8s/deploy.sh` (via
+  `IMAGE_TAG`) use it; the `set image` step is gone.
+- **Rollout strategy sized for the single 4-CPU node.** api and frontend (2 replicas):
+  `maxSurge: 0, maxUnavailable: 1`, so a deploy needs no spare CPU. web and mcp-server
+  (1 replica): `maxSurge: 1, maxUnavailable: 0` (zero downtime). All four get
+  `progressDeadlineSeconds: 1200`, and `wait-rollout.sh` waits 1200s for the API.
+- **Coding requests reached the general agent.** 3 of the 5 coding prompts in the eval set
+  ("Write a **Python** function…", "Write a JavaScript debounce function", "Write SQL to…")
+  matched no phrase in the keyword list. Coding intent is now a pattern: a build verb, up to
+  three filler words, then a code noun or language. Topic words (about/on/for/of) and
+  explicit writer/planner phrases still win, so "Write documentation for a CLI tool" stays
+  with the Writer. All other dataset prompts route as before.
+- **Failed agent-team steps are logged.** The orchestrator swallowed the exception behind
+  "[… could not complete this step.]". The traceback is now logged, so a repeat shows the
+  cause.
+- **Eval judge "returned no valid JSON".** The reasoning judge model ran out of its 700-token
+  budget on long answers. The budget is now 2000 (`EVAL_JUDGE_MAX_TOKENS`).
+
+### Added
+- **Route check in the eval suite.** 28 of 30 cases declare the expected route
+  (`agent:coder`, `general`, `team`, …), so a mis-routed answer can no longer pass.
+
 ## [3.4.0] - 2026-10-23
 
 ### Added (LLMOps: evaluation-driven development)

@@ -429,10 +429,10 @@ jobs:
           kubectl apply -f k8s/postgres.yaml
           kubectl apply -f k8s/redis.yaml
           kubectl apply -f k8s/chromadb.yaml
-          kubectl apply -f k8s/api.yaml
-          kubectl apply -f k8s/mcp-server.yaml
-          kubectl apply -f k8s/web.yaml
-          kubectl apply -f k8s/frontend.yaml
+          # App Deployments are applied with this commit's immutable :<sha>
+          # images already set, so each deploy is ONE rollout (no stale
+          # bootstrap :v7 pods, no second surge on a CPU-tight node).
+          bash k8s/apply-app.sh "${{ github.sha }}" llama-agent
           kubectl apply -f k8s/ingress.yaml
           kubectl apply -f k8s/frontend-ingress.yaml
           kubectl apply -f k8s/grafana.yaml
@@ -451,22 +451,10 @@ jobs:
           kubectl apply -f k8s/resourcequota.yaml
           kubectl apply -f k8s/networkpolicy.yaml
 
-      - name: "\U0001F3F7 Roll out this commit's images"
-        if: steps.gate.outputs.enabled == 'true'
-        # Manifests carry a bootstrap tag; every deploy pins the immutable
-        # :<git sha> pushed by the docker job, so a rollout always happens
-        # and is traceable/revertible (kubectl rollout undo).
-        run: |
-          set -euo pipefail
-          SHA="${{ github.sha }}"
-          kubectl -n llama-agent set image deployment/llama-agent-api api=${{ env.DOCKER_IMAGE }}:$SHA
-          kubectl -n llama-agent set image deployment/llama-agent-web web=${{ env.DOCKER_IMAGE }}:$SHA
-          kubectl -n llama-agent set image deployment/llama-agent-mcp-server mcp-server=ravneet231/llama-agent-mcp-server:$SHA
-          kubectl -n llama-agent set image deployment/llama-agent-frontend frontend=ravneet231/llama-agent-frontend:$SHA
       - name: "\u23F3 Wait for rollout"
         if: steps.gate.outputs.enabled == 'true'
-        # API gets 900s: its 2 replicas start one after another and each has a
-        # 10-min startupProbe budget. Prints diagnostics + annotations on failure
+        # API gets 1200s (= its progressDeadlineSeconds): its 2 replicas are
+        # replaced one after another and each has a 10-min startupProbe budget. Prints diagnostics + annotations on failure
         # and warns if the API can't reach Redis.
         run: bash k8s/wait-rollout.sh llama-agent
 
@@ -565,10 +553,10 @@ jobs:
           kubectl apply -f k8s/postgres.yaml
           kubectl apply -f k8s/redis.yaml
           kubectl apply -f k8s/chromadb.yaml
-          kubectl apply -f k8s/api.yaml
-          kubectl apply -f k8s/mcp-server.yaml
-          kubectl apply -f k8s/web.yaml
-          kubectl apply -f k8s/frontend.yaml
+          # App Deployments are applied with this commit's immutable :<sha>
+          # images already set, so each deploy is ONE rollout (no stale
+          # bootstrap :v7 pods, no second surge on a CPU-tight node).
+          bash k8s/apply-app.sh "${{ github.sha }}" llama-agent
           kubectl apply -f k8s/ingress.yaml
           kubectl apply -f k8s/frontend-ingress.yaml
           kubectl apply -f k8s/grafana.yaml
@@ -587,22 +575,10 @@ jobs:
           kubectl apply -f k8s/resourcequota.yaml
           kubectl apply -f k8s/networkpolicy.yaml
 
-      - name: "\U0001F3F7 Roll out this commit's images"
-        if: steps.gate.outputs.enabled == 'true'
-        # Manifests carry a bootstrap tag; every deploy pins the immutable
-        # :<git sha> pushed by the docker job, so a rollout always happens
-        # and is traceable/revertible (kubectl rollout undo).
-        run: |
-          set -euo pipefail
-          SHA="${{ github.sha }}"
-          kubectl -n llama-agent set image deployment/llama-agent-api api=${{ env.DOCKER_IMAGE }}:$SHA
-          kubectl -n llama-agent set image deployment/llama-agent-web web=${{ env.DOCKER_IMAGE }}:$SHA
-          kubectl -n llama-agent set image deployment/llama-agent-mcp-server mcp-server=ravneet231/llama-agent-mcp-server:$SHA
-          kubectl -n llama-agent set image deployment/llama-agent-frontend frontend=ravneet231/llama-agent-frontend:$SHA
       - name: "\u23F3 Wait for rollout"
         if: steps.gate.outputs.enabled == 'true'
-        # API gets 900s: its 2 replicas start one after another and each has a
-        # 10-min startupProbe budget. Prints diagnostics + annotations on failure
+        # API gets 1200s (= its progressDeadlineSeconds): its 2 replicas are
+        # replaced one after another and each has a 10-min startupProbe budget. Prints diagnostics + annotations on failure
         # and warns if the API can't reach Redis.
         run: bash k8s/wait-rollout.sh llama-agent
 

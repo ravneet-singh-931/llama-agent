@@ -6,6 +6,7 @@ Multiple agents working together like a TEAM!
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import inspect
 import os
@@ -31,6 +32,8 @@ from modules.secrets import get_secret
 from modules.request_context import submit_with_context
 from modules.model_tiers import resolve_model, should_fallback
 from modules.security_hardening import PROMPT_INJECTION_GUARD, detect_prompt_injection
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -1383,6 +1386,7 @@ class MultiAgentOrchestrator:
                     prompt, critique=critique, reflect=reflect
                 )
             except Exception:
+                logger.exception("team step %s (%s) failed", step["id"], step["agent"])
                 return f"[The {step['agent']} agent could not complete this step.]"
 
         # 3. Execute level by level; steps within a level run in parallel.
@@ -1511,6 +1515,7 @@ class MultiAgentOrchestrator:
                     elif etype in ("tool", "reasoning"):
                         yield ev
             except Exception:
+                logger.exception("team step %s (%s) failed", sid, step["agent"])
                 full = [f"[The {step['agent']} agent could not complete this step.]"]
                 yield {"type": "token", "content": full[0]}
             run_tool_outputs.extend(step_sources)
