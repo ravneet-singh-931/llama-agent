@@ -5,6 +5,24 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.2] - 2026-10-23
+
+### Fixed
+- **The critic/reflection step could turn a sourced answer into a refusal.** The second eval
+  run caught it: the Research agent searched the web and answered with this week's AI news,
+  then the critic, which saw neither the search results nor today's date, judged the
+  post-training-cutoff news as "hallucinated". The revision step replaced the answer with
+  "I cannot provide the news, I don't have real-time access". Now:
+  - the critic is told today's date, gets the tool results, and is told not to call a fact
+    invented just because it doesn't recognise it; it flags only claims the sources contradict
+    or don't support;
+  - the reviser gets the same sources and must keep supported facts, never swapping the answer
+    for a refusal;
+  - this applies to the streaming and non-streaming agent paths and to the @team final critic.
+
+  Source excerpts are clipped to `AGENT_REVIEW_SOURCE_CHARS` (default 4000) to stay inside the
+  free-tier token budget.
+
 ## [3.4.1] - 2026-10-23
 
 Fixes found by the first eval baseline (8/9 smoke cases passing) and by the v3.4.0 deploy,
