@@ -5,6 +5,28 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.5] - 2026-10-23
+
+### Fixed (agent answer quality)
+- **Tavily search works with current keys.** The key is now sent as `Authorization: Bearer`
+  (Tavily's documented method). It used to go in the request body as `api_key`, which is
+  deprecated and rejected by some keys, so search silently fell back to DuckDuckGo. That
+  fallback gets blocked after a few searches ("Web search is temporarily unavailable").
+  Tavily failures are now logged (`kubectl logs`), and `TAVILY_SEARCH_DEPTH=basic|advanced`
+  picks the search depth.
+- **Long answers aren't cut off.** Agent answers are limited to 4,096 tokens instead of a
+  hard-coded 2,048, and the Coder gets 6,144. Configure with `AGENT_MAX_TOKENS`,
+  `AGENT_CODER_MAX_TOKENS` and `CHAT_MAX_TOKENS` (general chat). The Coder is also told to
+  write compact, complete code and never stop mid-file. Before, team landing pages were cut
+  off mid-HTML.
+- **Agents know today's date.** Every agent, plus the general chat, gets today's date in
+  `APP_TIMEZONE` (default Asia/Kolkata). They no longer answer "I can't guarantee the current
+  date".
+- **English only.** Every agent prompt, the critic included, now requires English output. The
+  Qwen tier was slipping into other scripts mid-answer (e.g. "$5/月").
+- **The Writer sticks to what it was given.** When summarizing research or code, it describes
+  only what is actually there, and says so when something is missing or cut off.
+
 ## [3.3.4] - 2026-10-23
 
 ### Fixed (@team mode)
