@@ -336,11 +336,12 @@ def test_step_prompt_limits_agent_to_its_own_step():
     orch = MultiAgentOrchestrator()
     step = {"id": "s1", "agent": "research", "depends_on": [],
             "instruction": "Research the todo-app market"}
-    prompt = orch._build_step_prompt(step, {}, "research AND write the landing page code")
+    # An intermediate step sees only its own instruction (context isolation).
+    prompt = orch._build_step_prompt(step, {}, "research AND write the landing page code",
+                                     is_final=False)
     assert prompt.startswith("YOUR TASK: Research the todo-app market")
-    assert "Do ONLY this task" in prompt
+    assert "landing page" not in prompt
     assert "agent team" not in prompt          # no team framing -> no meta-talk
-    assert prompt.index("YOUR TASK") < prompt.index("Overall task (context only)")
 
 
 def test_planner_is_told_to_maximise_parallelism(monkeypatch):

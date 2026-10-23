@@ -55,6 +55,9 @@ AI:   "Japan has a vending machine culture, with over 5.5 million vending
 - **OptimizedRAG** — production RAG pipeline with 7 optimizations: hybrid search (BM25 + dense vectors), a cross-encoder reranker, contextual retrieval with semantic chunking, query decomposition, corrective RAG (CRAG), conversational retrieval, and a semantic cache. Enabled by `USE_OPTIMIZED_RAG=true` (on by default in the deployed image).
 - **Two-Pass Retrieval** — thin answers trigger query reformulation and a second search
 - **Streaming Chat** — SSE streaming with agent/tool transcript markers
+- **LLMOps on the Groq free tier** — token budgeting and context compaction, rate-limit-aware model routing shared via Redis, 413 shrink-and-retry (`modules/llm_guard.py`)
+- **Grounding guardrail** — figures in agent answers are checked against the retrieved sources; unverified ones are marked before the next agent sees them (`modules/grounding.py`)
+- **Evaluation suite** — 30 varied cases, rule-based checks + LLM judge + grounding rate, baseline comparison (`evals/`, see `evals/README.md`)
 - **LLM Observability** — every Groq call (agents *and* RAG) emits `GroqLLM.chat` spans to Phoenix via llama-index instrumentation
 - **Full DevOps Stack** — Prometheus, Grafana, Loki, Promtail, node-exporter, nginx (SSL + LB)
 - **Enterprise Security** — JWT auth, rate limiting, brute-force lockout, CSRF, audit logging, Docker secrets
@@ -507,9 +510,12 @@ pytest tests/ -q -m "not mcp"
 
 # Run everything
 pytest tests/ -q
+
+# Agent quality evaluation against the live models (run inside the API pod)
+#   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status:** 290 passing, 17 deselected (`-m "not mcp"`), across 11 test
+**Current status:** 377 passing, 17 deselected (`-m "not mcp"`), across 16 test
 modules (including `test_multitenancy.py`: tenant isolation, guest identity, WS
 tickets, metrics exposure, hybrid search, cost tracking, streaming) — covering security hardening, rate limiting, monitoring, RAG,
 multi-agent routing/streaming, the Phoenix span-instrumentation path, and the

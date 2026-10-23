@@ -5,6 +5,48 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-10-23
+
+### Added (LLMOps: evaluation-driven development)
+- **Evaluation suite (`evals/`).** 30 varied prompts in 9 categories (research, coding,
+  writing, planning, analysis, general, 5 agent-team domains, safety). Each prompt is routed
+  exactly like `/chat/stream`. The suite records:
+  - rule-based checks: completed, English, no meta-talk, valid code, used search, case
+    expectations;
+  - the **grounding rate**;
+  - an LLM judge rubric run on the fast model;
+  - latency, tokens, cost and guard actions per case.
+
+  It produces a JSON report plus a markdown summary, and `--compare` shows deltas and
+  regressed cases. It runs on demand inside the API pod (`python -m evals.run --tags smoke`).
+  See `evals/README.md`.
+- **Grounding guardrail (`modules/grounding.py`).** A rule-based check of whether the figures
+  in an answer (prices, %, amounts, decimals) appear in the tool results the agents retrieved.
+  - **Team hand-offs:** figures that aren't found are marked "(unverified)" before the next
+    agent reads them (`AGENT_HANDOFF_FACTCHECK`, default on), and the final answer gets a
+    fact-check report.
+  - **Single agents:** the report appears in the Reasoning view (stage `grounding`). Set
+    `AGENT_FACTCHECK_MARK=1` to also mark figures inline.
+  - **Metrics:** new Prometheus counter `llama_agent_grounding_claims_total{result}` and a
+    Grafana "Grounding rate" panel.
+- **Model-chosen search filters.** The `web_search` tool now has optional `topic`
+  (general / news / finance) and `time_range` (day / week / month / year) parameters, which
+  are passed to Tavily. Results show their published date.
+
+### Changed
+- **Context isolation for the agent team.** Intermediate steps see only their own
+  instruction and their dependencies' outputs, not the user's whole request. The Coder had
+  been inventing market research because it could see "research the market". Only final
+  steps see the request. The planner must now write self-contained instructions.
+- **Removed patch-style prompt rules.** The "Do ONLY your step / never mention the team"
+  sentences are gone, since isolation removes the cause. Dependency outputs are labelled
+  neutrally ("Source material 1").
+- The planner prompt no longer contains a task-specific example.
+
+### Fixed
+- **Default team plan:** the summary step now waits for *every* step. It used to skip the
+  last coder/writer step and run in parallel with it, never seeing its output.
+
 ## [3.3.6] - 2026-10-23
 
 ### Added (LLMOps: run on the Groq free tier)
