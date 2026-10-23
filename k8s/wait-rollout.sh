@@ -16,7 +16,7 @@ set -uo pipefail
 NS="${1:-llama-agent}"
 # deployment:timeout_seconds
 TARGETS=(
-  "llama-agent-api:900"
+  "llama-agent-api:1200"
   "llama-agent-mcp-server:600"
   "llama-agent-web:600"
   "llama-agent-frontend:600"

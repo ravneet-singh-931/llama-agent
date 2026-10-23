@@ -82,7 +82,10 @@ def judge(case: Dict, answer: str, sources: List[str], client=None,
         messages = build_messages(case, answer, sources, today_str())
         for _ in range(2):  # one retry on unparsable output
             resp = client.chat.completions.create(
-                model=model, messages=messages, max_tokens=700, temperature=0)
+                model=model, messages=messages, temperature=0,
+                # Reasoning models think before the JSON; 700 tokens ran out
+                # on long answers and left no verdict.
+                max_tokens=int(os.getenv("EVAL_JUDGE_MAX_TOKENS", "2000")))
             verdict = parse_verdict(resp.choices[0].message.content or "")
             if verdict:
                 verdict["model"] = model

@@ -208,7 +208,8 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
     latency = round(time.monotonic() - t0, 2)
     usage = _delta(metric_totals(), before)
 
-    results = checks.evaluate(case, out["answer"], rec.calls, grounding_threshold)
+    results = checks.evaluate(case, out["answer"], rec.calls, grounding_threshold,
+                              route=out.get("route"))
     verdict = None
     if use_judge and out["answer"]:
         from evals.judge import judge

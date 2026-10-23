@@ -56,6 +56,17 @@ metadata:
     component: frontend
 spec:
   replicas: 2  # 2 for HA (stateless, easy to scale)
+
+  # Rollout: 2 replicas: replace one pod at a time without a surge pod, so a
+  # deploy needs no spare CPU on the single 4-CPU node (one replica keeps serving).
+  # progressDeadlineSeconds: allow slow image pulls + model warm-up before
+  # the rollout is marked failed (default 600s was too tight).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  progressDeadlineSeconds: 1200
   selector:
     matchLabels:
       app: llama-agent

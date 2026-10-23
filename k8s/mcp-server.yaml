@@ -64,6 +64,17 @@ metadata:
     component: mcp-server
 spec:
   replicas: 1  # Single replica (lightweight, HPA can scale to 4)
+
+  # Rollout: 1 replica: start the new pod before stopping the old one (zero
+  # downtime); it only needs this pod's small CPU request free for a moment.
+  # progressDeadlineSeconds: allow slow image pulls + model warm-up before
+  # the rollout is marked failed (default 600s was too tight).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  progressDeadlineSeconds: 1200
   selector:
     matchLabels:
       app: llama-agent

@@ -185,13 +185,11 @@ kubectl apply -f k8s/phoenix.yaml
 # 5. Application
 # ---------------------------------------------------------------------------
 echo "🤖 Deploying API, MCP server, Streamlit, Next.js frontend..."
-kubectl apply -f k8s/api.yaml
-kubectl apply -f k8s/mcp-server.yaml
-kubectl apply -f k8s/web.yaml
-kubectl apply -f k8s/frontend.yaml
+# IMAGE_TAG=<git sha> pins every app image in one apply (one rollout).
+bash k8s/apply-app.sh "${IMAGE_TAG:-v7}" "$NAMESPACE"
 
 echo "⏳ Waiting for application rollouts..."
-kubectl -n "$NAMESPACE" rollout status deployment/llama-agent-api --timeout=600s
+kubectl -n "$NAMESPACE" rollout status deployment/llama-agent-api --timeout=1200s
 kubectl -n "$NAMESPACE" rollout status deployment/llama-agent-mcp-server --timeout=180s
 kubectl -n "$NAMESPACE" rollout status deployment/llama-agent-web --timeout=180s
 kubectl -n "$NAMESPACE" rollout status deployment/llama-agent-frontend --timeout=180s

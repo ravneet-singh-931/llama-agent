@@ -1284,6 +1284,25 @@ ANALYZER_KEYWORDS = ["analyze", "analysis", "trends", "data analysis",
                      "evaluate", "assess", "insights"]
 RESEARCH_KEYWORDS = ["research", "compare", "difference between",
                      "pros and cons", "investigate"]
+# Coding intent as a pattern, not a phrase list: a build verb, up to three
+# filler words, then a code noun or language ("write a Python function",
+# "write SQL to...", "create a React component", "give me a bash script").
+# Phrase lists missed every request that put a word between the verb and the
+# noun. Topic words (about/on/regarding/for/of) break the match, so "write an
+# essay on functional programming" stays with the writer; an explicit writer or
+# planner phrase also wins over the pattern ("write documentation for a CLI").
+_CODE_LANGS = (r"python|javascript|typescript|js|ts|sql|bash|shell|powershell|go|golang|rust"
+               r"|java|kotlin|swift|c\+\+|c#|php|ruby|html|css|react|vue|regex|dockerfile")
+_CODE_NOUNS = (r"functions?|class(?:es)?|scripts?|programs?|methods?|snippets?|code|algorithms?"
+               r"|regexp?|quer(?:y|ies)|components?|(?:unit )?tests?|endpoints?|cli|decorators?"
+               r"|hooks?|modules?")
+CODE_INTENT_RE = re.compile(
+    r"\b(?:write|create|build|implement|generate|make|code|give me)\b"
+    r"(?:\s+(?!(?:about|on|regarding|for|of)\b)[\w+#.-]+){0,3}?"
+    rf"\s+(?:{_CODE_LANGS}|{_CODE_NOUNS})(?![\w+#])",
+    re.I,
+)
+
 # Requests about CURRENT/FRESH information. These must reach the research
 # agent (which can call the web_search tool) instead of the general ReAct
 # agent, which answers from static knowledge and would return stale data.
@@ -1397,6 +1416,9 @@ def route_multi_agent(message: str):
         return True, agent_type
 
     matched = _ROUTING_AC.find_payloads(message.lower())
+    if (CODE_INTENT_RE.search(message)
+            and not matched & {"writer", "planner"}):
+        matched.add("coder")
     if not matched:
         return False, "research"
     for agent in _ROUTING_PRIORITY:
