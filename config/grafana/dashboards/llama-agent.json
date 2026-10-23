@@ -294,6 +294,31 @@
           "unit": "s"
         }
       }
+    },
+    {
+      "title": "LLM input tokens per minute (vs free-tier ITPM limit)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 46 },
+      "targets": [{ "expr": "sum by (model) (rate(llama_agent_llm_tokens_total{kind=\"input\"}[1m]) * 60)", "legendFormat": "{{model}}" }]
+    },
+    {
+      "title": "LLMOps guard actions (5m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 46 },
+      "targets": [{ "expr": "sum by (action) (increase(llama_agent_llm_guard_events_total[5m]))", "legendFormat": "{{action}}" }]
+    },
+    {
+      "title": "Tokens trimmed by context compaction (5m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 54 },
+      "targets": [{ "expr": "sum by (model) (increase(llama_agent_llm_tokens_trimmed_total[5m]))", "legendFormat": "{{model}}" }]
+    },
+    {
+      "title": "Estimated LLM spend (USD, cumulative)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 54 },
+      "targets": [{ "expr": "sum by (model) (llama_agent_llm_cost_usd_total)", "legendFormat": "{{model}}" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } }
     }
   ],
   "time": { "from": "now-1h", "to": "now" },

@@ -57,6 +57,10 @@ _FALLBACK_SIGNALS = (
     "connection",
     "connecterror",
     "timeout",
+    # Request bigger than the tier's per-minute input budget (HTTP 413):
+    # the fast tier has its own, separate budget.
+    "request too large",
+    "413",
 )
 
 

@@ -337,9 +337,10 @@ def test_step_prompt_limits_agent_to_its_own_step():
     step = {"id": "s1", "agent": "research", "depends_on": [],
             "instruction": "Research the todo-app market"}
     prompt = orch._build_step_prompt(step, {}, "research AND write the landing page code")
-    assert prompt.startswith("You are one member of an agent team. YOUR STEP: Research the todo-app market")
-    assert "Do ONLY your step" in prompt
-    assert prompt.index("YOUR STEP") < prompt.index("Overall task (context only)")
+    assert prompt.startswith("YOUR TASK: Research the todo-app market")
+    assert "Do ONLY this task" in prompt
+    assert "agent team" not in prompt          # no team framing -> no meta-talk
+    assert prompt.index("YOUR TASK") < prompt.index("Overall task (context only)")
 
 
 def test_planner_is_told_to_maximise_parallelism(monkeypatch):
