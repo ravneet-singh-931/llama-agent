@@ -168,8 +168,8 @@ def test_specialist_reflection_revises_answer_before_it_streams(monkeypatch):
     agent = ResearchAgent()
     monkeypatch.setattr("modules.agent_tools.run_tool_rounds",
                         lambda c, m, msgs, tools, **kw: (msgs, ["⚙️ web_search"], "draft answer"))
-    monkeypatch.setattr(agent, "critique", lambda task, ans: "Missing the date." if ans == "draft answer" else "")
-    monkeypatch.setattr(agent, "_revise", lambda task, ans, c: "revised answer with the date")
+    monkeypatch.setattr(agent, "critique", lambda task, ans, sources=None: "Missing the date." if ans == "draft answer" else "")
+    monkeypatch.setattr(agent, "_revise", lambda task, ans, c, sources=None: "revised answer with the date")
 
     out = list(agent._stream_with_tools("t", critique=True, reflect=True))
     stages = [o.get("stage") for o in out if o["type"] == "reasoning"]
@@ -188,8 +188,8 @@ def test_critic_only_keeps_answer_and_off_skips_review(monkeypatch):
     monkeypatch.setattr("modules.agent_tools.run_tool_rounds",
                         lambda c, m, msgs, tools, **kw: (msgs, [], "answer"))
     calls = []
-    monkeypatch.setattr(agent, "critique", lambda t, a: calls.append(a) or "Too short.")
-    monkeypatch.setattr(agent, "_revise", lambda *a: (_ for _ in ()).throw(AssertionError("no revise")))
+    monkeypatch.setattr(agent, "critique", lambda t, a, sources=None: calls.append(a) or "Too short.")
+    monkeypatch.setattr(agent, "_revise", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no revise")))
 
     out = list(agent._stream_with_tools("t", critique=True, reflect=False))
     assert _tokens(out) == "answer"
@@ -271,7 +271,7 @@ def _team(monkeypatch, delay=0.3):
 
     for key, agent in orch.agents.items():
         monkeypatch.setattr(agent, "execute_stream", fake_stream(key))
-        monkeypatch.setattr(agent, "critique", lambda t, a: "")
+        monkeypatch.setattr(agent, "critique", lambda t, a, sources=None: "")
     return orch, active
 
 
@@ -299,7 +299,7 @@ def test_team_sequential_when_parallel_off(monkeypatch):
 
 def test_team_critic_note_is_a_reasoning_event(monkeypatch):
     orch, _ = _team(monkeypatch, delay=0)
-    monkeypatch.setattr(orch.agents["analyzer"], "critique", lambda t, a: "Add sources.")
+    monkeypatch.setattr(orch.agents["analyzer"], "critique", lambda t, a, sources=None: "Add sources.")
     out = list(orch.collaborate_stream("task", critique=True, reflect=False, parallel=False))
     assert {"type": "reasoning", "stage": "critic", "content": "Add sources."} in out
     assert "Add sources." in out[-1]["content"]
