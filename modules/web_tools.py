@@ -27,6 +27,10 @@ _USER_AGENT = (
 )
 
 _MAX_RESULTS = 5
+# Per-result snippet cap. Tavily returns long page extracts; five of them
+# per search, several searches per answer, quickly blew the free tier's
+# per-minute input-token limit. WEB_SNIPPET_CHARS tunes it.
+_SNIPPET_CHARS = int(os.getenv("WEB_SNIPPET_CHARS", "600") or 600)
 
 _log = logging.getLogger("llama_agent.web_tools")
 
@@ -76,6 +80,9 @@ def _format_results(rows) -> str:
         title = re.sub(r"<[^>]+>", "", row.get("title", "")).strip()
         url = row.get("url") or row.get("link", "")
         snippet = re.sub(r"<[^>]+>", "", row.get("snippet", "") or row.get("content", "")).strip()
+        snippet = re.sub(r"\s+", " ", snippet)
+        if len(snippet) > _SNIPPET_CHARS:
+            snippet = snippet[:_SNIPPET_CHARS].rsplit(" ", 1)[0] + " ..."
         lines.append(f"{i}. {title}\n   {url}\n   {snippet}")
     return "\n\n".join(lines)
 

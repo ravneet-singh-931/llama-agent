@@ -242,6 +242,14 @@ class InstrumentedGroqClient:
         def __init__(self, client: "InstrumentedGroqClient"):
             self._client = client
 
+        def _llm(self, model: str):
+            with self._client._llms_lock:
+                llm = self._client._llms.get(model)
+                if llm is None:
+                    llm = self._GroqLLM(model=model, api_key=self._client._api_key)
+                    self._client._llms[model] = llm
+                return llm
+
         def create(self, **kwargs):
             model = kwargs.get("model")
             if not model:
@@ -250,28 +258,41 @@ class InstrumentedGroqClient:
             # time, which is not guaranteed in offline test contexts.
             from llama_agent1 import GroqLLM
 
-            with self._client._llms_lock:
-                llm = self._client._llms.get(model)
-                if llm is None:
-                    llm = GroqLLM(model=model, api_key=self._client._api_key)
-                    self._client._llms[model] = llm
+            self._GroqLLM = GroqLLM
 
-            chat_messages = [
-                _to_llama_chat_message(m) for m in kwargs.get("messages", [])
-            ]
             llm_kwargs = {
                 k: kwargs[k]
                 for k in ("tools", "tool_choice", "max_tokens")
                 if k in kwargs and kwargs[k] is not None
             }
 
-            if kwargs.get("stream"):
-                def _chunks():
-                    for chunk in llm.stream_chat(chat_messages, **llm_kwargs):
-                        yield chunk.raw
-                return _chunks()
+            # LLMOps guard: route around the per-minute token limit and
+            # compact the request to fit the model's input budget.
+            from modules import llm_guard
+            model, messages, est = llm_guard.prepare_call(
+                model, list(kwargs.get("messages", [])), kwargs.get("tools"))
+            llm = self._llm(model)
 
-            return llm.chat(chat_messages, **llm_kwargs).raw
+            def _call(msgs):
+                chat_messages = [_to_llama_chat_message(m) for m in msgs]
+                if kwargs.get("stream"):
+                    # Start the request NOW (not lazily on first iteration),
+                    # so 413/429 errors raise here, inside the callers'
+                    # try/except and fast-tier fallback.
+                    gen = llm.stream_chat(chat_messages, **llm_kwargs)
+                    return (chunk.raw for chunk in gen)
+                return llm.chat(chat_messages, **llm_kwargs).raw
+
+            try:
+                result = _call(messages)
+            except Exception as e:
+                if not llm_guard.is_request_too_large(e):
+                    raise
+                messages, est = llm_guard.shrink_for_retry(
+                    model, messages, kwargs.get("tools"))
+                result = _call(messages)
+            llm_guard.record_call(model, est)
+            return result
 
     class _Chat:
         def __init__(self, client: "InstrumentedGroqClient"):
@@ -665,6 +686,15 @@ class BaseAgent:
                     yield {"type": "token", "content": chunk}
             yield {"type": "token", "content": ""}
 
+        from modules import llm_guard
+        # Pool threads are reused: drop notes left by earlier work.
+        llm_guard.drain_notes()
+
+        def _guard_events():
+            """LLMOps actions (compaction, model switch, retry) for the UI."""
+            for n in llm_guard.drain_notes():
+                yield {"type": "reasoning", "stage": "llmops", "content": n}
+
         model = self.model
         try:
             messages, events, final_content = run_tool_rounds(
@@ -676,6 +706,8 @@ class BaseAgent:
             # Retry the whole round on the fast tier when the strong tier is
             # rate-limited; otherwise fall back to a plain non-tool stream.
             if should_fallback(e, "strong"):
+                llm_guard.note("Strong model hit its rate/size limit - re-ran the "
+                               "research on the fast model")
                 try:
                     model = resolve_model("fast")
                     messages, events, final_content = run_tool_rounds(
@@ -695,6 +727,7 @@ class BaseAgent:
                             model=candidate, messages=_initial_messages(),
                             stream=True, max_tokens=self.answer_tokens
                         )
+                        yield from _guard_events()
                         got = yield from _tokens(stream)
                         if got:
                             return
@@ -704,6 +737,7 @@ class BaseAgent:
                     "I couldn't complete that task right now. Please try again."}
                 return
 
+        yield from _guard_events()
         for ev in events:
             yield {"type": "tool", "content": ev}
 
@@ -720,6 +754,7 @@ class BaseAgent:
             # appended after the user already read it.
             final_content = yield from self._review_stream(
                 task, final_content, critique, reflect)
+            yield from _guard_events()
             yield from _text_tokens(final_content)
             return
 
@@ -743,10 +778,13 @@ class BaseAgent:
             if model == resolve_model("fast"):
                 # Already on the cheapest tier — nothing further to retry.
                 raise
+            llm_guard.note("Strong model hit its rate/size limit - wrote the "
+                           "final answer with the fast model")
             stream = self.client.chat.completions.create(
                 model=resolve_model("fast"), messages=stream_messages,
                 stream=True, max_tokens=self.answer_tokens
             )
+        yield from _guard_events()
         got = yield from _tokens(stream)
         if not got:
             rescued = _fast_rescue(stream_messages)
@@ -815,7 +853,11 @@ class ResearchAgent(BaseAgent):
         "For questions about uploaded files, use list_uploaded_documents first, "
         "then read_uploaded_document as needed.\n"
         "Do NOT analyze the user's intent, add meta-commentary, or use "
-        "verbose numbered sections. Be accurate and to the point."
+        "verbose numbered sections. Be accurate and to the point.\n"
+        "GROUNDING: every price, number, date and product name must come from "
+        "your search results or documents - name the source site in brackets, "
+        "e.g. (todoist.com). If a fact is not in the results, leave it out or "
+        "mark it '(unverified)'. Never invent figures, prices or products."
     )
 
     def __init__(self):
@@ -1206,16 +1248,19 @@ class MultiAgentOrchestrator:
         for dep in step["depends_on"]:
             dep_out = results.get(dep)
             if dep_out:
-                scanned = self.agents[step["agent"]]._scan_handoff(dep_out[:2000])
+                limit = int(os.getenv("AGENT_HANDOFF_CHARS", "12000") or 12000)
+                scanned = self.agents[step["agent"]]._scan_handoff(dep_out[:limit])
                 deps_ctx += (
                     f"\n\nInput from previous step ({dep}):\n"
                     f"<<UNTRUSTED_DATA>>\n{scanned}\n<</UNTRUSTED_DATA>>"
                 )
         return (
-            f"You are one member of an agent team. YOUR STEP: {step['instruction']}\n\n"
-            "Do ONLY your step. Other agents handle the other parts of the "
-            "overall task - do not do their work (no extra code, summaries or "
-            "research outside your step). Be complete but concise.\n\n"
+            f"YOUR TASK: {step['instruction']}\n\n"
+            "Do ONLY this task. The other parts of the overall request are "
+            "handled separately - do not add extra code, summaries or research "
+            "outside your task. Be complete but concise.\n"
+            "Write the finished deliverable itself: never mention steps, a "
+            "team, other agents, hand-offs, or what you are not doing.\n\n"
             f"Overall task (context only): {task}"
         ) + deps_ctx
 

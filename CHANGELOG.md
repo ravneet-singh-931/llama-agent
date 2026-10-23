@@ -5,6 +5,46 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.6] - 2026-10-23
+
+### Added (LLMOps: run on the Groq free tier)
+- **LLM traffic guard (`modules/llm_guard.py`).** Every agent completion now goes through one
+  choke point (`InstrumentedGroqClient`), and so does the general chat stream. There the guard:
+  - **Budgets tokens.** It estimates each request and compacts it to fit `LLM_INPUT_BUDGET`
+    (default 6,000). Old tool results are trimmed first, then the longest context message,
+    then the middle of the latest message. The system prompt and the tool-call structure are
+    always kept.
+  - **Routes around rate limits.** A 60 s sliding window of input tokens is kept per model
+    and shared across API replicas through Redis (`llmops:itpm:*`). When the strong model
+    would exceed its free-tier limit (`LLM_ITPM_LIMIT_STRONG`, default 7,000 tokens/min), the
+    call goes to the fast model *before* Groq rejects it. If every model is saturated, the
+    guard waits up to `LLM_GUARD_MAX_WAIT_S` seconds for capacity instead of failing.
+  - **Shrinks and retries on HTTP 413.** "Request too large" leads to one retry at 60% of the
+    budget, and 413 now also triggers the strong→fast fallback.
+  - **Is observable.** New Prometheus counters `llama_agent_llm_guard_events_total{action}`
+    (compacted / downgraded / waited / too_large_retry) and
+    `llama_agent_llm_tokens_trimmed_total`, plus four new Grafana panels: tokens/min per model
+    vs. the limit, guard actions, tokens trimmed, and spend. Each action is also shown in the
+    chat's Reasoning view (stage `llmops`).
+- **Size caps at the source:** each tool result is capped by `AGENT_TOOL_RESULT_CHARS` (4,000)
+  and each search snippet by `WEB_SNIPPET_CHARS` (600).
+
+### Fixed
+- **Research no longer crashes with "Request too large" (413).** On Groq's free tier
+  (7,000 input tokens/min for qwen3.8-27b), rich Tavily results resent across tool rounds
+  went over the limit. The strong→fast fallback also never ran: the streaming wrapper started
+  the HTTP request lazily, on first iteration, outside the agents' try/except. Streams now
+  start inside `create()`, so errors reach the fallback.
+- **No team meta-talk in @team answers.** The step prompt no longer says "you are one member
+  of an agent team". It forbids mentioning steps, the team or other agents, so answers stop
+  saying "my step is only X; other agents will…".
+- **Agents get the full hand-off.** Each dependency's output is passed up to
+  `AGENT_HANDOFF_CHARS` (12,000) instead of being cut at 2,000 characters. The token guard
+  compacts it further when needed.
+- **Research is grounded.** Every price, number, date and product name must come from the
+  search results, with the source site cited inline. Anything else is left out or marked
+  "(unverified)".
+
 ## [3.3.5] - 2026-10-23
 
 ### Fixed (agent answer quality)

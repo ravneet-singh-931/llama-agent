@@ -30,6 +30,8 @@ from modules.web_tools import web_search, WEB_SEARCH_TOOL
 
 _MAX_TOOL_ROUNDS = 4
 _MAX_READ_CHARS = 6000
+# Hard cap on any single tool result fed back to the model (token budget).
+_TOOL_RESULT_CHARS = int(os.getenv("AGENT_TOOL_RESULT_CHARS", "4000") or 4000)
 
 # The RAG store the document tools read from (bound at app startup).
 _document_store = None
@@ -144,6 +146,15 @@ AGENT_TOOL_SCHEMAS: List[Dict] = [WEB_SEARCH_TOOL, *DOCUMENT_TOOLS]
 
 
 def dispatch_tool(name: str, arguments: dict) -> str:
+    """Execute a tool by name (result capped to AGENT_TOOL_RESULT_CHARS)."""
+    result = _dispatch(name, arguments)
+    if len(result) > _TOOL_RESULT_CHARS:
+        result = (result[:_TOOL_RESULT_CHARS]
+                  + f"\n[... tool output truncated at {_TOOL_RESULT_CHARS} characters ...]")
+    return result
+
+
+def _dispatch(name: str, arguments: dict) -> str:
     """Execute a tool by name. Never raises for unknown tools."""
     try:
         if name == "web_search":

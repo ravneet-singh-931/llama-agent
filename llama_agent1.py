@@ -676,6 +676,12 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
     # client: the OpenInference llama-index instrumentor only emits
     # GroqLLM.* spans for calls routed through llama-index, so using the raw
     # SDK here previously produced zero LLM spans in Phoenix.
+    # LLMOps guard: keep the request inside the fast tier's input budget
+    # (long histories / pasted documents would otherwise hit HTTP 413).
+    from modules import llm_guard
+    messages, _trimmed = llm_guard.fit_messages(
+        messages, llm_guard.input_budget(stream_llm.model))
+    llm_guard.record_call(stream_llm.model, llm_guard.estimate_tokens(messages))
     llm_messages = [
         ChatMessage(role=MessageRole(message["role"]), content=message["content"])
         for message in messages

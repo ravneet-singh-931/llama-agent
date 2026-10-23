@@ -74,6 +74,19 @@ LLM_COST = Counter(
 )
 
 
+LLM_GUARD_EVENTS = Counter(
+    "llama_agent_llm_guard_events_total",
+    "LLMOps guard actions (compacted | downgraded | waited | too_large_retry)",
+    ["model", "action"],
+)
+
+LLM_TOKENS_TRIMMED = Counter(
+    "llama_agent_llm_tokens_trimmed_total",
+    "Input tokens removed by context compaction to fit the token budget",
+    ["model"],
+)
+
+
 def record_llm_usage(model: str, input_tokens: int, output_tokens: int) -> float:
     """Record one LLM call's token usage in Prometheus + the CostTracker
     (/monitoring/dashboard). Never raises - metrics must not break chat."""
