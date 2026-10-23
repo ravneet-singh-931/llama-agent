@@ -5,6 +5,60 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.3] - 2026-10-23
+
+### Fixed (Next.js chat)
+- **The DSA toggles show the real state.** A new `GET /chat/options` endpoint returns the server
+  defaults (`AGENT_CRITIQUE`, `AGENT_REFLECT`, `AGENT_PARALLEL_STEPS`). Before, an untouched
+  toggle looked "off" even though the feature was running. Each toggle's tooltip says which
+  routes it affects.
+- **The Reasoning badges are honest.** Each route sends a `config` event describing what
+  **actually** ran:
+  - direct replies (facts, commands, documents, general chat): no badges;
+  - a specialist agent: Critic/Reflect, never Parallel;
+  - `@team`: all three.
+- **Reflect works.** Specialist agents run the critic **and the revision before the answer
+  streams**. You get the improved answer instead of the draft plus an after-the-fact note.
+  Critic and reflection steps appear in the Reasoning view.
+- **Parallel works.** In streaming `@team` mode, the steps of one dependency level now really
+  run concurrently, and each result streams as it finishes. With Parallel off they run one
+  by one. Before, streaming team mode was always sequential, whatever the toggle said.
+- **No more blank answers.** If a model streams nothing (reasoning models sometimes spend the
+  whole budget thinking), the agent retries once on the fast tier. If that is also empty, the
+  user sees "The model returned an empty answer…" and no blank message is saved to history.
+  This applies to specialist agents, `@team` and general chat.
+- **Tool markers stay out of the answer.** `⚙️ web_search`-style activity goes to the Reasoning
+  view instead of being glued into the answer text. Also fixed "Routing to Research Agent
+  agent".
+- **Code survives streaming.** SSE escaping now escapes backslashes too, and the client reverses
+  it in one pass. A literal `\n` inside code (e.g. `print("a\nb")`) used to turn into a real
+  line break. A stray `\r` no longer shows up as text.
+- **Guest chats survive pod switches and deploys.** Conversation memory is stored in Redis
+  (`llama:conv:<id>` with a 7-day TTL, setting `CONV_MEMORY_TTL`), so both API replicas see the
+  same guest history. It falls back to the local JSON file when Redis isn't configured.
+- **Deploys don't cut answers mid-stream.** The API Pod waits 10 s in `preStop` (so no new
+  stream lands on it), uvicorn drains in-flight streams for up to 120 s
+  (`--timeout-graceful-shutdown`), and `terminationGracePeriodSeconds` is 150.
+
+## [3.3.2] - 2026-10-23
+
+### Fixed
+- **Sign-up/login returned "Internal server error" in Kubernetes.** The `DATABASE_URL` secret
+  used the docker-compose host (`postgres`), which doesn't resolve in the cluster
+  (`Temporary failure in name resolution`). Registration and login failed, and chat history
+  silently stopped being saved. Added a `postgres` Service alias next to `postgres-service`,
+  so both hostnames work.
+- **Docker-link env vars no longer clobber config.** App Pods (api, web, mcp-server, frontend)
+  set `enableServiceLinks: false`. Services named `postgres`, `redis` and `phoenix` would
+  otherwise inject values like `POSTGRES_PORT=tcp://10.x.x.x:5432`, which crashed
+  `app.py`'s `int(POSTGRES_PORT)`. `web.yaml` also sets `POSTGRES_PORT=5432` explicitly.
+- **Auth errors are visible now.** When the database is unreachable, register, login and
+  token refresh return **503 "Database unavailable"** instead of a generic 500, and log the
+  cause to stderr (`kubectl logs`). Before, it only went to `logs/audit.log` inside the Pod.
+- **The deploy now checks the database.** `k8s/wait-rollout.sh` connects to Postgres from the
+  API Pod after the rollout and **fails the job** if it can't, instead of reporting a
+  "healthy" deploy where nobody can log in.
+
 ## [3.3.1] - 2026-10-23
 
 ### Fixed

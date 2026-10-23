@@ -185,6 +185,30 @@ spec:
 
 ---
 # --------------------------------------------------------------------------
+# RESOURCE 2b: Service alias `postgres` - same Pods, docker-compose hostname
+# --------------------------------------------------------------------------
+# docker-compose calls this host `postgres`, and that DATABASE_URL often ends
+# up in the DATABASE_URL GitHub secret. Without this alias `postgres` doesn't
+# resolve in k8s ("Temporary failure in name resolution"): registration/login
+# return 500 and chat history silently stops being saved. Both
+# ...@postgres:5432 and ...@postgres-service:5432 now work.
+# App Pods set enableServiceLinks: false, so this Service name does NOT inject
+# POSTGRES_PORT=tcp://... into them (app.py does int(POSTGRES_PORT)).
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: llama-agent
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+
+---
+# --------------------------------------------------------------------------
 # RESOURCE 3: PersistentVolumeClaim — Persistent Disk for Postgres Data
 # --------------------------------------------------------------------------
 # A PVC is a request for storage. Without it, Postgres data would be lost

@@ -32,12 +32,31 @@ from typing import List, Dict, Optional
 
 
 class ConversationMemory:
-    """Stores per-user conversation history in a JSON file."""
+    """Stores per-user conversation history.
+
+    Backends:
+    - Redis (when REDIS_URL is configured and reachable): every conversation
+      is one JSON key with a TTL plus a per-user index set, so ALL API
+      replicas see the same history. Guests (who are not stored in
+      PostgreSQL) previously lost their chats whenever the load balancer sent
+      them to the other pod, or a deploy replaced the pod.
+    - JSON file (local dev, tests, Redis down): the original pod-local file.
+
+    Pass ``use_redis=False`` to force the JSON file (tests do this implicitly
+    by not setting REDIS_URL). ``CONV_MEMORY_BACKEND=json`` does the same.
+    """
+
+    KEY_PREFIX = "llama:conv:"
+    INDEX_PREFIX = "llama:convs:"
 
     def __init__(self, memory_file: str = "memory/conversation_memory.json",
-                 max_history: int = 50):
+                 max_history: int = 50, use_redis: Optional[bool] = None):
         self.memory_file = memory_file
         self.max_history = max_history  # messages kept per conversation
+        self.ttl = int(os.getenv("CONV_MEMORY_TTL", str(7 * 24 * 3600)))
+        if use_redis is None:
+            use_redis = os.getenv("CONV_MEMORY_BACKEND", "auto").lower() != "json"
+        self.redis = _connect_redis("CONVERSATIONS") if use_redis else None
         self.data = self._load()
 
     # ---------------- persistence ----------------
@@ -78,22 +97,108 @@ class ConversationMemory:
             with open(self.memory_file, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2, ensure_ascii=True)
 
+    # ---------------- storage primitives (Redis or JSON) ----------------
+
+    def _redis_failed(self, e: Exception):
+        print(f"[CONVERSATIONS] Redis error, falling back to local JSON: {e}")
+        self.redis = None
+
+    def _get(self, conversation_id: str) -> Optional[Dict]:
+        if self.redis is not None:
+            try:
+                raw = self.redis.get(self.KEY_PREFIX + conversation_id)
+                return json.loads(raw) if raw else None
+            except Exception as e:
+                self._redis_failed(e)
+        return self.data["conversations"].get(conversation_id)
+
+    def _put(self, conv: Dict):
+        if self.redis is not None:
+            try:
+                idx = self.INDEX_PREFIX + conv["user_id"]
+                pipe = self.redis.pipeline()
+                pipe.set(self.KEY_PREFIX + conv["id"],
+                         json.dumps(conv, ensure_ascii=False), ex=self.ttl)
+                pipe.sadd(idx, conv["id"])
+                pipe.expire(idx, self.ttl)
+                pipe.execute()
+                return
+            except Exception as e:
+                self._redis_failed(e)
+        self.data["conversations"][conv["id"]] = conv
+        self._save()
+
+    def _delete(self, conv: Dict):
+        if self.redis is not None:
+            try:
+                pipe = self.redis.pipeline()
+                pipe.delete(self.KEY_PREFIX + conv["id"])
+                pipe.srem(self.INDEX_PREFIX + conv["user_id"], conv["id"])
+                pipe.execute()
+                return
+            except Exception as e:
+                self._redis_failed(e)
+        self.data["conversations"].pop(conv["id"], None)
+        self._save()
+
+    def _load_many(self, ids: List[str]) -> List[Dict]:
+        if not ids:
+            return []
+        raws = self.redis.mget([self.KEY_PREFIX + i for i in ids])
+        return [json.loads(r) for r in raws if r]
+
+    def _convs(self, user_id: Optional[str] = None) -> List[Dict]:
+        """All conversations (optionally only one user's)."""
+        if self.redis is not None:
+            try:
+                if user_id is not None:
+                    idx = self.INDEX_PREFIX + user_id
+                    ids = sorted(self.redis.smembers(idx))
+                    convs = self._load_many(ids)
+                    alive = {c["id"] for c in convs}
+                    expired = [i for i in ids if i not in alive]
+                    if expired:  # prune ids whose conversation key expired
+                        self.redis.srem(idx, *expired)
+                    return [c for c in convs if c.get("user_id") == user_id]
+                keys = list(self.redis.scan_iter(match=self.KEY_PREFIX + "*", count=500))
+                return self._load_many([k[len(self.KEY_PREFIX):] for k in keys])
+            except Exception as e:
+                self._redis_failed(e)
+        return [c for c in self.data["conversations"].values()
+                if user_id is None or c["user_id"] == user_id]
+
+    @staticmethod
+    def _summary(c: Dict) -> Dict:
+        return {
+            "id": c["id"],
+            "user_id": c["user_id"],
+            "title": c["title"],
+            "created_at": c["created_at"],
+            "updated_at": c["updated_at"],
+            "message_count": len(c["messages"]),
+            "last_message": c["messages"][-1]["content"][:100] if c["messages"] else "",
+        }
+
     # ---------------- conversations ----------------
 
-    def _ensure(self, user_id: str, conversation_id: str):
-        if conversation_id not in self.data["conversations"]:
-            now = datetime.now().isoformat()
-            self.data["conversations"][conversation_id] = {
-                "id": conversation_id,
-                "user_id": user_id,
-                "title": "New chat",
-                "created_at": now,
-                "updated_at": now,
-                "messages": [],
-            }
+    @staticmethod
+    def _new_conv(user_id: str, conversation_id: str, title: str = "New chat") -> Dict:
+        now = datetime.now().isoformat()
+        return {
+            "id": conversation_id,
+            "user_id": user_id,
+            "title": title,
+            "created_at": now,
+            "updated_at": now,
+            "messages": [],
+        }
 
-    def _resolve_conversation_id(self, user_id: str, conversation_id: str) -> str:
-        """Return the conversation id this user should write to.
+    def _ensure(self, user_id: str, conversation_id: str):
+        if self._get(conversation_id) is None:
+            self._put(self._new_conv(user_id, conversation_id))
+
+    def _resolve_conversation(self, user_id: str, conversation_id: str) -> Dict:
+        """Return the conversation this user should write to.
 
         A conversation id may only ever belong to ONE user. If the requested
         id already exists but belongs to a DIFFERENT user (e.g. two users both
@@ -103,14 +208,19 @@ class ConversationMemory:
         signup: a signed-up user's first message was silently appended to
         another user's "default" conversation and its owner was overwritten.
         """
-        conv = self.data["conversations"].get(conversation_id)
+        conv = self._get(conversation_id)
         if conv is None:
-            self._ensure(user_id, conversation_id)
-            return conversation_id
+            return self._new_conv(user_id, conversation_id)
         if conv["user_id"] == user_id:
-            return conversation_id
+            return conv
         # Ownership conflict -> create a fresh conversation for this user.
-        return self.create_conversation(user_id, title="New chat")["id"]
+        return self._new_conv(user_id, str(uuid.uuid4()))
+
+    def _resolve_conversation_id(self, user_id: str, conversation_id: str) -> str:
+        conv = self._resolve_conversation(user_id, conversation_id)
+        if self._get(conv["id"]) is None:
+            self._put(conv)
+        return conv["id"]
 
     def add_message(self, role: str, content: str, tool_used: str = None,
                     user_id: str = "guest", conversation_id: str = "default"):
@@ -123,8 +233,7 @@ class ConversationMemory:
         Returns the conversation_id the message was actually written to
         (useful when a caller mirrors the message into PostgreSQL).
         """
-        conversation_id = self._resolve_conversation_id(user_id, conversation_id)
-        conv = self.data["conversations"][conversation_id]
+        conv = self._resolve_conversation(user_id, conversation_id)
         conv["messages"].append({
             "role": role,
             "content": content,
@@ -137,8 +246,8 @@ class ConversationMemory:
             title = content.strip().replace("\n", " ")
             conv["title"] = title[:60] if title else "New chat"
         conv["updated_at"] = datetime.now().isoformat()
-        self._save()
-        return conversation_id
+        self._put(conv)
+        return conv["id"]
 
     def create_conversation(self, user_id: str = "guest", title: str = "New chat") -> Dict:
         """Create a new empty conversation and return its summary.
@@ -146,69 +255,31 @@ class ConversationMemory:
         Conversation ids are real UUIDs so they map 1:1 to the PostgreSQL
         conversations table (which stores ids as UUID).
         """
-        conversation_id = str(uuid.uuid4())
-        now = datetime.now().isoformat()
-        self.data["conversations"][conversation_id] = {
-            "id": conversation_id,
-            "user_id": user_id,
-            "title": title,
-            "created_at": now,
-            "updated_at": now,
-            "messages": [],
-        }
-        self._save()
-        return {
-            "id": conversation_id,
-            "user_id": user_id,
-            "title": title,
-            "created_at": now,
-            "updated_at": now,
-            "message_count": 0,
-            "last_message": "",
-        }
+        conv = self._new_conv(user_id, str(uuid.uuid4()), title)
+        self._put(conv)
+        return self._summary(conv)
 
     def delete_conversation(self, user_id: str, conversation_id: str) -> bool:
-        conv = self.data["conversations"].get(conversation_id)
+        conv = self._get(conversation_id)
         if not conv or conv["user_id"] != user_id:
             return False
-        del self.data["conversations"][conversation_id]
-        self._save()
+        self._delete(conv)
         return True
 
     def get_conversation(self, user_id: str, conversation_id: str) -> Optional[Dict]:
-        conv = self.data["conversations"].get(conversation_id)
+        conv = self._get(conversation_id)
         if not conv or conv["user_id"] != user_id:
             return None
-        return {
-            "id": conv["id"],
-            "user_id": conv["user_id"],
-            "title": conv["title"],
-            "created_at": conv["created_at"],
-            "updated_at": conv["updated_at"],
-            "message_count": len(conv["messages"]),
-            "last_message": conv["messages"][-1]["content"][:100] if conv["messages"] else "",
-        }
+        return self._summary(conv)
 
     def get_conversations(self, user_id: str) -> List[Dict]:
         """All conversations for a user, newest first."""
-        convs = [c for c in self.data["conversations"].values()
-                 if c["user_id"] == user_id]
+        convs = self._convs(user_id)
         convs.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
-        return [
-            {
-                "id": c["id"],
-                "user_id": c["user_id"],
-                "title": c["title"],
-                "created_at": c["created_at"],
-                "updated_at": c["updated_at"],
-                "message_count": len(c["messages"]),
-                "last_message": c["messages"][-1]["content"][:100] if c["messages"] else "",
-            }
-            for c in convs
-        ]
+        return [self._summary(c) for c in convs]
 
     def get_messages(self, user_id: str, conversation_id: str) -> List[Dict]:
-        conv = self.data["conversations"].get(conversation_id)
+        conv = self._get(conversation_id)
         if not conv or conv["user_id"] != user_id:
             return []
         return list(conv["messages"])
@@ -217,12 +288,13 @@ class ConversationMemory:
 
     def _all_messages(self, user_id: Optional[str] = None,
                       conversation_id: Optional[str] = None) -> List[Dict]:
+        if conversation_id is not None:
+            conv = self._get(conversation_id)
+            convs = [conv] if conv and (user_id is None or conv["user_id"] == user_id) else []
+        else:
+            convs = self._convs(user_id)
         messages = []
-        for c in self.data["conversations"].values():
-            if user_id is not None and c["user_id"] != user_id:
-                continue
-            if conversation_id is not None and c["id"] != conversation_id:
-                continue
+        for c in convs:
             messages.extend(c["messages"])
         messages.sort(key=lambda m: m.get("timestamp", ""))
         return messages
@@ -254,6 +326,11 @@ class ConversationMemory:
 
     def clear(self, user_id: Optional[str] = None):
         """Clear all memory (or just one user's conversations)."""
+        if self.redis is not None:
+            for c in self._convs(user_id):
+                self._delete(c)
+            if self.redis is not None:
+                return
         if user_id is None:
             self.data = {"conversations": {}}
         else:
@@ -265,7 +342,8 @@ class ConversationMemory:
 
     def get_stats(self) -> Dict:
         """Get memory statistics (backward compatible)."""
-        all_msgs = self._all_messages()
+        convs = self._convs()
+        all_msgs = [m for c in convs for m in c["messages"]]
         user_msgs = len([m for m in all_msgs if m["role"] == "user"])
         assistant_msgs = len([m for m in all_msgs if m["role"] == "assistant"])
         return {
@@ -273,8 +351,26 @@ class ConversationMemory:
             "user_messages": user_msgs,
             "assistant_messages": assistant_msgs,
             "memory_file": self.memory_file,
-            "conversations": len(self.data["conversations"]),
+            "backend": "redis" if self.redis is not None else "json",
+            "conversations": len(convs),
         }
+
+
+def _connect_redis(label: str):
+    """Connect to Redis if configured; return None (use JSON) otherwise."""
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        return None
+    try:
+        import redis
+        client = redis.from_url(
+            redis_url, decode_responses=True, socket_connect_timeout=2
+        )
+        client.ping()
+        return client
+    except Exception as e:
+        print(f"[{label}] Redis unavailable, using local JSON file: {e}")
+        return None
 
 
 class FactMemory:

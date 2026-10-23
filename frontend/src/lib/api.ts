@@ -22,6 +22,26 @@ export interface DsaOptions {
   agent?: string;
 }
 
+export interface DsaDefaults {
+  critic: boolean;
+  reflection: boolean;
+  parallel: boolean;
+}
+
+export interface ChatOptions {
+  defaults: DsaDefaults;
+  applies_to: Record<string, string>;
+}
+
+/** Reverse the backend's escape_sse() in ONE pass: \\ -> \, \n -> LF,
+ *  \r -> CR. Doing it in one pass keeps a literal backslash-n in model
+ *  output (e.g. code like print("a\nb")) intact. */
+export function unescapeSse(data: string): string {
+  return data.replace(/\\([\\nr])/g, (_m, c: string) =>
+    c === "n" ? "\n" : c === "r" ? "\r" : "\\"
+  );
+}
+
 export interface StreamEvent {
   type: string;
   [key: string]: unknown;
@@ -203,9 +223,8 @@ class ApiClient {
                 // Not JSON - fall through to treat as a text token.
               }
             }
-            // Unescape newlines (the backend escapes \r\n in tokens).
-            const text = data.replace(/\\n/g, "\n");
-            onToken(text);
+            // Undo the backend's SSE escaping (backslash, CR, LF).
+            onToken(unescapeSse(data));
           }
         }
         onDone();
@@ -220,6 +239,10 @@ class ApiClient {
   }
 
   // Memory & Facts
+  async getChatOptions() {
+    return this.request<ChatOptions>("GET", "/chat/options");
+  }
+
   async getFacts() {
     return this.request<{ facts: Record<string, string> }>("GET", "/facts");
   }

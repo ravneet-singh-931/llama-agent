@@ -16,7 +16,9 @@ export function ReasoningView({ events }: { events: StreamEvent[] }) {
   const [open, setOpen] = useState(true);
   if (!events || events.length === 0) return null;
 
-  const config = events.find((e) => e.type === "config") as
+  // The backend sends one `config` event per route describing what actually
+  // ran (chips); use the last one in case several arrive.
+  const config = [...events].reverse().find((e) => e.type === "config") as
     | (StreamEvent & {
         critic?: boolean;
         reflection?: boolean;

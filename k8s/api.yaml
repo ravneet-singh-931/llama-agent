@@ -79,6 +79,13 @@ spec:
         app: llama-agent
         component: api
     spec:
+      # No docker-link env vars (REDIS_PORT=tcp://..., POSTGRES_PORT=tcp://...,
+      # PHOENIX_PORT=tcp://...) - Services named redis/postgres/phoenix would
+      # otherwise inject them and clobber real config. DNS names still work.
+      enableServiceLinks: false
+      # preStop (10s) + graceful stream drain (120s) + margin. Kubernetes
+      # SIGKILLs the pod when this runs out, so it must exceed both.
+      terminationGracePeriodSeconds: 150
       containers:
         - name: api  # Container name
 
@@ -101,7 +108,18 @@ spec:
           #   - api:app = module `api.py`, variable `app` (FastAPI instance)
           #   - --host 0.0.0.0 = listen on all interfaces (k8s networking)
           #   - --port 8000 = API port
-          command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+          #   - --timeout-graceful-shutdown 120 = on SIGTERM (deploys, scale-down)
+          #     stop accepting new requests but let in-flight chat streams
+          #     finish for up to 120s instead of cutting answers mid-sentence
+          command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000",
+                    "--timeout-graceful-shutdown", "120"]
+
+          # preStop: wait until the endpoint is removed from the Service/ingress
+          # before SIGTERM, so no NEW stream lands on a terminating pod.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
 
           ports:
             - containerPort: 8000  # Container port (Service targets this)
