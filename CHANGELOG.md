@@ -5,6 +5,22 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.4] - 2026-10-23
+
+### Fixed (@team mode)
+- **The planner now builds parallel plans.** It is told to add a dependency only when a step
+  needs another step's *output*. Independent work, like market research and writing code from
+  the stated requirements, now runs at the same time. Before, plans were usually a straight
+  chain (research → coder → writer), so Parallel had nothing to run concurrently. The fallback
+  plan also runs planning and research together.
+- **Each agent does only its own step.** Step prompts now lead with "YOUR STEP" and tell the
+  agent not to do the other agents' work. Before, the first agent got the whole task first and
+  tried to do all of it: the Research agent wrote its own landing page and summary,
+  duplicating the Coder and Writer and running out of tokens.
+- **A cut-off code block no longer swallows the next agent.** When a step stops inside a code
+  block (token limit), the block is closed with a note. Before, the next agent's heading and
+  code fence showed up as literal text inside the unclosed block.
+
 ## [3.3.3] - 2026-10-23
 
 ### Fixed (Next.js chat)

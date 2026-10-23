@@ -303,3 +303,66 @@ def test_team_critic_note_is_a_reasoning_event(monkeypatch):
     out = list(orch.collaborate_stream("task", critique=True, reflect=False, parallel=False))
     assert {"type": "reasoning", "stage": "critic", "content": "Add sources."} in out
     assert "Add sources." in out[-1]["content"]
+
+
+# ============ TEAM: ONE JOB PER STEP, PARALLEL PLANS, CLOSED FENCES ============
+
+def test_fence_closer_closes_only_unterminated_blocks():
+    from multi_agent import _fence_closer
+    assert _fence_closer("text\n```py\nx = 1\n```\n") == ""
+    assert _fence_closer("no code at all") == ""
+    closer = _fence_closer("intro\n```html\n<div>cut off")
+    assert closer.startswith("\n```") and "cut off at the length limit" in closer
+    assert _fence_closer("intro\n```html\n<div>cut off" + closer) == ""
+
+
+def test_team_step_closes_fence_left_open_by_token_limit(monkeypatch):
+    orch, _ = _team(monkeypatch, delay=0)
+
+    def truncated(prompt, critique=False, reflect=False):
+        yield {"type": "token", "content": "Research\n```css\n.banner h3 { font"}
+
+    monkeypatch.setattr(orch.agents["research"], "execute_stream", truncated)
+    out = list(orch.collaborate_stream("task", critique=False, reflect=False, parallel=False))
+    s1 = next(o for o in out if o["type"] == "agent_done" and o["step"] == "s1")
+    assert s1["content"].count("```") == 2  # block closed before the next agent
+    # The next agent's section starts outside any code block.
+    from multi_agent import _fence_closer
+    assert _fence_closer(out[-1]["content"]) == ""
+
+
+def test_step_prompt_limits_agent_to_its_own_step():
+    from multi_agent import MultiAgentOrchestrator
+    orch = MultiAgentOrchestrator()
+    step = {"id": "s1", "agent": "research", "depends_on": [],
+            "instruction": "Research the todo-app market"}
+    prompt = orch._build_step_prompt(step, {}, "research AND write the landing page code")
+    assert prompt.startswith("You are one member of an agent team. YOUR STEP: Research the todo-app market")
+    assert "Do ONLY your step" in prompt
+    assert prompt.index("YOUR STEP") < prompt.index("Overall task (context only)")
+
+
+def test_planner_is_told_to_maximise_parallelism(monkeypatch):
+    from multi_agent import MultiAgentOrchestrator
+    orch = MultiAgentOrchestrator()
+    seen = {}
+
+    def fake_chat(messages, **kw):
+        seen["prompt"] = messages[-1]["content"]
+        msg = types.SimpleNamespace(content='[{"id":"s1","agent":"research","depends_on":[],"instruction":"r"},'
+                                            '{"id":"s2","agent":"coder","depends_on":[],"instruction":"c"},'
+                                            '{"id":"s3","agent":"writer","depends_on":["s1","s2"],"instruction":"w"}]')
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+    monkeypatch.setattr(orch.agents["planner"], "_chat", fake_chat)
+    steps = orch._plan_dag("research the market AND write the code")
+    assert "MAXIMISE PARALLELISM" in seen["prompt"]
+    levels, ok = orch._topo_levels(steps)
+    assert ok and sorted(levels[0]) == ["s1", "s2"] and levels[1] == ["s3"]
+
+
+def test_default_dag_runs_planning_and_research_together():
+    from multi_agent import MultiAgentOrchestrator
+    orch = MultiAgentOrchestrator()
+    levels, ok = orch._topo_levels(orch._default_dag("write code for a landing page"))
+    assert ok and sorted(levels[0]) == ["s1", "s2"]

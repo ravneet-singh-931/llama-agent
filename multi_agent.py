@@ -932,6 +932,20 @@ class PlannerAgent(BaseAgent):
 
 # ============ MULTI-AGENT ORCHESTRATOR ============
 
+def _fence_closer(text: str) -> str:
+    """Return the text needed to close an unterminated ``` code fence, or ''.
+
+    Counts fence lines (``` or ~~~ at the start of a line); an odd count
+    means a block was left open, e.g. when the model hit its token limit.
+    """
+    fences = re.findall(r"(?m)^[ \t]*(```|~~~)", text or "")
+    if len(fences) % 2 == 0:
+        return ""
+    marker = fences[-1]
+    return ("\n" if not text.endswith("\n") else "") + marker + (
+        "\n\n_(This step was cut off at the length limit.)_\n")
+
+
 class MultiAgentOrchestrator:
     """
     Orchestrates multiple agents working together.
@@ -1030,7 +1044,15 @@ class MultiAgentOrchestrator:
             '{"id":"s1","agent":"research|coder|writer|analyzer|planner",'
             '"depends_on":[],"instruction":"..."}. '
             "Use depends_on:[] for steps with no dependency. Keep to 2-5 steps. "
-            "Agents available: research, coder, writer, analyzer, planner.\n\n"
+            "Agents available: research, coder, writer, analyzer, planner.\n"
+            "Rules: (1) MAXIMISE PARALLELISM - add a dependency only when a "
+            "step cannot start without another step's OUTPUT. Steps that can "
+            "work from the task description alone (e.g. researching a market "
+            "and writing code from the stated requirements) must both have "
+            "depends_on:[] so they run at the same time. (2) Only a final "
+            "combine/summary step should depend on several steps. (3) Give each "
+            "step ONE job; never repeat another step's work in its "
+            "instruction.\n\n"
             "Task:\n<<UNTRUSTED_DATA>>\n" + task + "\n<</UNTRUSTED_DATA>>"
         )
         try:
@@ -1116,12 +1138,13 @@ class MultiAgentOrchestrator:
         return False
 
     def _default_dag(self, task: str):
-        """Fallback DAG when planner-based planning fails: planner -> research ->
-        (coder | writer in parallel) -> analyzer."""
+        """Fallback DAG when planner-based planning fails:
+        (planner | research in parallel) -> (coder | writer in parallel) -> analyzer."""
         steps = [
             {"id": "s1", "agent": "planner", "depends_on": [],
              "instruction": f"Create a plan for: {task}"},
-            {"id": "s2", "agent": "research", "depends_on": ["s1"],
+            # Research needs only the task, so it runs alongside planning.
+            {"id": "s2", "agent": "research", "depends_on": [],
              "instruction": f"Research for this task: {task}"},
         ]
         if any(w in task.lower() for w in ["code", "program", "function", "script"]):
@@ -1149,7 +1172,13 @@ class MultiAgentOrchestrator:
                     f"\n\nInput from previous step ({dep}):\n"
                     f"<<UNTRUSTED_DATA>>\n{scanned}\n<</UNTRUSTED_DATA>>"
                 )
-        return f"Overall task: {task}\n\n{step['instruction']}" + deps_ctx
+        return (
+            f"You are one member of an agent team. YOUR STEP: {step['instruction']}\n\n"
+            "Do ONLY your step. Other agents handle the other parts of the "
+            "overall task - do not do their work (no extra code, summaries or "
+            "research outside your step). Be complete but concise.\n\n"
+            f"Overall task (context only): {task}"
+        ) + deps_ctx
 
     def collaborate(self, task: str) -> str:
         """Multiple agents collaborate on a complex task.
@@ -1291,7 +1320,14 @@ class MultiAgentOrchestrator:
             except Exception:
                 full = [f"[The {step['agent']} agent could not complete this step.]"]
                 yield {"type": "token", "content": full[0]}
-            return "".join(full)
+            out = "".join(full)
+            closer = _fence_closer(out)
+            if closer:
+                # The step was cut off inside a code block (token limit).
+                # Close it so the next agent's heading doesn't render as code.
+                yield {"type": "token", "content": closer}
+                out += closer
+            return out
 
         def _finish(sid, out):
             step = by_id[sid]
