@@ -834,6 +834,37 @@ async def health_check():
 # ============ AUTH ENDPOINTS ============
 
 
+def _is_db_unavailable(e: BaseException) -> bool:
+    """True for "can't reach/auth to the database" errors (DNS, refused,
+    timeout, bad password) as opposed to bugs. Walks the cause chain because
+    SQLAlchemy wraps the driver error."""
+    seen = 0
+    while e is not None and seen < 5:
+        name = type(e).__name__
+        if isinstance(e, (OSError, ConnectionError, asyncio.TimeoutError)) or name in {
+            "OperationalError", "InterfaceError", "InvalidPasswordError",
+            "InvalidAuthorizationSpecificationError", "CannotConnectNowError",
+            "ConnectionDoesNotExistError", "TooManyConnectionsError",
+        }:
+            return True
+        e = e.__cause__ or e.__context__
+        seen += 1
+    return False
+
+
+def _auth_error(action: str, e: Exception) -> HTTPException:
+    """Log an unexpected auth failure to stderr (visible in `kubectl logs`,
+    unlike the audit log file) and map it to a user-facing error."""
+    if _is_db_unavailable(e):
+        _log.error("%s failed: database unavailable: %r", action, e)
+        return HTTPException(
+            status_code=503,
+            detail="Database unavailable - please try again in a minute.",
+        )
+    _log.exception("%s failed", action)
+    return HTTPException(status_code=500, detail="Internal server error")
+
+
 def _request_is_https(request: Optional[Request]) -> bool:
     """True when the client reached us over HTTPS (directly or via ingress)."""
     if request is None:
@@ -908,7 +939,7 @@ async def register(request: Request, response: Response, body: RegisterRequest):
         raise
     except Exception as e:
         audit_logger.log_registration(body.username, client_ip, success=False, reason=str(e))
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _auth_error("registration", e)
 
 
 @app.post("/auth/login", response_model=AuthSuccess)
@@ -958,7 +989,7 @@ async def login(request: Request, response: Response, body: LoginRequest):
         brute_force.record_failure(client_ip)
         brute_force.record_failure(body.username)
         audit_logger.log_login_attempt(body.username, client_ip, success=False, reason=str(e))
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _auth_error("login", e)
 
 
 @app.post("/auth/refresh", response_model=AuthSuccess)
@@ -975,7 +1006,7 @@ async def refresh_token(request: Request, response: Response, body: RefreshReque
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _auth_error("token refresh", e)
 
 
 @app.post("/auth/logout")

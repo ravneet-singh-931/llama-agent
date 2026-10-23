@@ -66,6 +66,10 @@ spec:
         app: llama-agent
         component: frontend
     spec:
+      # No docker-link env vars (REDIS_PORT=tcp://..., POSTGRES_PORT=tcp://...,
+      # PHOENIX_PORT=tcp://...) - Services named redis/postgres/phoenix would
+      # otherwise inject them and clobber real config. DNS names still work.
+      enableServiceLinks: false
       containers:
         - name: frontend
           # image: Next.js frontend image (built from ./frontend/Dockerfile)

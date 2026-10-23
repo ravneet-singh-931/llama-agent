@@ -566,3 +566,54 @@ def test_stream_agent_override_and_team(api_client, monkeypatch):
     assert "<research>" in text and "<writer>" in text
     assert [e["type"] for e in events].count("agent_start") == 2
     assert api.detect_team_prefix("@team") == (False, "@team")
+
+
+def test_register_db_unreachable_returns_503_and_logs(api_client, monkeypatch, caplog):
+    """DB DNS/connection failures surface as a clear 503 (and in stderr logs),
+    not an opaque 500 that is only written to the audit log file."""
+    import socket
+
+    api, TestClient = api_client
+
+    async def boom(**_kw):
+        raise socket.gaierror(-3, "Temporary failure in name resolution")
+
+    monkeypatch.setattr(api.user_manager, "register", boom)
+    c = TestClient(api.app)
+    with caplog.at_level("ERROR", logger="llama_agent.api"):
+        r = c.post("/auth/register", json={
+            "username": "newuser1", "email": "n1@example.com", "password": "Str0ng!Passw0rd",
+        })
+    assert r.status_code == 503
+    assert "Database unavailable" in r.json()["detail"]
+    assert any("registration failed: database unavailable" in m for m in caplog.messages)
+
+
+def test_register_unexpected_bug_still_500(api_client, monkeypatch):
+    api, TestClient = api_client
+
+    async def bug(**_kw):
+        raise KeyError("oops")
+
+    monkeypatch.setattr(api.user_manager, "register", bug)
+    r = TestClient(api.app).post("/auth/register", json={
+        "username": "newuser2", "email": "n2@example.com", "password": "Str0ng!Passw0rd",
+    })
+    assert r.status_code == 500
+
+
+def test_is_db_unavailable_walks_cause_chain():
+    import api
+
+    class OperationalError(Exception):
+        pass
+
+    try:
+        try:
+            raise ConnectionRefusedError("refused")
+        except ConnectionRefusedError as inner:
+            raise RuntimeError("wrapped") from inner
+    except RuntimeError as outer:
+        assert api._is_db_unavailable(outer)
+    assert api._is_db_unavailable(OperationalError("x"))
+    assert not api._is_db_unavailable(ValueError("bug"))

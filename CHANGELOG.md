@@ -5,6 +5,25 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.2] - 2026-10-23
+
+### Fixed
+- **Sign-up/login returned "Internal server error" in Kubernetes.** The `DATABASE_URL` secret
+  used the docker-compose host (`postgres`), which doesn't resolve in the cluster
+  (`Temporary failure in name resolution`). Registration and login failed, and chat history
+  silently stopped being saved. Added a `postgres` Service alias next to `postgres-service`,
+  so both hostnames work.
+- **Docker-link env vars no longer clobber config.** App Pods (api, web, mcp-server, frontend)
+  set `enableServiceLinks: false`. Services named `postgres`, `redis` and `phoenix` would
+  otherwise inject values like `POSTGRES_PORT=tcp://10.x.x.x:5432`, which crashed
+  `app.py`'s `int(POSTGRES_PORT)`. `web.yaml` also sets `POSTGRES_PORT=5432` explicitly.
+- **Auth errors are visible now.** When the database is unreachable, register, login and
+  token refresh return **503 "Database unavailable"** instead of a generic 500, and log the
+  cause to stderr (`kubectl logs`). Before, it only went to `logs/audit.log` inside the Pod.
+- **The deploy now checks the database.** `k8s/wait-rollout.sh` connects to Postgres from the
+  API Pod after the rollout and **fails the job** if it can't, instead of reporting a
+  "healthy" deploy where nobody can log in.
+
 ## [3.3.1] - 2026-10-23
 
 ### Fixed

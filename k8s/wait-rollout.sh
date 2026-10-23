@@ -74,6 +74,26 @@ for t in "${TARGETS[@]}"; do
   fi
 done
 
+# Postgres reachability from the API (DATABASE_URL + POSTGRES_PASSWORD). A wrong
+# host/password doesn't crash the Pods - /health stays green - but sign-up and
+# login return 500 and chat history silently stops being saved. Fail the job.
+if [[ $failed -eq 0 ]]; then
+  if kubectl -n "$NS" exec deploy/llama-agent-api -- python -c "
+import asyncio, asyncpg
+from modules.pg_store import get_database_url
+async def main():
+    c = await asyncpg.connect(get_database_url(), timeout=5)
+    n = await c.fetchval('select count(*) from users')
+    await c.close()
+    print('Postgres OK, users =', n)
+asyncio.run(main())"; then
+    :
+  else
+    annotate error "Postgres unreachable from API" "The API Pods cannot connect to DATABASE_URL, so sign-up/login fail and chats are not saved. Check the DATABASE_URL secret host (k8s: postgres-service or postgres) and that DB_PASSWORD matches the password Postgres was initialised with."
+    failed=1
+  fi
+fi
+
 # Redis reachability from the API (REDIS_URL comes from app-secrets). A wrong
 # host doesn't crash anything - every Pod silently falls back to its own memory
 # - so surface it here. Warning only: the deploy itself succeeded.
