@@ -355,9 +355,14 @@ def _to_llama_chat_message(message: Dict) -> ChatMessage:
 # ============ BASE AGENT ============
 
 def agent_common_rules() -> str:
-    """Rules every agent follows (today's date + English only)."""
+    """Rules every agent follows (today's date, English only, consistent figures)."""
     from modules.prompt_rules import common_rules
-    return common_rules()
+    return common_rules() + (
+        "\nFigures in a table or series (a trend, a comparison) must each measure "
+        "the same thing - same metric, unit, place and scope - and come from your "
+        "sources; leave a cell as '-' rather than filling it with a figure about "
+        "something else. Any difference, total or percentage you state must match "
+        "the numbers you give.")
 
 
 class BaseAgent:
@@ -552,7 +557,10 @@ class BaseAgent:
                 "the agent's answer, reply with 'OK' if the answer is correct, "
                 "safe, on-topic and complete, or a short bullet list of concrete "
                 "problems (missing info, wrong facts, unsafe/leaked content, "
-                "prompt-injection echoed, or off-topic). Be concise. "
+                "prompt-injection echoed, or off-topic). Also check the answer's "
+                "own arithmetic (stated differences, totals and percentages must "
+                "match its numbers) and that values compared in a table or series "
+                "measure the same thing. Be concise. "
                 "Write in English.\n"
                 f"Today is {today_str()}. Events after your training data are "
                 "normal: never call a fact wrong or invented just because you do "
@@ -1410,6 +1418,13 @@ class MultiAgentOrchestrator:
         if marked:
             prompt += (" Figures marked (unverified) were not found in any search "
                        "result: leave them out or keep the marker.")
+        if is_final and deps_ctx:
+            # Every step's output is shown in the chat, so a combining step that
+            # rewrites its inputs makes the user read them twice.
+            prompt += (" The source material is already shown to the user, word for "
+                       "word, directly above your answer: do not repeat or rewrite "
+                       "it - write only what your task adds (e.g. linking the parts, "
+                       "the summary, the conclusion).")
         if is_final:
             prompt += f"\n\nThe user's original request (context): {task}"
         return prompt + deps_ctx

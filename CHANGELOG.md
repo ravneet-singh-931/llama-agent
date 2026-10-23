@@ -5,6 +5,26 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.4] - 2026-10-23
+
+From a real "Whole Team" chat: a paragraph on pollution plus five years of data.
+
+### Fixed
+- **Team answers repeated themselves.** The plan was Writer (paragraph), then Research (data),
+  then Writer (combine). The chat shows every step, and the final step rewrote the paragraph and
+  the table above it, so the user read both twice. A final step that builds on earlier steps
+  is now told they're already shown, word for word, directly above it, so it writes only what
+  its task adds (linking, summary, conclusion). Earlier steps still show in full, so code or
+  data from them is never lost.
+- **Figures mixed different things, and the arithmetic didn't add up.** One "global PM2.5"
+  series mixed a world average with single-country values, and a stated difference
+  ("2.3 ppm higher") contradicted the table (6.2). The grounding check only verifies that a
+  figure appears in some source. Now:
+  - every agent follows a rule that values in a table or series must measure the same thing
+    (metric, unit, place, scope), with an empty cell rather than a borrowed figure;
+  - stated differences, totals and percentages must match the numbers given;
+  - the critic also checks the answer's own arithmetic and mixed-up series.
+
 ## [3.4.3] - 2026-10-23
 
 Found by the research_news eval run (2/4 passing, while the grounding rate was 0.99).
