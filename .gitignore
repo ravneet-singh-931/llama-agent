@@ -49,3 +49,6 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+
+# Evaluation reports (generated)
+evals/results/

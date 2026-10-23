@@ -158,7 +158,9 @@ def _dispatch(name: str, arguments: dict) -> str:
     """Execute a tool by name. Never raises for unknown tools."""
     try:
         if name == "web_search":
-            return web_search(str(arguments.get("query", "")))
+            return web_search(str(arguments.get("query", "")),
+                              topic=str(arguments.get("topic") or ""),
+                              time_range=str(arguments.get("time_range") or ""))
         if name == "list_uploaded_documents":
             return list_uploaded_documents()
         if name == "read_uploaded_document":

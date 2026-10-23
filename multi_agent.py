@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import math
+import inspect
 import os
 import re
 import sys
@@ -631,13 +632,16 @@ class BaseAgent:
                     "or rephrase the question.")
 
     def _stream_with_tools(self, task: str, critique: bool = False,
-                           reflect: bool = False) -> Iterator[Dict]:
+                           reflect: bool = False,
+                       sources: Optional[list] = None) -> Iterator[Dict]:
         """Run a task through the real tool loop with streaming.
 
         Yields dicts: {"type": "tool", "content": ...} for each tool call as
         it happens, then {"type": "token", "content": ...} for answer tokens.
         If the strong tier is rate-limited or unavailable, the whole round
-        retries on the fast tier. The final answer is streamed from the text
+        retries on the fast tier. ``sources`` (optional list) receives the raw
+        tool results, so an orchestrator can fact-check hand-offs; without it
+        the agent fact-checks its own answer (reasoning stage "grounding"). The final answer is streamed from the text
         the tool round already produced - no extra generation call - so a
         rate-limited or TPM-limited tier can never lose the answer.
         """
@@ -741,6 +745,25 @@ class BaseAgent:
         for ev in events:
             yield {"type": "tool", "content": ev}
 
+        tool_texts = [m.get("content") or "" for m in messages if m.get("role") == "tool"]
+        if sources is not None:
+            sources.extend(tool_texts)
+
+        def _fact_check(answer):
+            """Standalone answers: report how many figures the tool results
+            back up (orchestrated steps are checked by the orchestrator)."""
+            if sources is not None or not answer:
+                return answer
+            from modules import grounding
+            mark = os.getenv("AGENT_FACTCHECK_MARK", "0") == "1"
+            answer, report = grounding.ground(
+                answer, grounding.run_sources(task, tool_texts), mark=mark)
+            if report.checked and report.total:
+                _record_grounding(report)
+                yield {"type": "reasoning", "stage": "grounding",
+                       "content": report.summary("answer")}
+            return answer
+
         if final_content and is_frame_response(final_content):
             final_content = None
 
@@ -755,6 +778,7 @@ class BaseAgent:
             final_content = yield from self._review_stream(
                 task, final_content, critique, reflect)
             yield from _guard_events()
+            final_content = yield from _fact_check(final_content)
             yield from _text_tokens(final_content)
             return
 
@@ -871,9 +895,11 @@ class ResearchAgent(BaseAgent):
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
     def execute_stream(self, task: str, critique: bool = False,
-                       reflect: bool = False) -> Iterator[Dict]:
+                       reflect: bool = False,
+                       sources: Optional[list] = None) -> Iterator[Dict]:
         """Research a topic with streaming (tool activity, then answer tokens)."""
-        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect,
+                                           sources=sources)
 
 
 class CoderAgent(BaseAgent):
@@ -911,9 +937,11 @@ class CoderAgent(BaseAgent):
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
     def execute_stream(self, task: str, critique: bool = False,
-                       reflect: bool = False) -> Iterator[Dict]:
+                       reflect: bool = False,
+                       sources: Optional[list] = None) -> Iterator[Dict]:
         """Write/review code with streaming (tool activity, then tokens)."""
-        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect,
+                                           sources=sources)
 
 
 class WriterAgent(BaseAgent):
@@ -945,9 +973,11 @@ class WriterAgent(BaseAgent):
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
     def execute_stream(self, task: str, critique: bool = False,
-                       reflect: bool = False) -> Iterator[Dict]:
+                       reflect: bool = False,
+                       sources: Optional[list] = None) -> Iterator[Dict]:
         """Write content with streaming (tool activity, then tokens)."""
-        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect,
+                                           sources=sources)
 
 
 class AnalyzerAgent(BaseAgent):
@@ -976,9 +1006,11 @@ class AnalyzerAgent(BaseAgent):
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
     def execute_stream(self, task: str, critique: bool = False,
-                       reflect: bool = False) -> Iterator[Dict]:
+                       reflect: bool = False,
+                       sources: Optional[list] = None) -> Iterator[Dict]:
         """Analyze with streaming (tool activity, then tokens)."""
-        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect,
+                                           sources=sources)
 
 
 class PlannerAgent(BaseAgent):
@@ -1006,12 +1038,37 @@ class PlannerAgent(BaseAgent):
         return self._execute_with_tools(task, critique=critique, reflect=reflect)
 
     def execute_stream(self, task: str, critique: bool = False,
-                       reflect: bool = False) -> Iterator[Dict]:
+                       reflect: bool = False,
+                       sources: Optional[list] = None) -> Iterator[Dict]:
         """Create a plan with streaming (tool activity, then tokens)."""
-        yield from self._stream_with_tools(task, critique=critique, reflect=reflect)
+        yield from self._stream_with_tools(task, critique=critique, reflect=reflect,
+                                           sources=sources)
 
 
 # ============ MULTI-AGENT ORCHESTRATOR ============
+
+def _accepts_sources(fn) -> bool:
+    """True if an execute_stream implementation takes ``sources=`` (custom or
+    older agents may not - they still run, just without hand-off evidence)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "sources" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _record_grounding(report) -> None:
+    """Prometheus: figures checked by the grounding guardrail."""
+    try:
+        from modules.prometheus_metrics import GROUNDING_CLAIMS
+        if report.supported:
+            GROUNDING_CLAIMS.labels(result="supported").inc(report.supported)
+        if report.unsupported:
+            GROUNDING_CLAIMS.labels(result="unsupported").inc(len(report.unsupported))
+    except Exception:  # nosec B110 - metrics must never break an answer
+        pass
+
 
 def _fence_closer(text: str) -> str:
     """Return the text needed to close an unterminated ``` code fence, or ''.
@@ -1127,13 +1184,15 @@ class MultiAgentOrchestrator:
             "Use depends_on:[] for steps with no dependency. Keep to 2-5 steps. "
             "Agents available: research, coder, writer, analyzer, planner.\n"
             "Rules: (1) MAXIMISE PARALLELISM - add a dependency only when a "
-            "step cannot start without another step's OUTPUT. Steps that can "
-            "work from the task description alone (e.g. researching a market "
-            "and writing code from the stated requirements) must both have "
-            "depends_on:[] so they run at the same time. (2) Only a final "
-            "combine/summary step should depend on several steps. (3) Give each "
-            "step ONE job; never repeat another step's work in its "
-            "instruction.\n\n"
+            "step cannot start without another step's OUTPUT; steps that only "
+            "need the user's request get depends_on:[] and run at the same "
+            "time. (2) Only a final combine/summary step should depend on "
+            "several steps. (3) Give each step ONE job; never repeat another "
+            "step's work in its instruction. (4) Each instruction must be "
+            "SELF-CONTAINED: the agent sees only its instruction and the "
+            "outputs of the steps it depends on - not the user's request - so "
+            "include the subject, audience, requirements and constraints it "
+            "needs.\n\n"
             "Task:\n<<UNTRUSTED_DATA>>\n" + task + "\n<</UNTRUSTED_DATA>>"
         )
         try:
@@ -1234,35 +1293,53 @@ class MultiAgentOrchestrator:
         if any(w in task.lower() for w in ["write", "content", "article", "document"]):
             steps.append({"id": "s4", "agent": "writer", "depends_on": ["s1", "s2"],
                           "instruction": f"Write content for: {task}"})
-        last = steps[-1]["id"]
-        deps = [s["id"] for s in steps if s["id"] != last]
+        # The summary depends on every step (it used to skip the last one,
+        # so it ran in parallel with - and never saw - the coder/writer).
+        deps = [s["id"] for s in steps]
         steps.append({"id": "s5", "agent": "analyzer", "depends_on": deps,
                       "instruction": "Analyze these results and provide a summary."})
         return steps
 
-    def _build_step_prompt(self, step: dict, results: dict, task: str) -> str:
-        """Compose a step's prompt: the overall task + the step instruction, with
-        each dependency's output injected as scanned, delimited untrusted data
-        (item 6). Dependency outputs are truncated to bound prompt size."""
+    def _build_step_prompt(self, step: dict, results: dict, task: str,
+                           is_final: bool = True) -> str:
+        """Compose a step's prompt (context isolation).
+
+        A step sees its own instruction plus the outputs of the steps it
+        depends on, injected as scanned, delimited untrusted data (item 6).
+        Only FINAL steps (whose output no other step consumes) also see the
+        user's original request. Intermediate steps never see it: an agent
+        that sees the whole request does parts of it that belong to other
+        steps (e.g. a coder inventing market research). The planner is told
+        to make every instruction self-contained.
+        """
+        limit = int(os.getenv("AGENT_HANDOFF_CHARS", "12000") or 12000)
         deps_ctx = ""
-        for dep in step["depends_on"]:
+        marked = False
+        for n, dep in enumerate(step["depends_on"], 1):
             dep_out = results.get(dep)
             if dep_out:
-                limit = int(os.getenv("AGENT_HANDOFF_CHARS", "12000") or 12000)
+                marked = marked or "(unverified)" in dep_out
                 scanned = self.agents[step["agent"]]._scan_handoff(dep_out[:limit])
                 deps_ctx += (
-                    f"\n\nInput from previous step ({dep}):\n"
+                    f"\n\nSource material {n}:\n"
                     f"<<UNTRUSTED_DATA>>\n{scanned}\n<</UNTRUSTED_DATA>>"
                 )
-        return (
-            f"YOUR TASK: {step['instruction']}\n\n"
-            "Do ONLY this task. The other parts of the overall request are "
-            "handled separately - do not add extra code, summaries or research "
-            "outside your task. Be complete but concise.\n"
-            "Write the finished deliverable itself: never mention steps, a "
-            "team, other agents, hand-offs, or what you are not doing.\n\n"
-            f"Overall task (context only): {task}"
-        ) + deps_ctx
+        prompt = f"YOUR TASK: {step['instruction']}\n\nBe complete but concise."
+        if deps_ctx:
+            prompt += (" Build on the source material below instead of redoing "
+                       "work it already contains.")
+        if marked:
+            prompt += (" Figures marked (unverified) were not found in any search "
+                       "result: leave them out or keep the marker.")
+        if is_final:
+            prompt += f"\n\nThe user's original request (context): {task}"
+        return prompt + deps_ctx
+
+    @staticmethod
+    def _final_step_ids(steps) -> set:
+        """Steps whose output no other step consumes."""
+        consumed = {d for s in steps for d in s["depends_on"]}
+        return {s["id"] for s in steps if s["id"] not in consumed}
 
     def collaborate(self, task: str) -> str:
         """Multiple agents collaborate on a complex task.
@@ -1296,8 +1373,11 @@ class MultiAgentOrchestrator:
         start_time = time.time()
         skipped: List[str] = []
 
+        finals = self._final_step_ids(steps)
+
         def _run_step(step):
-            prompt = self._build_step_prompt(step, results, task)
+            prompt = self._build_step_prompt(step, results, task,
+                                             is_final=step["id"] in finals)
             try:
                 return self.agents[step["agent"]].execute(
                     prompt, critique=critique, reflect=reflect
@@ -1384,15 +1464,44 @@ class MultiAgentOrchestrator:
 
         results: Dict[str, str] = {}
         combined = ["🎯 **Multi-Agent Collaboration Result:**\n"]
+        finals = self._final_step_ids(steps)
+        # Raw tool results of every step (thread-safe list.extend) - the
+        # evidence that hand-offs and the final answer are checked against.
+        run_tool_outputs: List[str] = []
+        factcheck = os.getenv("AGENT_HANDOFF_FACTCHECK", "1") == "1"
+
+        def _checked_inputs(step):
+            """Dependency outputs with unsupported figures marked."""
+            from modules import grounding
+            srcs = grounding.run_sources(task, run_tool_outputs)
+            inputs, notes = dict(results), []
+            for dep in step["depends_on"]:
+                if dep not in results or not factcheck:
+                    continue
+                marked, report = grounding.ground(results[dep], srcs, mark=True)
+                if report.checked and report.unsupported:
+                    inputs[dep] = marked
+                    _record_grounding(report)
+                    notes.append(report.summary(
+                        f"{self.agents[by_id[dep]['agent']].name} → "
+                        f"{self.agents[step['agent']].name}") + " - marked unverified")
+            return inputs, notes
 
         def _step_events(sid):
             """Run one step; yields its events and returns its full text."""
             step = by_id[sid]
             agent = self.agents[step["agent"]]
-            prompt = self._build_step_prompt(step, results, task)
+            inputs, notes = _checked_inputs(step)
+            for n in notes:
+                yield {"type": "reasoning", "stage": "grounding", "content": n}
+            prompt = self._build_step_prompt(step, inputs, task, is_final=sid in finals)
             full: List[str] = []
+            step_sources: List[str] = []
             try:
-                for ev in agent.execute_stream(prompt, critique=False, reflect=reflect):
+                extra = ({"sources": step_sources}
+                         if _accepts_sources(agent.execute_stream) else {})
+                for ev in agent.execute_stream(prompt, critique=False, reflect=reflect,
+                                               **extra):
                     etype = ev.get("type")
                     if etype == "token":
                         txt = ev.get("content", "")
@@ -1404,6 +1513,7 @@ class MultiAgentOrchestrator:
             except Exception:
                 full = [f"[The {step['agent']} agent could not complete this step.]"]
                 yield {"type": "token", "content": full[0]}
+            run_tool_outputs.extend(step_sources)
             out = "".join(full)
             closer = _fence_closer(out)
             if closer:
@@ -1452,6 +1562,16 @@ class MultiAgentOrchestrator:
                            "agent": self.agents[by_id[sid]["agent"]].name, "step": sid}
                     out = yield from _step_events(sid)
                     yield _finish(sid, out)
+
+        # Grounding report on what the user reads last (the final steps).
+        from modules import grounding
+        srcs = grounding.run_sources(task, run_tool_outputs)
+        for sid in [st["id"] for st in steps if st["id"] in finals]:
+            report = grounding.check(results.get(sid, ""), srcs)
+            if report.checked and report.total:
+                _record_grounding(report)
+                yield {"type": "reasoning", "stage": "grounding", "content": report.summary(
+                    f"final answer, {self.agents[by_id[sid]['agent']].name}")}
 
         final = "".join(combined)
         if critique:

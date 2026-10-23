@@ -348,11 +348,10 @@ def _step_prompt(monkeypatch, dep_len):
     return orch._build_step_prompt(step, {"s1": "R" * dep_len}, "overall task")
 
 
-def test_step_prompt_forbids_team_meta_talk_and_keeps_big_handoffs(monkeypatch):
+def test_step_prompt_has_no_team_framing_and_keeps_big_handoffs(monkeypatch):
     monkeypatch.delenv("AGENT_HANDOFF_CHARS", raising=False)
     prompt = _step_prompt(monkeypatch, 10000)
-    assert "never mention" in prompt and "other agents" in prompt
-    assert "agent team" not in prompt
+    assert "agent team" not in prompt and "other agents" not in prompt
     assert "R" * 10000 in prompt             # old 2000-char cut is gone
 
 

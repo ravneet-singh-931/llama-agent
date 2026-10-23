@@ -83,11 +83,20 @@ def _format_results(rows) -> str:
         snippet = re.sub(r"\s+", " ", snippet)
         if len(snippet) > _SNIPPET_CHARS:
             snippet = snippet[:_SNIPPET_CHARS].rsplit(" ", 1)[0] + " ..."
+        published = (row.get("published") or "").strip()
+        if published:
+            # Lets the agent (and the grounding check) date its claims.
+            title = f"{title} (published {published[:16]})"
         lines.append(f"{i}. {title}\n   {url}\n   {snippet}")
     return "\n\n".join(lines)
 
 
-def _search_tavily(query: str, key: str, max_results: int) -> str:
+_TAVILY_TOPICS = ("general", "news", "finance")
+_TAVILY_TIME_RANGES = ("day", "week", "month", "year")
+
+
+def _search_tavily(query: str, key: str, max_results: int,
+                   topic: str = "", time_range: str = "") -> str:
     # Tavily authenticates with "Authorization: Bearer tvly-..."; the old
     # api_key-in-body form is deprecated and rejected by some keys.
     # TAVILY_SEARCH_DEPTH: "basic" (1 credit) or "advanced" (2 credits,
@@ -95,17 +104,25 @@ def _search_tavily(query: str, key: str, max_results: int) -> str:
     depth = os.getenv("TAVILY_SEARCH_DEPTH", "basic").strip().lower()
     if depth not in ("basic", "advanced"):
         depth = "basic"
+    payload = {
+        "query": query,
+        "max_results": max_results,
+        "search_depth": depth,
+        "include_published_date": True,
+    }
+    # Chosen by the model per query (tool parameters), not by keywords.
+    if topic in _TAVILY_TOPICS:
+        payload["topic"] = topic
+    if time_range in _TAVILY_TIME_RANGES:
+        payload["time_range"] = time_range
     data = _http_post_json(
         "https://api.tavily.com/search",
-        {
-            "query": query,
-            "max_results": max_results,
-            "search_depth": depth,
-        },
+        payload,
         headers={"Authorization": f"Bearer {key}"},
     )
     rows = [
-        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", ""),
+         "published": r.get("published_date") or ""}
         for r in data.get("results", [])
     ]
     return _format_results(rows)
@@ -157,8 +174,12 @@ def _looks_like_bot_wall(html: str) -> bool:
     return ("anomaly" in text or "challenge" in text) and "result__a" not in text
 
 
-def web_search(query: str, max_results: int = _MAX_RESULTS) -> str:
+def web_search(query: str, max_results: int = _MAX_RESULTS,
+               topic: str = "", time_range: str = "") -> str:
     """Search the web and return a readable, numbered result list.
+
+    ``topic`` (general | news | finance) and ``time_range`` (day | week |
+    month | year) are passed to Tavily; other providers ignore them.
 
     Never raises: any provider failure becomes a message the agent can
     respond to (and the agent still answers from its own knowledge).
@@ -170,7 +191,9 @@ def web_search(query: str, max_results: int = _MAX_RESULTS) -> str:
     tavily_key = get_secret("TAVILY_API_KEY", default="")
     if tavily_key:
         try:
-            return _search_tavily(query, tavily_key, max_results)
+            return _search_tavily(query, tavily_key, max_results,
+                                  topic=(topic or "").strip().lower(),
+                                  time_range=(time_range or "").strip().lower())
         except Exception as e:
             # Visible in `kubectl logs` - e.g. HTTP 401 = bad/expired key,
             # 432/429 = plan credits or rate limit used up.
@@ -213,7 +236,23 @@ WEB_SEARCH_TOOL = {
                 "query": {
                     "type": "string",
                     "description": "The search query (concise, specific).",
-                }
+                },
+                "topic": {
+                    "type": "string",
+                    "enum": list(_TAVILY_TOPICS),
+                    "description": (
+                        "'news' for current events and headlines, 'finance' for "
+                        "markets/companies, otherwise 'general' (default)."
+                    ),
+                },
+                "time_range": {
+                    "type": "string",
+                    "enum": list(_TAVILY_TIME_RANGES),
+                    "description": (
+                        "Only results from the past day/week/month/year. Use it "
+                        "when the question is about a recent period."
+                    ),
+                },
             },
             "required": ["query"],
         },

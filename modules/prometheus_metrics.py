@@ -87,6 +87,13 @@ LLM_TOKENS_TRIMMED = Counter(
 )
 
 
+GROUNDING_CLAIMS = Counter(
+    "llama_agent_grounding_claims_total",
+    "Figures in agent answers checked against tool results (modules/grounding.py)",
+    ["result"],  # supported | unsupported
+)
+
+
 def record_llm_usage(model: str, input_tokens: int, output_tokens: int) -> float:
     """Record one LLM call's token usage in Prometheus + the CostTracker
     (/monitoring/dashboard). Never raises - metrics must not break chat."""
