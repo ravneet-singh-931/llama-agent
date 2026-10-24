@@ -247,7 +247,7 @@ export default function SettingsPage() {
                   <div className="flex-1">
                     <h3 className="font-semibold">Security</h3>
                     <p className="mb-3 text-sm text-muted-foreground">
-                      Enterprise-grade security features are active
+                      Security features are active
                     </p>
                     <div className="grid grid-cols-2 gap-2 text-sm">
                       {[

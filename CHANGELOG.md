@@ -5,6 +5,30 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.7] - 2026-10-24
+
+Docs and wording only (no behaviour change): every claim in the README, docs, code comments,
+startup log and landing page now matches the code and has a source or is marked unmeasured.
+
+### Changed
+- **Removed unmeasured numbers:** "saves 80% cost and 20ms" (semantic cache), "beats 95% of
+  RAG repos" (CRAG), "improves recall by ~10%" (contextual retrieval, not Anthropic's figure).
+- **Fixed wrong facts:** models (README said Llama 3.3-70b / 3.1-8b; the app uses
+  `qwen/qwen3.8-27b` and `openai/gpt-oss-20b`), "pgvector" (not installed), "CDN headers"
+  (nginx sets security headers only), upload "threat/content scanning" (extension and size
+  checks only), "8 alert rules" (9), "13 panels / 13 containers / 8 jobs" on the landing
+  page (18 / 14 / 9), test counts (now 472 passed, 4 skipped, 17 deselected, 22 modules),
+  "validated manifests" (CI doesn't validate them), "encrypted at rest" Docker secrets,
+  the deploy description (`apply-app.sh` renders `:<sha>`, not `kubectl set image`).
+- **OptimizedRAG described as it runs:** query decomposition is off by default, and the LLM
+  follow-up rewrite isn't used by the chat path. The startup log no longer lists them as
+  active.
+- **Monitoring dashboard and input sanitizer described honestly:** both cover only the
+  non-streaming `/chat`, not `/chat/stream`.
+- Dropped "production-grade" / "enterprise-grade" wording; added a "Known limits" section
+  (single-node cluster, free-tier rate limits, small on-demand eval, no Alertmanager,
+  streaming-endpoint gaps). Replaced the README's example "fun fact" (an unchecked figure).
+
 ## [3.4.6] - 2026-10-24
 
 Makes the RAG steps the code already advertised actually run, without PyTorch.

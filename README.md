@@ -15,13 +15,17 @@
 
 ---
 
-## 🚀 Llama Agent — Production-Grade Multi-Agent AI Assistant
+## 🚀 Llama Agent — Multi-Agent AI Assistant with RAG and LLMOps
 
 A full-stack, multi-agent AI assistant with **end-to-end observability**. Upload documents (PDF, TXT, CSV, DOCX), chat with a team of five specialized agents (`@Research`, `@Coder`, `@Writer`, `@Planner`, `@Analyzer`), and get answers grounded in your files — every LLM call traced, every span captured.
 
+> **Scope, honestly:** a portfolio project that runs on a single-node local Kubernetes
+> cluster (kind, on one PC) with a GitHub Actions CI/CD pipeline (tests → image build →
+> staging → production), on the **Groq free tier**. See [Known limits](#-known-limits).
+
 > **Built to be observed.** Every request flows through a single trace: `POST /chat/stream` → `GroqLLM.chat` → tool calls → HTTP send/receive — visible live in Phoenix.
 
-> 🔒 **Secure by default, observable by design.** Enterprise-grade auth (JWT, rate limiting, brute-force lockout, CSRF, CSP/HSTS headers, audit logging) and full LLM observability (Phoenix traces, Prometheus metrics, Grafana dashboards, Loki logs) — with all infrastructure locked down and **never exposed publicly**.
+> 🔒 **Secure by default, observable by design.** App-layer auth (JWT, rate limiting, brute-force lockout, CSRF, CSP/HSTS headers, audit logging) and full LLM observability (Phoenix traces, Prometheus metrics, Grafana dashboards, Loki logs) — with all infrastructure locked down and **never exposed publicly**.
 
 ```
 You:  "summarize the CRM file"
@@ -29,9 +33,8 @@ AI:   "This document is a Word document (CRM-3.docx) discussing investment and
        capital allocation strategies, involving financial analysis and business
        metrics (CRM-3.docx, chunk 0)..."
 
-You:  "@Research Agent tell me a fun fact about Japan"
-AI:   "Japan has a vending machine culture, with over 5.5 million vending
-       machines across the country — offering drinks, snacks, and even live crabs."
+You:  "@Research Agent what happened in Formula 1 this week?"
+AI:   (searches the web with Tavily, answers with dated sources)
 ```
 
 ---
@@ -51,8 +54,8 @@ AI:   "Japan has a vending machine culture, with over 5.5 million vending
 ## ✨ Highlights
 
 - **Multi-Agent Orchestration** — five specialized agents + team mode, keyword-routed (`@Research Agent ...`) or automatic
-- **Document RAG** — upload files, retrieve with ChromaDB, cite every claim with file + chunk
-- **OptimizedRAG** — production RAG pipeline with 7 optimizations: hybrid search (BM25 + dense vectors), a cross-encoder reranker, contextual retrieval with semantic chunking, query decomposition, corrective RAG (CRAG), conversational retrieval, and a semantic cache. Enabled by `USE_OPTIMIZED_RAG=true` (on by default in the deployed image).
+- **Document RAG** — upload files, retrieve with ChromaDB; answers cite the file + chunk they came from
+- **OptimizedRAG** — hybrid search (BM25 + dense vectors), an ONNX cross-encoder reranker, contextual chunk summaries with semantic chunking, a corrective-RAG answer check (CRAG) and a versioned semantic cache; query decomposition is opt-in (`RAG_DECOMPOSE=1`). Enabled by `USE_OPTIMIZED_RAG=true` (on in Compose and k8s).
 - **Two-Pass Retrieval** — thin answers trigger query reformulation and a second search
 - **Streaming Chat** — SSE streaming with agent/tool transcript markers
 - **LLMOps on the Groq free tier** — token budgeting and context compaction, rate-limit-aware model routing shared via Redis, 413 shrink-and-retry (`modules/llm_guard.py`)
@@ -60,14 +63,16 @@ AI:   "Japan has a vending machine culture, with over 5.5 million vending
 - **Evaluation suite** — 30 varied cases, rule-based checks + LLM judge + grounding rate, baseline comparison (`evals/`, see `evals/README.md`)
 - **LLM Observability** — every Groq call (agents *and* RAG) emits `GroqLLM.chat` spans to Phoenix via llama-index instrumentation
 - **Full DevOps Stack** — Prometheus, Grafana, Loki, Promtail, node-exporter, nginx (SSL + LB)
-- **Enterprise Security** — JWT auth, rate limiting, brute-force lockout, CSRF, audit logging, Docker secrets
+- **App security** — JWT auth, rate limiting, brute-force lockout, CSRF, audit logging, Docker secrets
 
 ---
 
 ## 🧠 OptimizedRAG
 
 The deployed API uses **OptimizedRAG** — a drop-in replacement for the basic RAG
-pipeline that layers seven production-grade optimizations on top of ChromaDB:
+pipeline that adds the steps below on top of ChromaDB. Items 4 and 6b are off in the
+chat path; none of the steps has a measured quality gain in this repo yet (no RAG eval).
+
 
 1. **Hybrid Search** — BM25 keyword (`rank_bm25`) + dense-vector retrieval; keyword-only
    hits (IDs, error codes, names) are added as candidates, always restricted to the
@@ -79,16 +84,20 @@ pipeline that layers seven production-grade optimizations on top of ChromaDB:
    (`scripts/download_reranker.py`, `RERANKER_MODEL_DIR`) and fails if the model doesn't
    rank a relevant passage first. The startup log says which reranker is in use
    (`🔎 Reranker: onnx (...)`); without the model it falls back to a keyword reranker.
-3. **Contextual Retrieval** — LLM-generated summary per document prepended to each
-   semantic chunk (summaries are cached; restarts skip already-indexed files)
-4. **Query Decomposition** — splits complex questions into sub-questions (`RAG_DECOMPOSE=1`)
+3. **Contextual Retrieval** — a short summary of each document, written by the fast model,
+   is prepended to each semantic chunk (summaries are cached; restarts skip already-indexed
+   files). If the model returns no summary the chunks are stored without one; the upload
+   result says which (`contextual retrieval` vs `plain chunks`).
+4. **Query Decomposition** — splits complex questions into sub-questions. **Off by default**
+   (`RAG_DECOMPOSE=1` to enable).
 5. **Corrective RAG (CRAG)** — on by default: the fast model checks every document answer
    against the excerpts it was written from. An unsupported answer triggers a second
    retrieval with a reformulated query; if it still can't be verified it is shown with a
    note and not cached. Verdicts are counted in `llama_agent_rag_crag_verdicts_total`.
 6. **Follow-ups** — in chat, a follow-up ("what about the pricing column?") is combined with
-   the conversation's last document question before retrieval. `OptimizedRAG.retrieve` can
-   also rewrite follow-ups with the LLM when given chat history (`RAG_QUERY_REWRITE`).
+   the conversation's last document question before retrieval. (6b) `OptimizedRAG.retrieve`
+   can also rewrite follow-ups with the LLM when given chat history (`RAG_QUERY_REWRITE`),
+   but the chat path does not pass history to it, so this rewrite is not used there.
 7. **Semantic Cache** — near-duplicate questions return the cached answer (per user;
    invalidated when that user's documents change). Entries carry an answer-format version
    (`SemanticCache.ANSWER_VERSION`), so answers from an older prompt are never served;
@@ -197,7 +206,7 @@ app routes (`/`, `/api`, `/ws`, `/streamlit`). The MCP server is internal-only,
                         │  HTTPS
                         ▼
 ┌─────────────────────────────────────────────────────────┐
-│              Nginx (SSL + Load Balancer + CDN headers)   │
+│        Nginx (SSL + Load Balancer + security headers)    │
 └───────┬──────────────┬──────────────┬───────────────────┘
         │              │              │
         ▼              ▼              ▼
@@ -269,8 +278,8 @@ Both keep ChromaDB cluster-internal (no published host port).
 |-------|-----------|
 | **Frontend** | Next.js 16 (main UI), Streamlit (legacy) |
 | **Backend** | FastAPI, Python 3.11, asyncpg |
-| **Database** | PostgreSQL 15 (+ pgvector), Redis 7, ChromaDB |
-| **AI/ML** | Groq (Llama 3.3-70b / 3.1-8b), LlamaIndex |
+| **Database** | PostgreSQL 15, Redis 7, ChromaDB |
+| **AI/ML** | Groq (`qwen/qwen3.8-27b` strong, `openai/gpt-oss-20b` fast), LlamaIndex, onnxruntime (reranker) |
 | **Agents** | 5 specialized agents (Research, Coder, Writer, Planner, Analyzer) via MCP/SSE |
 | **Observability** | Phoenix (Arize), OpenTelemetry, OpenInference |
 | **Monitoring** | Prometheus, Grafana, Loki, Promtail, node-exporter |
@@ -283,14 +292,14 @@ Both keep ChromaDB cluster-internal (no published host port).
 
 | Container | Service | Purpose | Port |
 |-----------|---------|---------|------|
-| `llama-agent-db` | `postgres` | PostgreSQL 15 (+pgvector) | internal |
+| `llama-agent-db` | `postgres` | PostgreSQL 15 | internal |
 | `llama-agent-redis` | `redis` | Caching + WebSocket pub/sub + shared fact store | internal |
 | `llama-agent-chromadb` | `chromadb` | Shared ChromaDB vector store (all API replicas) | internal |
 | `llama-agent-api` | `api` | FastAPI REST + WebSocket + SSE chat | **8000** |
 | `llama-agent-mcp` | `mcp-server` | MCP agent server (SSE, 5 agents) | internal |
 | `llama-agent-web` | `web` | Streamlit UI (legacy) | **8501** |
 | `llama-agent-frontend` | `frontend` | Next.js 16 UI | **3001** |
-| `llama-agent-nginx` | `nginx` | SSL + Load Balancer + CDN headers | **80, 443** |
+| `llama-agent-nginx` | `nginx` | SSL + Load Balancer + security headers | **80, 443** |
 | `llama-agent-prometheus` | `prometheus` | Metrics collection + alert rules | 127.0.0.1:9090 |
 | `llama-agent-grafana` | `grafana` | Monitoring dashboards | 127.0.0.1:3002 |
 | `llama-agent-loki` | `loki` | Log aggregation | internal |
@@ -307,11 +316,11 @@ Both keep ChromaDB cluster-internal (no published host port).
 | 🔑 **JWT Authentication** | HttpOnly-cookie JWTs (short-lived access + refresh), bearer tokens for scripts |
 | 👥 **Multi-user isolation** | Per-user (and per-guest) history, facts, documents, RAG caches and WebSocket sessions |
 | 🔐 **Docker Secrets** | API keys mounted at `/run/secrets/*` — never in code or images |
-| 📁 **File Validation** | Upload type/size checks + threat scanning |
+| 📁 **File Validation** | Upload extension/size checks, filename sanitizing, path confinement |
 | 🚦 **Rate Limiting** | Per-IP/per-user limits with configurable thresholds |
 | 🛡️ **Brute-Force Protection** | Automatic IP/username lockout after repeated failures |
 | 🛡️ **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options |
-| 🧼 **Input Sanitization** | SQL injection / XSS / command-injection detection |
+| 🧼 **Input Sanitization** | Regex sanitizer (script tags, event handlers, null bytes) + a prompt-injection heuristic — applied on non-streaming `/chat` only, not on `/chat/stream` |
 | 🛡️ **CSRF Protection** | `SameSite=Lax` HttpOnly auth cookies + same-origin API |
 | 📝 **Audit Logging** | Login, registration, uploads, rate-limit events |
 | 🔒 **Secure-by-default** | Infra ports never published to the host in committed config |
@@ -320,14 +329,15 @@ Both keep ChromaDB cluster-internal (no published host port).
 
 ## ✅ Verification
 
-I verified the core flows (chat, agent routing, RAG, upload, MCP, monitoring) end-to-end in the browser, and confirmed the **multi-replica state fix**: `remember` on one replica is visible to `list facts` on another, and document `search` / `list documents` return consistent results across both API replicas (shared Redis + shared ChromaDB server). The 14 tools / 5 agents are covered by the passing test suite (`290 passed, 17 deselected`).
+I checked the core flows (chat, agent routing, RAG, upload, MCP, monitoring) by hand in the browser, and confirmed the **multi-replica state fix**: `remember` on one replica is visible to `list facts` on another, and document `search` / `list documents` return consistent results across both API replicas (shared Redis + shared ChromaDB server). The 5 agents, the ReAct agent's 15 tools and the MCP server's 7 tools are covered by the automated test suite (see [Tests](#-tests)); the MCP tests are excluded from the default run (`-m "not mcp"`).
 
 ## 🔐 Security & Cloud Hardening
 
-The app ships with enterprise-grade app-layer security (JWT, rate limiting,
+The app ships with app-layer security (JWT, rate limiting,
 brute-force lockout, CSRF, CSP/HSTS headers, audit logging, Docker secrets).
-On top of that, the `k8s/` manifests are now **production-state ready** — the 9
-cloud-hardening points below are implemented as committed, validated manifests.
+On top of that, the 9 cloud-hardening points below are written as committed `k8s/`
+manifests. Only some are active in the local lab (no cert-manager, ESO or SSO installed),
+and CI does not schema-validate the manifests.
 Items that need *your* cloud accounts/credentials are scaffolded (config +
 manifests) so activation is a config step, not a rewrite. See
 [Cloud Hardening (9 Points)](#☁️-cloud-hardening-9-points) for the full table
@@ -343,8 +353,7 @@ and exactly what to fill in.
 
 ## ☁️ Cloud Hardening (9 Points)
 
-All 9 points are implemented as committed, validated Kubernetes manifests in
-`k8s/`. "Scaffold" means the manifest/config is present and correct, but it
+All 9 points are written as committed Kubernetes manifests in `k8s/`. "Scaffold" means the manifest/config is present and correct, but it
 activates only once *you* supply the corresponding cloud account or credential
 (nothing is provisioned for you, and no real certs/keys are issued by this
 repo).
@@ -354,7 +363,7 @@ repo).
 | 1 | **TLS / HTTPS** | `k8s/cert-manager.yaml` (Let's Encrypt staging/prod + self-signed issuers); every ingress has a `tls:` block + `cert-manager.io/cluster-issuer` | ✅ manifest | A public FQDN (Let's Encrypt can't issue for `.local`); install cert-manager (`CERT_MANAGER=true`) |
 | 2 | **SSO / OIDC** | `k8s/oauth2-proxy.yaml` + `oauth2-proxy-ingress.yaml`; Grafana native OAuth env (optional, disabled by default) | 🔧 scaffold | OIDC client ID/secret/issuer → `oauth2-proxy-secret`; enable `OIDC_ENABLED=true` |
 | 3 | **Rate-limit / WAF** | `limit-rps`/`limit-rpm`/`limit-connections` + ModSecurity/OWASP CRS annotations on all ingresses | ✅ manifest | ingress-nginx controller built with ModSecurity enabled |
-| 4 | **Pin image tags** | `k8s/api.yaml` + `k8s/mcp-server.yaml` use `:v7` + `imagePullPolicy: IfNotPresent`; CI pushes `:v7` | ✅ manifest | CI builds `:v7` on main (already wired); optionally pin to a digest |
+| 4 | **Pin image tags** | CI pushes an immutable `:<git sha>` tag; `k8s/apply-app.sh` renders it into the app Deployments, so each deploy runs exactly that commit's image | ✅ manifest | Nothing (optionally pin to a digest) |
 | 5 | **Managed/HA datastores + backups** | `k8s/postgres-backup-cronjob.yaml` (daily `pg_dump` → PVC); PDBs for api/postgres/redis/chromadb/mcp | ✅ manifest | For true HA, use managed Postgres/Redis (see below); backups run as-is |
 | 6 | **Secret manager** | `k8s/external-secrets.yaml` (ESO `ClusterSecretStore` + `ExternalSecret`s for AWS SM, GCP alt commented) | 🔧 scaffold | Cloud secret-manager backend + creds; enable `ESO_ENABLED=true` |
 | 7 | **HPA / PDB / quotas / NetworkPolicies** | `k8s/api-hpa.yaml`, `k8s/poddisruptionbudgets.yaml`, `k8s/resourcequota.yaml`, `k8s/networkpolicy.yaml` | ✅ manifest | metrics-server (for HPA); enable `NETWORK_POLICY=true` to enforce |
@@ -400,22 +409,24 @@ CERT_MANAGER=true ESO_ENABLED=true OIDC_ENABLED=true NETWORK_POLICY=true \
   ./k8s/deploy.sh production
 ```
 
-The CI pipeline (`.github/workflows/main.yml`) builds & pushes `:v7` (app +
-MCP server) and, when a base64 `KUBE_CONFIG` secret is present, applies the
-core manifests to staging then production (GitHub Environments gate prod).
+The CI pipeline (`.github/workflows/main.yml`) builds & pushes the app, MCP server and
+frontend images (`:latest`, `:v7`, `:<git sha>`) and, when a base64 `KUBE_CONFIG` secret is
+present, deploys the `:<git sha>` images to staging then production.
 
 ---
 
 Every turn is a **full trace** in Phoenix:
 
-- **Multi-agent turns** → `POST /chat/stream` → **2 × `GroqLLM.chat`** LLM spans (research + answer)
-- **Document/RAG turns** → `POST /chat/stream` → **1 × `GroqLLM.chat`** LLM span (grounded answer)
+- **Agent turns** → `POST /chat/stream` → one LLM span per model call (tool rounds,
+  critique and revision included)
+- **Document/RAG turns** → `POST /chat/stream` → spans for the answer and the helper calls
+  (reformulation, CRAG check)
 - **HTTP layer** → `http send` / `http receive` children capture the full request/response
 
 In addition:
-- **Prometheus + Grafana** — pre-provisioned dashboards + 8 alert rules
+- **Prometheus + Grafana** — a pre-provisioned dashboard (18 panels) + 9 alert rules (no Alertmanager, so alerts are not delivered anywhere)
 - **Loki + Promtail** — centralized log aggregation
-- **Enterprise dashboard** — `GET /monitoring/dashboard` (business metrics, costs, SLA, alerts)
+- **Monitoring dashboard** — `GET /monitoring/dashboard` (costs, business metrics, SLA, alerts). In-memory and per replica; the business/SLA numbers count only the non-streaming `/chat` endpoint, not `/chat/stream` (which the main UI uses), and no downtime is ever recorded, so its uptime figure is not meaningful. Use Prometheus/Grafana for real traffic.
 - **Cost tracking** — Groq spend per model/user/day
 - **`GET /metrics`** and **`GET /metrics/json`** — Prometheus / JSON metric endpoints
 
@@ -498,7 +509,7 @@ llama-agent/
 │   ├── memory.py             # Per-user conversation memory
 │   ├── mcp_client.py         # MCP client (SSE → agent server)
 │   └── secrets.py            # Docker-secret reader (env/file fallback)
-├── tests/                    # 300+ tests (290 passing, pytest)
+├── tests/                    # pytest suite (22 modules)
 ├── config/
 │   ├── nginx/                # SSL + reverse proxy config
 │   ├── prometheus/           # Metrics + alert rules
@@ -526,11 +537,14 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status:** 377 passing, 17 deselected (`-m "not mcp"`), across 16 test
-modules (including `test_multitenancy.py`: tenant isolation, guest identity, WS
-tickets, metrics exposure, hybrid search, cost tracking, streaming) — covering security hardening, rate limiting, monitoring, RAG,
-multi-agent routing/streaming, the Phoenix span-instrumentation path, and the
-Point 9 multi-provider LLM chain/fallback logic.
+**Current status (v3.4.6):** 472 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+22 test modules. The 4 skipped tests need the reranker model file, which CI downloads
+(`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
+reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
+the Phoenix span-instrumentation path, the Point 9 multi-provider chain/fallback logic, and
+multi-tenancy (`test_multitenancy.py`: tenant isolation, guest identity, WS tickets, metrics
+exposure, hybrid search, cost tracking, streaming). These are unit/integration tests with
+the LLM stubbed; answer quality is measured separately by the eval suite (`evals/`).
 
 ---
 
@@ -552,8 +566,8 @@ app → ingress → monitoring → backups/HPA/PDB → NetworkPolicies.
 > `/` → Next.js, `/api/*` → API (prefix stripped), `/ws/*` → API WebSocket,
 > `/streamlit/*` → Streamlit. MCP stays internal.
 > Images come from Docker Hub (`ravneet231/llama-agent*`). CI pushes `:latest`, `:v7` and an
-> immutable `:<git sha>`; the CD job runs `kubectl set image …:<sha>` so every deploy
-> actually rolls out (and `kubectl rollout undo` works).
+> immutable `:<git sha>`; the CD job renders `:<sha>` into the manifests (`k8s/apply-app.sh`)
+> so every deploy is one rollout (and `kubectl rollout undo` works).
 >
 > **Upgrading an existing cluster:** uploads moved from a PVC to the shared ChromaDB
 > index, so the old `uploads-pvc` can be removed: `kubectl -n llama-agent delete pvc uploads-pvc`.
@@ -624,6 +638,22 @@ docker compose logs api | grep -i phoenix
 docker compose ps postgres redis
 docker compose logs postgres
 ```
+
+---
+
+## 🧭 Known limits
+
+- **One machine.** Staging and production are namespaces on a single-node kind cluster on my
+  PC, deployed by a self-hosted GitHub Actions runner; there is no cloud HA.
+- **Groq free tier.** Rate limits (7,000 input tokens/min on the strong model) are handled by
+  a token budget, model fallback and retries, but `@team` mode (several agents in a row) can
+  still hit the limit and return a partial answer.
+- **Evaluation is small.** The agent eval has 30 cases and runs on demand, not in CI. There
+  is no retrieval or document-answer eval yet, so the RAG steps above have no measured gain.
+- **No alert delivery.** Prometheus alert rules exist, but no Alertmanager is deployed.
+- **Streaming endpoint gaps.** `/chat/stream` (used by the main UI) skips the input
+  sanitizer, the prompt-injection heuristic and the in-app business/SLA metrics;
+  Prometheus request metrics and Phoenix traces do cover it.
 
 ---
 

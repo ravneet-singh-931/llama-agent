@@ -248,7 +248,7 @@ export default function DocumentsPage() {
                   </li>
                   <li className="flex items-start gap-2">
                     <span className="mt-0.5 text-primary">•</span>
-                    The AI uses RAG with re-ranking for accurate answers
+                    The AI answers from your documents using search with re-ranking
                   </li>
                 </ul>
               </Card>

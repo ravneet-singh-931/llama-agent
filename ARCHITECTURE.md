@@ -88,7 +88,7 @@
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                     Answer Generation (Groq API)                     │    │
 │  │                                                                       │    │
-│  │  Context (relevant chunks) + User Query ──→ Llama 3 ──→ Answer      │    │
+│  │  Context (relevant chunks) + User Query ──→ Groq LLM ──→ Answer     │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
                                                │
@@ -254,7 +254,7 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ Layer 4: Secrets Management                                  │
-│ • Docker secrets (encrypted at rest)                         │
+│ • Docker secrets (mounted as files, never in env or images)  │
 │ • No secrets in git                                          │
 │ • Environment variables                                      │
 └─────────────────────────────────────────────────────────────┘

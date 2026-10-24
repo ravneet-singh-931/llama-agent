@@ -103,8 +103,8 @@ spec:
           # image: Docker image for the API
           #   - Built by CI (.github/workflows/main.yml) on every main push
           #   - CD (.github/workflows/main.yml) pushes an immutable tag per commit
-          #     (:<git sha>) and rolls it out with `kubectl set image`, so every
-          #     deploy is a real, traceable rollout. :v7 is only the bootstrap tag.
+          #     (:<git sha>) and renders it into this manifest (k8s/apply-app.sh), so
+          #     every deploy is one traceable rollout. :v7 is only the bootstrap tag.
           image: ravneet231/llama-agent:v7
 
           # imagePullPolicy: When to pull image

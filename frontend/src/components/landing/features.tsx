@@ -34,7 +34,7 @@ const features = [
   {
     icon: Search,
     title: "Advanced RAG",
-    description: "Vector search with ChromaDB, re-ranking, sub-question decomposition, and router queries.",
+    description: "Hybrid keyword + vector search (ChromaDB), cross-encoder re-ranking, and an answer check against the sources.",
     color: "from-purple-500/20 to-purple-500/5",
     iconColor: "text-purple-400",
   },
@@ -61,8 +61,8 @@ const features = [
   },
   {
     icon: Shield,
-    title: "Enterprise Security",
-    description: "JWT auth, API keys, SQL injection protection, XSS prevention, rate limiting, audit logs.",
+    title: "Security",
+    description: "JWT auth, rate limiting, brute-force lockout, input sanitization, CSRF protection, audit logs.",
     color: "from-green-500/20 to-green-500/5",
     iconColor: "text-green-400",
   },
@@ -76,7 +76,7 @@ const features = [
   {
     icon: BarChart3,
     title: "Full Monitoring",
-    description: "Prometheus metrics, Grafana dashboards (13 panels), Loki logs, custom alerts.",
+    description: "Prometheus metrics, a Grafana dashboard (18 panels), Loki logs, Phoenix LLM traces, alert rules.",
     color: "from-orange-500/20 to-orange-500/5",
     iconColor: "text-orange-400",
   },
@@ -90,14 +90,14 @@ const features = [
   {
     icon: Cpu,
     title: "Docker Orchestration",
-    description: "13 containers managed via docker-compose with health checks, secrets, and networks.",
+    description: "14 containers via docker-compose, or Kubernetes, with health checks, secrets, and networks.",
     color: "from-sky-500/20 to-sky-500/5",
     iconColor: "text-sky-400",
   },
   {
     icon: Lock,
     title: "CI/CD Pipeline",
-    description: "GitHub Actions with 8 jobs: matrix testing, security scanning, Docker build, deploy.",
+    description: "GitHub Actions with 9 jobs: tests, security scans, lint, Docker build, staging and production deploy.",
     color: "from-violet-500/20 to-violet-500/5",
     iconColor: "text-violet-400",
   },
@@ -117,8 +117,8 @@ export function Features() {
             Everything You Need
           </h2>
           <p className="mx-auto max-w-2xl text-muted-foreground">
-            A production-ready AI agent platform with enterprise-grade features
-            built for real-world use.
+            A self-hosted AI agent platform: agents, document RAG,
+            observability, and a CI/CD pipeline.
           </p>
         </motion.div>
 
