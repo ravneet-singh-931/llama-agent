@@ -73,18 +73,26 @@ pipeline that layers seven production-grade optimizations on top of ChromaDB:
    hits (IDs, error codes, names) are added as candidates, always restricted to the
    requesting user's documents. The BM25 index is rebuilt on upload/delete and every
    `RAG_BM25_TTL` seconds (so other replicas' uploads become searchable).
-2. **Reranker** — `BAAI/bge-reranker-base` cross-encoder when `sentence-transformers` is
-   installed (not in the default image: it pulls in PyTorch); otherwise a fast keyword
-   reranker is used automatically.
+2. **Cross-encoder reranker** — `ms-marco-MiniLM-L-6-v2` (int8 ONNX, ~23 MB) run with
+   `onnxruntime` + `tokenizers` (both already come with chromadb — **no PyTorch**). The
+   Docker build downloads it at a pinned revision with hash checks
+   (`scripts/download_reranker.py`, `RERANKER_MODEL_DIR`) and fails if the model doesn't
+   rank a relevant passage first. The startup log says which reranker is in use
+   (`🔎 Reranker: onnx (...)`); without the model it falls back to a keyword reranker.
 3. **Contextual Retrieval** — LLM-generated summary per document prepended to each
    semantic chunk (summaries are cached; restarts skip already-indexed files)
 4. **Query Decomposition** — splits complex questions into sub-questions (`RAG_DECOMPOSE=1`)
-5. **Corrective RAG (CRAG)** — verifies the answer against the context and retries with a
-   reformulated query when it is unsupported (`RAG_CRAG=1`)
-6. **Conversational Retrieval** — follow-ups ("what about the other file?") are rewritten
-   into standalone queries using the chat history (`RAG_QUERY_REWRITE`, on by default)
+5. **Corrective RAG (CRAG)** — on by default: the fast model checks every document answer
+   against the excerpts it was written from. An unsupported answer triggers a second
+   retrieval with a reformulated query; if it still can't be verified it is shown with a
+   note and not cached. Verdicts are counted in `llama_agent_rag_crag_verdicts_total`.
+6. **Follow-ups** — in chat, a follow-up ("what about the pricing column?") is combined with
+   the conversation's last document question before retrieval. `OptimizedRAG.retrieve` can
+   also rewrite follow-ups with the LLM when given chat history (`RAG_QUERY_REWRITE`).
 7. **Semantic Cache** — near-duplicate questions return the cached answer (per user;
-   invalidated when that user's documents change)
+   invalidated when that user's documents change). Entries carry an answer-format version
+   (`SemanticCache.ANSWER_VERSION`), so answers from an older prompt are never served;
+   errors, cut-off and unverified answers are never cached.
 
 It is activated with the `USE_OPTIMIZED_RAG=true` environment variable (already set
 in `k8s/api.yaml` and `docker-compose.yml`). The HTTP API (`POST /documents/ask`)
@@ -451,7 +459,9 @@ Admin endpoints need `users.is_admin = true`
 | `LLM_MODEL_FAST` | Fast model (streaming chat, reformulation, 429 fallback) | `openai/gpt-oss-20b` |
 | `JWT_EXPIRE_MINUTES` / `JWT_REFRESH_EXPIRE_DAYS` | Access / refresh token lifetime | `30` / `7` |
 | `USE_OPTIMIZED_RAG` | Hybrid BM25+vector search, reranker, contextual chunks, semantic cache | `true` (Compose/k8s) |
-| `RAG_CRAG` / `RAG_DECOMPOSE` / `RAG_QUERY_REWRITE` | Corrective-RAG answer check / sub-question decomposition / follow-up rewrite | `0` / `0` / `1` |
+| `RAG_CRAG` / `RAG_DECOMPOSE` / `RAG_QUERY_REWRITE` | Corrective-RAG answer check / sub-question decomposition / follow-up rewrite | `1` / `0` / `1` |
+| `RAG_CRAG_MAX_TOKENS` / `RAG_CRAG_CONTEXT_CHARS` | CRAG check budget (the fast model reasons first) / excerpt characters it sees | `1024` / `12000` |
+| `RERANKER_MODEL_DIR` / `RERANKER_THREADS` | ONNX cross-encoder location (set in the image) / onnxruntime threads | `/opt/models/reranker` / `2` |
 | `DOC_ANSWER_MAX_TOKENS` | Token budget for a document answer or comparison (min 512) | `2048` |
 | `RAG_BM25_TTL` | Seconds before the BM25 keyword index is rebuilt (picks up other replicas' uploads) | `300` |
 | `GROQ_PRICING` | JSON price overrides for cost tracking, e.g. `{"qwen/qwen3.8-27b":{"input":0.2,"output":0.6}}` (USD / 1M tokens) | built-in Groq list prices |

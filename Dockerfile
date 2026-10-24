@@ -83,6 +83,14 @@ COPY requirements.txt .
 #   - Note: mcp<2 and fastmcp are now in requirements.txt (pinned), so no separate install needed
 RUN pip install --no-cache-dir -r requirements.txt
 
+# RAG reranker model (ONNX cross-encoder, ~23 MB, no PyTorch)
+#   - Pinned revision + hash check (scripts/download_reranker.py)
+#   - Its own layer: re-downloaded only when the script changes
+#   - RERANKER_MODEL_DIR tells modules/rag_optimizations.py where it is
+ENV RERANKER_MODEL_DIR=/opt/models/reranker
+COPY scripts/download_reranker.py /tmp/download_reranker.py
+RUN python /tmp/download_reranker.py /opt/models/reranker && rm /tmp/download_reranker.py
+
 # Copy all code from host to image
 #   - `COPY . .` = Copy everything from host current dir (.) to image /app
 #   - Respects .dockerignore (excludes .git, __pycache__, node_modules, etc.)
@@ -100,6 +108,10 @@ COPY . .
 ENV CHROMA_CACHE_DIR=/root/.cache/chroma
 RUN python -c "from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2; ONNXMiniLM_L6_V2().embed_with_retries(['warmup'])" \
     && rm -rf /tmp/chromadb* 2>/dev/null; true
+
+# Fail the build if the reranker model can't load or ranks a relevant
+# passage below an irrelevant one (catches a broken model or tokenizer).
+RUN python -c "from modules.rag_optimizations import OnnxCrossEncoder as E; q='What is the capital of France?'; s=E('/opt/models/reranker').predict([(q, 'Paris is the capital and largest city of France.'), (q, 'Bananas are a yellow fruit rich in potassium.')]); assert s[0] > s[1], s; print('reranker ok', s)"
 
 # Create necessary directories inside image
 #   - `mkdir -p` = Create dirs, no error if exists

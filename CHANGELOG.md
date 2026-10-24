@@ -5,6 +5,45 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.6] - 2026-10-24
+
+Makes the RAG steps the code already advertised actually run, without PyTorch.
+
+### Fixed
+- **The "cross-encoder reranker" was a keyword ranker.** It needed `sentence-transformers`
+  (PyTorch), which was never installed, so every search quietly used keyword overlap. That
+  blend also ranked chunks found only by keyword search near the bottom. The reranker
+  now runs a real cross-encoder (`ms-marco-MiniLM-L-6-v2`, int8 ONNX, ~23 MB) on
+  `onnxruntime` + `tokenizers`, which chromadb already installs, so no new Python packages.
+  - The image build downloads the model at a pinned revision with hash checks
+    (`scripts/download_reranker.py`), and the build fails if the model doesn't rank a
+    relevant passage first.
+  - CI downloads the same file and tests the real model's ranking on four
+    question/passage sets.
+  - The startup log names the reranker in use.
+- **Corrective RAG never worked.** The verifier gave the fast reasoning model 5 tokens, so
+  its reply was always empty and every answer "passed". It also saw only half of the
+  excerpts the answer came from. Now:
+  - it has a 1024-token budget and sees the same excerpts (up to 12,000 characters);
+  - its verdict is parsed robustly ("NOT SUPPORTED" counts as unsupported);
+  - it is on by default (`RAG_CRAG=1`), and verdicts are counted in
+    `llama_agent_rag_crag_verdicts_total`.
+  - Thin answers skip the check, since they're retried anyway.
+  - An unsupported answer triggers the second retrieval, and the retry's answer is checked
+    too. One that still can't be verified is shown with a note and not cached.
+- **The retry answered the wrong question.** The second pass answered the AI-reformulated
+  search query instead of the user's question.
+- **Answers cached by older versions were still served** (for example a v3.4.4 answer cut off at
+  "Document description CRM-3 is"). Cached answers now carry an answer-format version
+  (`SemanticCache.ANSWER_VERSION`), and only current-version answers are served.
+- **Questions naming a file skipped the document pipeline.** Wordings like "What does the
+  crm file say about…?" or "According to the CRM-3 document, …" went to the general chat
+  agent, which has no cache, a different prompt and a generic error. A question now counts
+  as a document question when it names an uploaded file: its full name, or a distinctive
+  word of the name within 3 words of "file"/"document"/"sheet". Creation requests like
+  "write a python file…" are excluded.
+- The README and module docs no longer claim a bge reranker or RAGAS evaluation.
+
 ## [3.4.5] - 2026-10-23
 
 From the CRM-3.docx document (RAG) test.

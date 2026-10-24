@@ -52,3 +52,6 @@ docker-compose.override.yml
 
 # Evaluation reports (generated)
 evals/results/
+
+# Locally downloaded RAG reranker model (scripts/download_reranker.py)
+/models/
