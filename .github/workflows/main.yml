@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 env:
-  DOCKER_IMAGE: ravneet231/llama-agent
+ DOCKER_IMAGE: ravneet231/llama-agent
 
 jobs:
   # ============================================================
