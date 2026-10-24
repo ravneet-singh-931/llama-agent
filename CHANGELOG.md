@@ -44,6 +44,11 @@ Makes the RAG steps the code already advertised actually run, without PyTorch.
   "write a python file…" are excluded.
 - The README and module docs no longer claim a bge reranker or RAGAS evaluation.
 
+### CI
+- **"Run workflow" button.** GitHub created no pipeline run for the v3.4.6 merge or for a
+  follow-up push. The pipeline can now also be started by hand (`workflow_dispatch`); on
+  `main` it builds and deploys that commit, the same as a push.
+
 ## [3.4.5] - 2026-10-23
 
 From the CRM-3.docx document (RAG) test.

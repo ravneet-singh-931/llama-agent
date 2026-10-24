@@ -5,6 +5,10 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  # Manual "Run workflow" button (Actions tab). Re-runs the full pipeline on
+  # the chosen branch; on main it builds and deploys that commit. Use it when
+  # GitHub misses a push event (happened for the v3.4.6 merge).
+  workflow_dispatch:
 
 env:
   DOCKER_IMAGE: ravneet231/llama-agent
@@ -267,7 +271,7 @@ jobs:
     name: "\U0001F433 Build & Push Docker"
     needs: [test, security, security-sast, lint, frontend, integration]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
 
     steps:
       - name: "\U0001F4E5 Checkout code"
