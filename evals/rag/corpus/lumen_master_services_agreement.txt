@@ -1,0 +1,43 @@
+Master Services Agreement - Lumen Data Ltd
+
+This Master Services Agreement ("Agreement") is made between Lumen Data Ltd ("Lumen") and the customer named in the signed order form ("Customer"). It governs every order form that refers to it. Where an order form and this Agreement conflict, the order form prevails for that order only.
+
+1. Services
+
+Lumen provides hosted data-pipeline services, professional services and support as described in each order form. Lumen may update the hosted services from time to time, provided that the overall functionality is not materially reduced during the subscription term. Professional services are delivered remotely unless the order form says otherwise; travel for on-site work is billed at cost.
+
+2. Fees and payment
+
+Fees are invoiced annually in advance unless the order form states a different schedule. Invoices are payable within 45 days of the invoice date. Late amounts carry interest at 1% per month or the highest rate allowed by law, whichever is lower. Lumen may suspend the services if an undisputed invoice remains unpaid 15 days after a written reminder. Fees exclude taxes, which the Customer pays in addition. Prices may rise at renewal by no more than 5% per year.
+
+3. Term and termination
+
+Each order form runs for the subscription term stated in it and renews automatically for one year unless either party gives written notice of non-renewal at least 90 days before the end of the current term. Either party may terminate this Agreement if the other party materially breaches it and does not cure the breach within 30 days of written notice. On termination, the Customer may export its data for 30 days, after which Lumen deletes it from production systems within a further 60 days.
+
+4. Service levels
+
+Lumen will use commercially reasonable efforts to make the hosted services available 99.9% of the time in each calendar month, excluding scheduled maintenance announced at least 72 hours in advance. If availability falls below that level, the Customer is entitled to a service credit of 5% of the monthly fee for each full 0.5% below target, up to a maximum of 25%. Service credits are the Customer's sole remedy for unavailability.
+
+5. Support
+
+Support is available by email and through the customer portal. Lumen responds to priority 1 incidents (production down) within one hour, around the clock. Priority 2 incidents receive a response within four business hours and priority 3 requests within two business days. A named technical account manager is included for customers on the premium support tier.
+
+6. Customer obligations
+
+The Customer is responsible for the accuracy of the data it submits, for keeping its user credentials confidential, and for making sure its use of the services complies with applicable law. The Customer must not attempt to reverse engineer the services, resell them, or use them to build a competing product. Lumen may suspend accounts that create a security risk, after notifying the Customer where practical.
+
+7. Data protection and security
+
+Lumen processes personal data only on the Customer's documented instructions, as set out in the data processing addendum. Lumen maintains an information security programme that includes encryption of data in transit, role-based access control, annual penetration testing and background checks for staff with production access. Lumen will notify the Customer of a personal data breach without undue delay and in any case within 48 hours of becoming aware of it.
+
+8. Confidentiality
+
+Each party will protect the other party's confidential information with at least the same care it uses for its own, and in no case less than reasonable care. These obligations continue for five years after the Agreement ends, and indefinitely for trade secrets.
+
+9. Liability
+
+Neither party is liable for indirect or consequential losses, or for lost profits or revenue. Each party's total liability under this Agreement is limited to the fees paid or payable in the 12 months before the event giving rise to the claim. These limits do not apply to breaches of confidentiality, to the Customer's payment obligations, or to liability that cannot be limited by law.
+
+10. General
+
+This Agreement is governed by the laws of England and Wales, and the courts of London have exclusive jurisdiction. Neither party may assign the Agreement without the other's consent, except to a successor in a merger or sale of substantially all of its assets. Notices must be in writing and sent to the addresses in the order form. This Agreement is the entire agreement between the parties about its subject matter.

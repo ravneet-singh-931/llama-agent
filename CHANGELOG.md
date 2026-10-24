@@ -7,17 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.4.7] - 2026-10-24
 
-Docs and wording only (no behaviour change): every claim in the README, docs, code comments,
-startup log and landing page now matches the code and has a source or is marked unmeasured.
+Claims cleanup, and a RAG eval so the RAG claims can be measured. No change to how the app
+answers.
 
-### Changed
+### Added
+- **RAG eval** (`evals/rag_eval.py`, corpus and 44 fixed questions in `evals/rag/`), indexed
+  into a throw-away in-memory ChromaDB:
+  - `retrieval` (no LLM): hit@1/3/6 and MRR of the 6 excerpts the answer model sees, for
+    vector only vs hybrid vs hybrid + reranker (deployed), by keyword/paraphrase question,
+    with latency. A second user's document is indexed too; any of it in the first user's
+    results fails the run.
+  - `answers` (Groq, on demand): expected fact, cited file, "not found" on unanswerable
+    questions, false refusals, figures found in the documents, CRAG "unverified" rate,
+    semantic-cache hits, latency and cost.
+  - CI runs `retrieval` after the tests with the real reranker, writes the numbers to the job
+    summary and uploads the report. The hit@6 floor is 0 until a baseline is measured.
+  - `tests/test_rag_eval.py` (23 tests) checks the harness offline: unique labels, scoring,
+    leak detection, refusal detection, and that the eval ranks exactly the excerpts
+    `api._retrieve_context` sends to the model.
+
+### Changed (wording only)
 - **Removed unmeasured numbers:** "saves 80% cost and 20ms" (semantic cache), "beats 95% of
   RAG repos" (CRAG), "improves recall by ~10%" (contextual retrieval, not Anthropic's figure).
 - **Fixed wrong facts:** models (README said Llama 3.3-70b / 3.1-8b; the app uses
   `qwen/qwen3.8-27b` and `openai/gpt-oss-20b`), "pgvector" (not installed), "CDN headers"
   (nginx sets security headers only), upload "threat/content scanning" (extension and size
   checks only), "8 alert rules" (9), "13 panels / 13 containers / 8 jobs" on the landing
-  page (18 / 14 / 9), test counts (now 472 passed, 4 skipped, 17 deselected, 22 modules),
+  page (18 / 14 / 9), test counts (now 495 passed, 4 skipped, 17 deselected, 23 modules, including the RAG eval tests),
   "validated manifests" (CI doesn't validate them), "encrypted at rest" Docker secrets,
   the deploy description (`apply-app.sh` renders `:<sha>`, not `kubectl set image`).
 - **OptimizedRAG described as it runs:** query decomposition is off by default, and the LLM

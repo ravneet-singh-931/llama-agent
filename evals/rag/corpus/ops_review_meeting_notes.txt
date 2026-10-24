@@ -1,0 +1,33 @@
+Operations Review - Meeting Notes
+
+Attendees: operations, customer service, IT, logistics and finance leads. Notes taken by the operations coordinator.
+
+1. Warehouse and fulfilment
+
+The main warehouse ran at 86% of its pallet capacity for most of the month, with a peak of 94% in the second week after a large inbound delivery of winter jackets arrived early. The team agreed that sustained use above 90% slows picking because pickers have to move stock to reach it. Short-term options discussed were renting overflow space from the logistics partner, moving slow-selling items to a cheaper off-site store, and asking suppliers to split large deliveries. Logistics will price the first two options and bring a recommendation to the next review.
+
+Order cycle time, from payment to dispatch, averaged 1.8 days, against a target of 1.5 days. Most of the delay came from orders that mixed in-stock and back-ordered items; customer service suggested shipping those in two parcels when the customer agrees.
+
+2. Carriers and shipping
+
+The contract with the main parcel carrier is up for renewal. The carrier proposed a 6% rate increase; logistics has asked two other carriers for quotes and expects them within three weeks. On-time delivery was 93% for standard shipping and 97% for express. Damage claims were low, but most of them came from one regional depot, and the carrier has been asked to investigate.
+
+3. Customer service
+
+The team handled 11,400 contacts, of which 58% came through chat, 30% through email and 12% by phone. The average first response time on email was nine hours, which is too slow; the target is four hours. Two temporary agents will be added for the busy season. The most common reasons for contact were delivery status, sizing questions and returns.
+
+4. IT and systems
+
+IT reported two incidents. The first was a 40-minute outage of the warehouse scanning system caused by an expired certificate; certificate expiry dates are now monitored automatically. The second was a slowdown of the internal reporting dashboard during month-end, solved by adding an index to the orders table. The single sign-on rollout for warehouse staff will start next month. Several people asked for a clearer process for requesting new laptops and software licences; IT will publish one on the intranet.
+
+5. Headcount and training
+
+Operations has 6 open roles, mostly in the warehouse. Forklift certification courses are booked for eight new staff. The team discussed rotating pickers between zones to reduce repetitive strain, and health and safety will review the idea. Overtime hours fell by 15% compared with the previous month.
+
+6. Sustainability
+
+Packaging waste per order dropped after the switch to recycled paper fill. The team will test reusable shipping bags with a small group of customers. Electricity use in the warehouse is being measured per zone to find where lighting upgrades would help most.
+
+7. Actions
+
+Logistics to price overflow storage and off-site storage options. Customer service to draft a proposal for split shipments. IT to publish the equipment request process. Finance to confirm the budget for two temporary customer service agents. Next review in four weeks.

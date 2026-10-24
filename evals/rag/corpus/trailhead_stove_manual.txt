@@ -1,0 +1,43 @@
+Trailhead 2 Camping Stove - User Manual
+
+Thank you for choosing the Trailhead 2, a compact gas stove for backpacking and car camping. Read this manual completely before first use and keep it with the stove. Failure to follow these instructions can cause fire, burns, carbon monoxide poisoning or damage to the stove.
+
+1. What is in the box
+
+The box contains the stove burner with integrated piezo igniter, a folding pot support, a windscreen, a stuff sack and this manual. Gas canisters are sold separately. The stove weighs 295 grams without the windscreen and packs down to the size of a coffee mug.
+
+2. Fuel
+
+The Trailhead 2 runs on standard threaded screw-on canisters containing a butane and propane mix. Do not use pure butane canisters below freezing, because the pressure becomes too low for a steady flame. A 230-gram canister lasts for about 70 minutes of cooking at full power, or roughly 18 litres of boiled water in mild conditions. Never refill disposable canisters.
+
+3. Setting up
+
+Choose a flat, stable surface at least one metre away from tents, dry grass and other flammable materials. Screw the burner onto the canister by hand until it is snug; do not use tools. Unfold the three pot supports until they click. If it is windy, place the windscreen around the burner, but never wrap it around the canister, because trapped heat can make the canister burst.
+
+4. Lighting and cooking
+
+Open the control valve a quarter turn and press the igniter button. If the burner does not light after three presses, close the valve, wait one minute for the gas to disperse, and try again. Once lit, adjust the flame with the valve. At full power the stove boils one litre of water in about three and a half minutes at sea level; expect longer times at altitude and in cold or windy weather.
+
+5. Status lights
+
+The burner has a small temperature sensor and a status light on the control valve.
+E1 (red, flashing): the burner is too hot. Turn the flame down and remove the windscreen.
+E2 (red, steady): the canister temperature is too low for normal operation. Warm the canister in your jacket before continuing.
+E3 (amber): the igniter battery is weak. Replace the CR2032 battery in the base.
+E4 (amber, flashing): no flame detected for ten seconds. Close the valve immediately and check for leaks.
+
+6. Safety
+
+Only use the stove outdoors or in very well ventilated areas. Never cook inside a tent or vehicle. Never leave a lit stove unattended, and keep children and pets away. Do not use pots wider than 22 centimetres, because they reflect heat back onto the canister. If you smell gas, close the valve, move away from any flame and check the seal between burner and canister.
+
+7. Care and storage
+
+Let the stove cool completely before packing it. Remove the canister after each trip and store it upright in a cool, dry place. Clean the burner head with a soft brush; do not use water or solvents on the igniter. Check the rubber seal in the burner connection before each trip and replace it if it is cracked or flattened. Spare seals are available from retailers.
+
+8. Warranty and service
+
+The Trailhead 2 is covered by a two-year limited warranty against defects in materials and workmanship from the date of purchase. The warranty does not cover damage from misuse, accidents, modifications or normal wear of the seal and igniter. To make a claim, contact the retailer where you bought the stove with your proof of purchase. Repairs outside the warranty are offered at a fixed price through our service centre.
+
+9. Technical data
+
+Output: 2.6 kW. Burner material: stainless steel and aluminium. Pot supports: three, folding. Ignition: piezo, about 10,000 ignitions per battery. Operating temperature: minus 5 to plus 40 degrees Celsius.

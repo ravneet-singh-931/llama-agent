@@ -60,7 +60,7 @@ AI:   (searches the web with Tavily, answers with dated sources)
 - **Streaming Chat** — SSE streaming with agent/tool transcript markers
 - **LLMOps on the Groq free tier** — token budgeting and context compaction, rate-limit-aware model routing shared via Redis, 413 shrink-and-retry (`modules/llm_guard.py`)
 - **Grounding guardrail** — figures in agent answers are checked against the retrieved sources; unverified ones are marked before the next agent sees them (`modules/grounding.py`)
-- **Evaluation suite** — 30 varied cases, rule-based checks + LLM judge + grounding rate, baseline comparison (`evals/`, see `evals/README.md`)
+- **Evaluation suite** — 30 varied agent cases, rule-based checks + LLM judge + grounding rate, baseline comparison; plus a **RAG eval** on a committed sample corpus: retrieval hit@k/MRR for vector vs hybrid vs hybrid + reranker and a cross-user leak check (CI), and document-answer checks (on demand) (`evals/`, see `evals/README.md`)
 - **LLM Observability** — every Groq call (agents *and* RAG) emits `GroqLLM.chat` spans to Phoenix via llama-index instrumentation
 - **Full DevOps Stack** — Prometheus, Grafana, Loki, Promtail, node-exporter, nginx (SSL + LB)
 - **App security** — JWT auth, rate limiting, brute-force lockout, CSRF, audit logging, Docker secrets
@@ -71,7 +71,8 @@ AI:   (searches the web with Tavily, answers with dated sources)
 
 The deployed API uses **OptimizedRAG** — a drop-in replacement for the basic RAG
 pipeline that adds the steps below on top of ChromaDB. Items 4 and 6b are off in the
-chat path; none of the steps has a measured quality gain in this repo yet (no RAG eval).
+chat path. `python -m evals.rag_eval retrieval` measures what hybrid search and the
+reranker add over plain vector search (see `evals/README.md`).
 
 
 1. **Hybrid Search** — BM25 keyword (`rank_bm25`) + dense-vector retrieval; keyword-only
@@ -509,7 +510,7 @@ llama-agent/
 │   ├── memory.py             # Per-user conversation memory
 │   ├── mcp_client.py         # MCP client (SSE → agent server)
 │   └── secrets.py            # Docker-secret reader (env/file fallback)
-├── tests/                    # pytest suite (22 modules)
+├── tests/                    # pytest suite (23 modules)
 ├── config/
 │   ├── nginx/                # SSL + reverse proxy config
 │   ├── prometheus/           # Metrics + alert rules
@@ -537,8 +538,8 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.4.6):** 472 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
-22 test modules. The 4 skipped tests need the reranker model file, which CI downloads
+**Current status (v3.4.7):** 495 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+23 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
 the Phoenix span-instrumentation path, the Point 9 multi-provider chain/fallback logic, and
@@ -648,8 +649,9 @@ docker compose logs postgres
 - **Groq free tier.** Rate limits (7,000 input tokens/min on the strong model) are handled by
   a token budget, model fallback and retries, but `@team` mode (several agents in a row) can
   still hit the limit and return a partial answer.
-- **Evaluation is small.** The agent eval has 30 cases and runs on demand, not in CI. There
-  is no retrieval or document-answer eval yet, so the RAG steps above have no measured gain.
+- **Evaluation is small.** The agent eval has 30 cases and runs on demand, not in CI. The
+  RAG eval uses a small made-up corpus (6 documents, 44 questions): good for catching
+  regressions in this pipeline, not a benchmark against other systems.
 - **No alert delivery.** Prometheus alert rules exist, but no Alertmanager is deployed.
 - **Streaming endpoint gaps.** `/chat/stream` (used by the main UI) skips the input
   sanitizer, the prompt-injection heuristic and the in-app business/SLA metrics;
