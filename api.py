@@ -71,6 +71,7 @@ from modules.prometheus_metrics import (
     init_metrics,
     metrics_endpoint,
     prometheus_middleware,
+    timed_chat_stream,
 )
 
 # Enterprise security hardening (headers, brute-force, audit, sanitization, CSRF)
@@ -2536,6 +2537,9 @@ async def chat_stream(
     rag = _user_rag(user_id)  # this caller's documents only
     # Per-user default conversation (never share the legacy "default" id).
     conversation_id = request.conversation_id or _default_conversation_id(user_id)
+    # SLO metrics: the branches below set the route; timed_chat_stream records
+    # the full wait (start -> end of stream), outcome and time to first text.
+    chat_meta = {"route": "command", "start": time.monotonic()}
 
     async def event_generator():
         # The body is iterated after the handler returns - re-bind the owner
@@ -2668,6 +2672,7 @@ async def chat_stream(
 
         # Clean answers about uploaded documents (RAG + LLM summary)
         if is_document_question(request.message, rag):
+            chat_meta["route"] = "document"
             await _persist_message(user_id, conversation_id, "user", request.message)
             result = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, request.message, rag), timeout=DOWNSTREAM_TIMEOUT)
             # Anchor this conversation so later messages like
@@ -2681,6 +2686,7 @@ async def chat_stream(
         # question in this conversation (e.g. "and the pricing column?").
         followup_query = await _doc_followup_query(conversation_id, request.message)
         if followup_query:
+            chat_meta["route"] = "document"
             await _persist_message(user_id, conversation_id, "user", request.message)
             result = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, followup_query, rag), timeout=DOWNSTREAM_TIMEOUT)
             async for chunk in done(result):
@@ -2699,6 +2705,7 @@ async def chat_stream(
             use_multi_agent, agent_type = True, agent_override
 
         if team_mode:
+            chat_meta["route"] = "team"
             # "@team ..." / agent=team: plan a DAG and run the whole agent team,
             # streaming each agent's tokens with agent_start/agent_done events.
             await _persist_message(user_id, conversation_id, "user", request.message)
@@ -2753,6 +2760,7 @@ async def chat_stream(
             return
 
         if use_multi_agent:
+            chat_meta["route"] = "agent"
             # Stream the agent-team run: tool activity first, then answer
             # tokens - the same experience as general chat, no blocking
             # spinner. Inject recent conversation context so follow-ups about
@@ -2820,6 +2828,7 @@ async def chat_stream(
             await _persist_message(user_id, conversation_id, "assistant", full)
             yield "data: [DONE]\n\n"
         else:
+            chat_meta["route"] = "general"
             # Stream from general ReAct agent (it reads + writes the SAME memory
             # instances, so the response is saved to this user's conversation).
             yield config_event(False, False, False)
@@ -2855,7 +2864,7 @@ async def chat_stream(
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
-        event_generator(),
+        timed_chat_stream(event_generator(), chat_meta),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

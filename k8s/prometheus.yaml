@@ -155,25 +155,25 @@ data:
 
           # Alert if P95 response time > 5s for 5m
           - alert: HighResponseTime
-            expr: histogram_quantile(0.95, sum without (instance) (rate(llama_agent_response_time_seconds_bucket[5m]))) > 5
+            expr: histogram_quantile(0.95, sum without (instance) (rate(llama_agent_response_time_seconds_bucket{endpoint!~"/chat|/chat/stream"}[5m]))) > 5
             for: 5m
             labels:
               severity: warning
               service: llama-agent
             annotations:
-              summary: "Slow API responses detected"
-              description: "P95 response time is {{ $value | humanizeDuration }} (threshold: 5s)."
+              summary: "Slow API responses detected (non-chat endpoints)"
+              description: "P95 response time is {{ $value | humanizeDuration }} (threshold: 5s). Chat answers are covered by the chat SLO alerts."
 
           # Alert if P99 > 10s (critical)
           - alert: VeryHighResponseTime
-            expr: histogram_quantile(0.99, sum without (instance) (rate(llama_agent_response_time_seconds_bucket[5m]))) > 10
+            expr: histogram_quantile(0.99, sum without (instance) (rate(llama_agent_response_time_seconds_bucket{endpoint!~"/chat|/chat/stream"}[5m]))) > 10
             for: 5m
             labels:
               severity: critical
               service: llama-agent
             annotations:
-              summary: "CRITICAL: Very slow API responses"
-              description: "P99 response time is {{ $value | humanizeDuration }} (threshold: 10s)."
+              summary: "CRITICAL: Very slow API responses (non-chat endpoints)"
+              description: "P99 response time is {{ $value | humanizeDuration }} (threshold: 10s). Chat answers are covered by the chat SLO alerts."
 
           # Alert if 5xx errors > 1/sec for 5m
           - alert: ServerErrors
@@ -185,6 +185,70 @@ data:
             annotations:
               summary: "Server errors (5xx) detected"
               description: "{{ $value }} 5xx responses/sec detected."
+
+      # ---- Chat SLOs (llama_agent_chat_seconds, recorded per /chat/stream answer) ----
+      # Targets (30 days, set from measured eval numbers - see docs/SLO.md):
+      #   availability: 95% of chats end with an answer, not an error/failure notice
+      #   quick latency: 95% of command/document/general answers within 10s
+      #   agent latency: 95% of single-agent answers within 90s
+      #   @team: no latency SLO (84-247s on the Groq free tier); counted in availability
+      # Error budget = 5%. Multi-window burn-rate alerts (Google SRE workbook):
+      #   fast: 14.4x budget over 1h AND 5m (2% of the 30d budget in 1h)
+      #   slow:  6x  budget over 6h AND 30m (5% of the 30d budget in 6h)
+      # Guard: at least 5 chats in the long window, so 1 bad chat out of 2 can't page.
+      - name: llama_agent_slo
+        rules:
+          - record: llama_agent:chat_unanswered:ratio_rate5m
+            expr: sum(rate(llama_agent_chat_seconds_count{outcome=~"failed|error"}[5m])) / sum(rate(llama_agent_chat_seconds_count{outcome!="cancelled"}[5m]))
+          - record: llama_agent:chat_unanswered:ratio_rate30m
+            expr: sum(rate(llama_agent_chat_seconds_count{outcome=~"failed|error"}[30m])) / sum(rate(llama_agent_chat_seconds_count{outcome!="cancelled"}[30m]))
+          - record: llama_agent:chat_unanswered:ratio_rate1h
+            expr: sum(rate(llama_agent_chat_seconds_count{outcome=~"failed|error"}[1h])) / sum(rate(llama_agent_chat_seconds_count{outcome!="cancelled"}[1h]))
+          - record: llama_agent:chat_unanswered:ratio_rate6h
+            expr: sum(rate(llama_agent_chat_seconds_count{outcome=~"failed|error"}[6h])) / sum(rate(llama_agent_chat_seconds_count{outcome!="cancelled"}[6h]))
+          - record: llama_agent:chat_quick_slow:ratio_rate5m
+            expr: 1 - sum(rate(llama_agent_chat_seconds_bucket{route=~"command|document|general",outcome="ok",le=~"10(\\.0)?"}[5m])) / sum(rate(llama_agent_chat_seconds_count{route=~"command|document|general",outcome="ok"}[5m]))
+          - record: llama_agent:chat_quick_slow:ratio_rate30m
+            expr: 1 - sum(rate(llama_agent_chat_seconds_bucket{route=~"command|document|general",outcome="ok",le=~"10(\\.0)?"}[30m])) / sum(rate(llama_agent_chat_seconds_count{route=~"command|document|general",outcome="ok"}[30m]))
+          - record: llama_agent:chat_quick_slow:ratio_rate1h
+            expr: 1 - sum(rate(llama_agent_chat_seconds_bucket{route=~"command|document|general",outcome="ok",le=~"10(\\.0)?"}[1h])) / sum(rate(llama_agent_chat_seconds_count{route=~"command|document|general",outcome="ok"}[1h]))
+          - record: llama_agent:chat_quick_slow:ratio_rate6h
+            expr: 1 - sum(rate(llama_agent_chat_seconds_bucket{route=~"command|document|general",outcome="ok",le=~"10(\\.0)?"}[6h])) / sum(rate(llama_agent_chat_seconds_count{route=~"command|document|general",outcome="ok"}[6h]))
+          - record: llama_agent:chat_agent_slow:ratio_rate5m
+            expr: 1 - sum(rate(llama_agent_chat_seconds_bucket{route="agent",outcome="ok",le=~"90(\\.0)?"}[5m])) / sum(rate(llama_agent_chat_seconds_count{route="agent",outcome="ok"}[5m]))
+          - record: llama_agent:chat_agent_slow:ratio_rate30m
+            expr: 1 - sum(rate(llama_agent_chat_seconds_bucket{route="agent",outcome="ok",le=~"90(\\.0)?"}[30m])) / sum(rate(llama_agent_chat_seconds_count{route="agent",outcome="ok"}[30m]))
+          - record: llama_agent:chat_agent_slow:ratio_rate1h
+            expr: 1 - sum(rate(llama_agent_chat_seconds_bucket{route="agent",outcome="ok",le=~"90(\\.0)?"}[1h])) / sum(rate(llama_agent_chat_seconds_count{route="agent",outcome="ok"}[1h]))
+          - record: llama_agent:chat_agent_slow:ratio_rate6h
+            expr: 1 - sum(rate(llama_agent_chat_seconds_bucket{route="agent",outcome="ok",le=~"90(\\.0)?"}[6h])) / sum(rate(llama_agent_chat_seconds_count{route="agent",outcome="ok"}[6h]))
+          - alert: ChatAvailabilitySLOBurn
+            expr: (llama_agent:chat_unanswered:ratio_rate1h > (14.4 * 0.05) and llama_agent:chat_unanswered:ratio_rate5m > (14.4 * 0.05) and sum(increase(llama_agent_chat_seconds_count{outcome!="cancelled"}[1h])) >= 5) or (llama_agent:chat_unanswered:ratio_rate6h > (6 * 0.05) and llama_agent:chat_unanswered:ratio_rate30m > (6 * 0.05) and sum(increase(llama_agent_chat_seconds_count{outcome!="cancelled"}[6h])) >= 5)
+            for: 2m
+            labels:
+              severity: warning
+              service: llama-agent
+            annotations:
+              summary: "Chats ending in an error or failure notice are burning the error budget"
+              description: "SLO: 95% of chats get an answer (30d). Failed share is {{ $value | humanizePercentage }} over the long window."
+          - alert: ChatQuickLatencySLOBurn
+            expr: (llama_agent:chat_quick_slow:ratio_rate1h > (14.4 * 0.05) and llama_agent:chat_quick_slow:ratio_rate5m > (14.4 * 0.05) and sum(increase(llama_agent_chat_seconds_count{route=~"command|document|general",outcome="ok"}[1h])) >= 5) or (llama_agent:chat_quick_slow:ratio_rate6h > (6 * 0.05) and llama_agent:chat_quick_slow:ratio_rate30m > (6 * 0.05) and sum(increase(llama_agent_chat_seconds_count{route=~"command|document|general",outcome="ok"}[6h])) >= 5)
+            for: 2m
+            labels:
+              severity: warning
+              service: llama-agent
+            annotations:
+              summary: "Quick chat answers (commands, documents, general) are too slow"
+              description: "SLO: 95% of quick answers within 10s (30d). Share slower than 10s is {{ $value | humanizePercentage }} over the long window."
+          - alert: ChatAgentLatencySLOBurn
+            expr: (llama_agent:chat_agent_slow:ratio_rate1h > (14.4 * 0.05) and llama_agent:chat_agent_slow:ratio_rate5m > (14.4 * 0.05) and sum(increase(llama_agent_chat_seconds_count{route="agent",outcome="ok"}[1h])) >= 5) or (llama_agent:chat_agent_slow:ratio_rate6h > (6 * 0.05) and llama_agent:chat_agent_slow:ratio_rate30m > (6 * 0.05) and sum(increase(llama_agent_chat_seconds_count{route="agent",outcome="ok"}[6h])) >= 5)
+            for: 2m
+            labels:
+              severity: warning
+              service: llama-agent
+            annotations:
+              summary: "Single-agent answers are too slow"
+              description: "SLO: 95% of single-agent answers within 90s (30d). Share slower than 90s is {{ $value | humanizePercentage }} over the long window."
 
       # ---- Infrastructure Alerts ----
       - name: llama_agent_infra

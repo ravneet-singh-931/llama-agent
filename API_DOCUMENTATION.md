@@ -169,7 +169,9 @@ With more than one API replica, tickets require Redis (`REDIS_URL`); otherwise e
 
 Useful Prometheus series:
 - `llama_agent_requests_total{method,endpoint}`: `endpoint` is the route template, e.g. `/conversations/{conversation_id}`.
-- `llama_agent_response_time_seconds_bucket`
+- `llama_agent_response_time_seconds_bucket`: until the last byte of the body (for streams, the end of the stream).
+- `llama_agent_chat_seconds_bucket{route,outcome}`: what a user waits for a `/chat/stream` answer; the SLO metric (see [docs/SLO.md](docs/SLO.md)).
+- `llama_agent_chat_first_token_seconds_bucket{route}`: time to the first answer text.
 - `llama_agent_llm_tokens_total{model,kind}`
 - `llama_agent_llm_cost_usd_total{model}`
 

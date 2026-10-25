@@ -26,6 +26,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description, with the chat and Grafana screenshots as clickable thumbnails; shorter
   scope note.
 
+## [3.5.3] - 2026-10-25
+
+### Fixed
+- **Streamed chat answers were timed as ~0.1 s.** The HTTP middleware stopped its timer when
+  `call_next` returned, i.e. when the response headers were ready. For `/chat/stream` that is
+  before any answer text, so a 60 s agent answer was recorded as fast: "Avg Response Time", the
+  `llama_agent_response_time_seconds` histogram and the `HighResponseTime` /
+  `VeryHighResponseTime` alerts never reflected how long a chat took. The timer (and the active
+  connections gauge) now stops when the last byte of the body is sent. On the old code a 2.0 s
+  stream was recorded as 0.002 s; now 2.008 s. Buckets extended to 60, 120 and 300 s.
+
+### Added
+- **Chat SLOs** (`docs/SLO.md`). New `llama_agent_chat_seconds{route,outcome}` (message received
+  to end of stream; route = command / document / general / agent / team; outcome = ok / failed /
+  error / cancelled, where failed = the app's failure notice instead of an answer) and
+  `llama_agent_chat_first_token_seconds{route}`. Targets over 30 days, set from the measured eval
+  numbers: 95% of chats answered; 95% of quick answers (command, document, general) within
+  10 s; 95% of single-agent answers within 90 s; no latency SLO for `@team` (free-tier bound).
+- **Multi-window burn-rate alerts** (14.4x over 1 h and 5 m, or 6x over 6 h and 30 m, at least 5
+  chats in the window) on recording rules summed across pods, in both the k8s and the Compose
+  rule files.
+- **Grafana SLO row:** 30-day compliance per SLO (green at 95%), chat answer time p50/p95 and time
+  to first answer text per route, and the error-budget burn rate.
+
+### Changed
+- `HighResponseTime` / `VeryHighResponseTime` skip `/chat` and `/chat/stream`; chat latency is
+  judged per route by the SLO alerts (a 60 s agent answer is normal, a 60 s login is not).
+
 ## [3.5.2] - 2026-10-25
 
 Found by the agent eval (team cases, `team-todo-landing`).

@@ -63,9 +63,9 @@ All numbers below were measured on 2026-10-25 against the live app (Groq free ti
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 534 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 560 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
 | **Cost** | ≈ $0.23 at Groq list prices for the 30 graded agent answers ($0 on the free tier) | token counts × list prices, per case in the eval report |
-| **Bugs found and fixed** | 14 fixed, with tests or before/after numbers | [incident log](#-bugs-found-and-fixed) |
+| **Bugs found and fixed** | 15 fixed, with tests or before/after numbers | [incident log](#-bugs-found-and-fixed) |
 
 The most useful finding: **the LLM judge alone misses invented numbers.** All 4 failed
 agent cases had figures that are in no source, and the judge still scored them 4.25 – 5.0.
@@ -285,6 +285,7 @@ version that fixed it and a test or a before/after number as proof; details are 
 | 12 | "Agent failure rate" showed "No data" instead of 0% | Counter series didn't exist until the first failure | All agent × outcome series start at 0 (v3.5.1) | `test_agent_metrics.py::test_agent_run_series_exist_at_zero_from_startup` |
 | 13 | Team steps failed with `Tool choice is none, but model called a tool` | Error raised mid-stream, outside the rescue path | Keep the partial answer, or retry on the fast model with tool results as plain text (v3.5.2) | `tests/test_tool_call_wrap_up.py` (6 of 8 fail on the old code); team cases 3.5 → 5.0 and 1.25 → 5.0 |
 | 14 | The eval graded the app's rate-limit notice (1.0, "fabrication") | Provider notices looked like answers | Marked "not graded" (v3.5.2) | `test_tool_call_wrap_up.py::test_eval_does_not_grade_the_apps_rate_limit_notice` |
+| 15 | "Avg Response Time" and the latency alerts never saw a slow chat | The middleware stopped the timer when the headers were ready, before a streamed answer even started | Time to the last byte of the body; chat SLOs per route (v3.5.3) | `test_chat_slo_metrics.py::test_streamed_response_time_is_measured_to_the_end_of_the_body`: a 2.0 s stream was recorded as 0.002 s, now 2.008 s |
 
 **Operations runbook items** (no code change): a kubelet image pull that hung was fixed by
 pulling with `crictl pull` and deleting the stuck pods; Prometheus uses a ReadWriteOnce volume,
@@ -685,7 +686,8 @@ Every turn is a **full trace** in Phoenix:
 - **HTTP layer** → `http send` / `http receive` children capture the full request/response
 
 In addition:
-- **Prometheus + Grafana** — a pre-provisioned dashboard (21 panels) + 9 alert rules (no Alertmanager, so alerts are not delivered anywhere)
+- **Prometheus + Grafana** — a pre-provisioned dashboard (27 panels) + 12 alert rules (no Alertmanager, so alerts are not delivered anywhere)
+- **Chat SLOs** — `llama_agent_chat_seconds{route,outcome}` times what the user waits, message received to end of the answer stream. Targets over 30 days, set from the measured eval numbers: 95% of chats answered, 95% of quick answers within 10 s, 95% of single-agent answers within 90 s (`@team` has no latency SLO: free-tier bound). Multi-window burn-rate alerts (14.4x over 1 h + 5 m, 6x over 6 h + 30 m, at least 5 chats) and a Grafana SLO row with the error-budget burn rate. Details: [docs/SLO.md](docs/SLO.md)
 - **Per-agent LLMOps metrics** — every LLM call's tokens and estimated cost carry a `component` label (research / coder / writer / analyzer / planner agent, chat, doc_answer, rag, router, eval judge), and `llama_agent_agent_run_seconds{agent,outcome}` times each specialist run (outcome: ok / failed / cached / error / cancelled). Grafana shows spend by component, p50/p95 run time per agent and failure rate per agent. Prometheus scrapes **each API pod** (DNS discovery through a headless Service, not the load balancer), and dashboard queries and alerts add the pods up
 - **Loki + Promtail** — centralized log aggregation
 - **Monitoring dashboard** — `GET /monitoring/dashboard` (costs, business metrics, SLA, alerts). In-memory and per replica; the business/SLA numbers count only the non-streaming `/chat` endpoint, not `/chat/stream` (which the main UI uses), and no downtime is ever recorded, so its uptime figure is not meaningful. Use Prometheus/Grafana for real traffic.
@@ -801,8 +803,8 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.5.2):** 534 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
-25 test modules. The 4 skipped tests need the reranker model file, which CI downloads
+**Current status (v3.5.3):** 560 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+26 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
 the Phoenix span-instrumentation path, the Point 9 multi-provider chain/fallback logic, and
@@ -927,7 +929,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 534 passed, 4 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 560 passed, 4 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89
@@ -939,6 +941,12 @@ kubectl -n llama-agent exec $POD -- cat /tmp/e.json > e.json
 
 # Per-agent metrics straight from a pod (/metrics refuses proxied requests)
 kubectl -n llama-agent exec $POD -- python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/metrics').read().decode())" | grep llama_agent_agent_run_seconds_count
+
+# Chat answer time per route and outcome (the SLO metric)
+kubectl -n llama-agent exec $POD -- python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/metrics').read().decode())" | grep llama_agent_chat_seconds_count
+
+# SLO burn-rate alerts loaded in Prometheus
+kubectl -n llama-agent exec deploy/prometheus -- wget -qO- http://localhost:9090/api/v1/rules | grep -o '"name":"Chat[A-Za-z]*SLOBurn"'
 
 # Prometheus scrapes each API pod, not the Service
 kubectl -n llama-agent exec deploy/prometheus -- wget -qO- 'http://localhost:9090/api/v1/targets?state=active' | grep -o '"scrapeUrl":"[^"]*"'
