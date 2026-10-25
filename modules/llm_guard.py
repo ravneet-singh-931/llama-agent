@@ -34,6 +34,7 @@ Configuration (all optional):
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -191,6 +192,35 @@ def is_rate_limited(error: Exception) -> bool:
         return True
     text = str(error).lower()
     return bool(re.search(r"\b429\b", text)) or "rate limit" in text or "rate_limit" in text
+
+
+_RETRY_IN_RE = re.compile(
+    r"try again in\s+(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:([\d.]+)s)?", re.I)
+
+
+def friendly_llm_error(error) -> str:
+    """User-facing text for a failed model call. Never the raw provider
+    error: it carries the organisation ID, quota numbers and an upgrade
+    link. The full error goes to the logs instead. For a 429 it says which
+    limit (per-minute or today's) and Groq's own "try again in" time."""
+    text = str(error)
+    low = text.lower()
+    if is_rate_limited(error):
+        daily = "per day" in low or "(tpd)" in low or "(rpd)" in low
+        what = ("today's free-tier AI usage limit" if daily
+                else "the free-tier per-minute AI limit")
+        wait = " Please try again shortly."
+        m = _RETRY_IN_RE.search(text)
+        if m and any(m.groups()):
+            h, mins, secs = m.groups()
+            total = int(h or 0) * 3600 + int(mins or 0) * 60 + float(secs or 0)
+            if total < 60:
+                wait = " Please try again in a minute."
+            else:
+                n = math.ceil(total / 60)
+                wait = f" Please try again in about {n} minutes."
+        return f"⚠️ I've hit {what}, so I can't answer right now.{wait}"
+    return "⚠️ The AI model is unavailable right now. Please try again in a moment."
 
 
 # ---------------------------------------------------------------- ITPM window

@@ -425,11 +425,13 @@ def _stream(monkeypatch, error):
 
 
 def test_daily_limit_gives_one_clear_notice_and_no_doomed_retry(monkeypatch):
-    import llama_agent1
     out, llm, mem = _stream(monkeypatch, Exception(
-        "Error code: 429 - Rate limit reached ... tokens per day (TPD)"))
-    assert out == llama_agent1.RATE_LIMIT_NOTICE
-    assert "rephrase" not in out and "empty answer" not in out
+        "Error code: 429 - Rate limit reached for model `openai/gpt-oss-20b` ... tokens per "
+        "day (TPD): Limit 200000, Used 199600, Requested 1433. Please try again in 15m26.2s."))
+    # Same message as document answers: which limit + Groq's wait time.
+    assert out == ("⚠️ I've hit today's free-tier AI usage limit, so I can't answer right "
+                   "now. Please try again in about 16 minutes.")
+    assert "rephrase" not in out and "empty answer" not in out and "org_" not in out
     assert llm.chat_calls == 0          # no retry that can't succeed
     assert mem.saved == []              # the notice is not stored as the model's answer
 

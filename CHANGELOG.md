@@ -18,9 +18,12 @@ Fixes found by the v3.4.8 agent eval, which hit the Groq free tier's daily token
 - **General chat on a rate limit (429) showed two contradictory warnings**: "Error while
   generating response" and "The model returned an empty answer ... or rephrase the question",
   after a retry that could not succeed, and the warning was stored in the model's memory as
-  its answer. It now shows one notice ("the free-tier LLM token limit is used up for now ...
-  try again later"), skips the retry and keeps the notice out of the model's memory. Other
-  errors keep the old behaviour. New `llm_guard.is_rate_limited()`.
+  its answer. It now shows the same notice as document answers, e.g. "I've hit today's
+  free-tier AI usage limit, so I can't answer right now. Please try again in about 16
+  minutes." (the wait is Groq's own "try again in" time), skips the retry and keeps the
+  notice out of the model's memory. Other errors keep the old behaviour.
+  `friendly_llm_error()` moved from `api.py` to `modules/llm_guard.py` (still importable from
+  `api`), next to the new `llm_guard.is_rate_limited()`.
 - **Eval failure markers** now include that notice and "error while generating response", so
   an error message can't pass the `completed` check.
 
