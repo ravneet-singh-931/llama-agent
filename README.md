@@ -62,6 +62,31 @@ The rule-based figure check caught all 4 ([findings](#what-measuring-found)).
 
 ---
 
+## 📸 Screenshots
+
+Taken from the live cluster on 2026-10-25, right after one message to each of the 5 agents.
+
+**Chat (Next.js UI), Analyzer agent.** The figures can be checked by hand: total 460,
+average 115, +50% from January to April.
+
+![Analyzer agent answer in the chat UI](docs/screenshots/app-analyzer.png)
+
+**Grafana: LLMOps panels.** Input tokens per minute by model, the LLM guard's actions
+(`downgraded` = a call moved from the strong to the fast model because the free-tier
+window was nearly full) and estimated spend per model at Groq list prices. "No data" for
+context compaction means no prompt needed trimming in this window.
+
+![Grafana LLMOps panels: tokens per minute, guard actions, spend](docs/screenshots/grafana-llmops.png)
+
+**Grafana: per-agent panels.** Spend by component (Research spends the most because of
+its web-search tool rounds), agent run time p50 / p95, and failure rate. All 5 agents are
+at 0%, so their lines lie on top of each other at the bottom of the chart. With one run per
+agent, p50 / p95 are estimates from histogram buckets, not percentiles of many runs.
+
+![Grafana per-agent panels: spend by component, run time, failure rate](docs/screenshots/grafana-agents.png)
+
+---
+
 ## 📚 Documentation
 
 | Document | What it covers |
