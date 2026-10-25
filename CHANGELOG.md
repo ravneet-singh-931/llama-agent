@@ -7,14 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.4.9] - 2026-10-25
 
-Eval-harness fixes found by the v3.4.8 agent eval, which hit the Groq free tier's daily token
-limit (200,000 tokens/day on the fast model) halfway through. No change to how the app answers.
+Fixes found by the v3.4.8 agent eval, which hit the Groq free tier's daily token limit
+(200,000 tokens/day on the fast model) halfway through.
 
 ### Fixed
 - **A failed judge counted as a pass.** When the judge call failed (16 cases returned a 429),
   a case passed on the rule-based checks alone; 6 did. Such cases are now **not graded**: they
   don't count as passes, the summary lists them (`not_graded`), the table marks them
   "⚠️ not graded", and `--compare` ignores them.
+- **General chat on a rate limit (429) showed two contradictory warnings**: "Error while
+  generating response" and "The model returned an empty answer ... or rephrase the question",
+  after a retry that could not succeed, and the warning was stored in the model's memory as
+  its answer. It now shows one notice ("the free-tier LLM token limit is used up for now ...
+  try again later"), skips the retry and keeps the notice out of the model's memory. Other
+  errors keep the old behaviour. New `llm_guard.is_rate_limited()`.
+- **Eval failure markers** now include that notice and "error while generating response", so
+  an error message can't pass the `completed` check.
 
 ### Added
 - **The report keeps the source text the judge saw** (`judge_sources`, the same passages, up to

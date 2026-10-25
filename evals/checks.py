@@ -45,6 +45,8 @@ FAILURE_MARKERS = [
     "stream timed out",
     "returned an empty answer",
     "i couldn't produce an answer",
+    "token limit is used up",              # llama_agent1.RATE_LIMIT_NOTICE
+    "error while generating response",
 ]
 
 _LANG_ALIASES = {

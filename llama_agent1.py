@@ -629,6 +629,10 @@ async def _run_agent_compute(prompt: str, cache_key: str,
 
 # ===================== STREAMING AGENT =====================
 
+RATE_LIMIT_NOTICE = ("⚠️ The free-tier LLM token limit is used up for now, so I can't "
+                     "answer this. Please try again later.")
+
+
 def run_agent_stream(user_input: str, memory: Optional[Any] = None,
                      facts: Optional[Any] = None,
                      user_id: str = "guest", conversation_id: str = "default"):
@@ -697,6 +701,12 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
         except Exception as e:
             # Never let the stream die silently, and never leak internals.
             logger.log_error(e, context=f"Streaming user input: {user_input}")
+            if llm_guard.is_rate_limited(e):
+                # Groq's token limit (usually the free tier's daily cap): the
+                # retry below can't succeed, and "rephrase" doesn't help. Say
+                # so once, and keep the notice out of the model's memory.
+                yield RATE_LIMIT_NOTICE
+                return
             yield "\n\n⚠️ Error while generating response. Please try again."
         if not full_response.strip():
             # The model streamed nothing (reasoning models occasionally spend

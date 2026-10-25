@@ -35,6 +35,7 @@ Configuration (all optional):
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -182,6 +183,14 @@ def fit_messages(messages: List[Dict], budget: int,
 def is_request_too_large(error: Exception) -> bool:
     text = str(error).lower()
     return "413" in text or "request too large" in text or "reduce your message size" in text
+
+
+def is_rate_limited(error: Exception) -> bool:
+    """HTTP 429 from Groq (per-minute or per-day token/request limit)."""
+    if getattr(error, "status_code", None) == 429:
+        return True
+    text = str(error).lower()
+    return bool(re.search(r"\b429\b", text)) or "rate limit" in text or "rate_limit" in text
 
 
 # ---------------------------------------------------------------- ITPM window
