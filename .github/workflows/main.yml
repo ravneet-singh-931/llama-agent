@@ -55,14 +55,15 @@ jobs:
             --cov=. --cov-report=xml --cov-report=term
 
       # Retrieval quality on the committed sample corpus (evals/rag/), real
-      # embedding model + real reranker, no LLM. Fails on a cross-user leak or
-      # a broken label; the hit@6 floor is report-only (0) until a baseline
-      # has been measured. Numbers go to the job summary and an artifact.
+      # embedding model + real reranker, no LLM. Fails on a cross-user leak, a
+      # broken label, or hit@6 below 0.89 (baseline 35/38 = 0.921 on v3.4.7;
+      # 0.89 allows one question to slip). Numbers go to the job summary and
+      # an artifact.
       - name: "\U0001F4CF RAG retrieval eval"
         env:
           RERANKER_MODEL_DIR: /tmp/reranker-model
           GIT_SHA: ${{ github.sha }}
-        run: python -m evals.rag_eval retrieval --min-hit6 0 --out rag-retrieval.json
+        run: python -m evals.rag_eval retrieval --min-hit6 0.89 --out rag-retrieval.json
 
       - name: "\U0001F4CE Upload RAG retrieval report"
         if: always()

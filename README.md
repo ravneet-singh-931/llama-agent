@@ -55,7 +55,7 @@ AI:   (searches the web with Tavily, answers with dated sources)
 
 - **Multi-Agent Orchestration** — five specialized agents + team mode, keyword-routed (`@Research Agent ...`) or automatic
 - **Document RAG** — upload files, retrieve with ChromaDB; answers cite the file + chunk they came from
-- **OptimizedRAG** — hybrid search (BM25 + dense vectors), an ONNX cross-encoder reranker, contextual chunk summaries with semantic chunking, a corrective-RAG answer check (CRAG) and a versioned semantic cache; query decomposition is opt-in (`RAG_DECOMPOSE=1`). Enabled by `USE_OPTIMIZED_RAG=true` (on in Compose and k8s).
+- **OptimizedRAG** — hybrid search (BM25 + dense vectors), an ONNX cross-encoder reranker, semantic chunking, a corrective-RAG answer check (CRAG) and a versioned semantic cache for repeated questions; contextual chunk summaries (`RAG_CONTEXTUAL=1`) and query decomposition (`RAG_DECOMPOSE=1`) are opt-in. Enabled by `USE_OPTIMIZED_RAG=true` (on in Compose and k8s).
 - **Two-Pass Retrieval** — thin answers trigger query reformulation and a second search
 - **Streaming Chat** — SSE streaming with agent/tool transcript markers
 - **LLMOps on the Groq free tier** — token budgeting and context compaction, rate-limit-aware model routing shared via Redis, 413 shrink-and-retry (`modules/llm_guard.py`)
@@ -64,6 +64,57 @@ AI:   (searches the web with Tavily, answers with dated sources)
 - **LLM Observability** — every Groq call (agents *and* RAG) emits `GroqLLM.chat` spans to Phoenix via llama-index instrumentation
 - **Full DevOps Stack** — Prometheus, Grafana, Loki, Promtail, node-exporter, nginx (SSL + LB)
 - **App security** — JWT auth, rate limiting, brute-force lockout, CSRF, audit logging, Docker secrets
+
+---
+
+## 📊 Results (measured)
+
+Measured with the RAG eval (`evals/rag_eval.py`, see `evals/README.md`) on a committed
+sample corpus: 6 documents (3 with the answers, 3 distractors), 44 fixed questions
+(17 keyword, 21 paraphrased, 6 not answerable from the documents), plus a second user's
+document to test isolation. Run on a home PC (Docker Desktop, CPU), 2026-10-25.
+
+**Retrieval** (`python -m evals.rag_eval retrieval`, no LLM): is the right passage among
+the 6 excerpts the answer model sees? 38 answerable questions.
+
+| Setup | Right passage #1 | In top 3 | In top 6 | MRR | p50 latency |
+|---|---|---|---|---|---|
+| Vector search only | 27/38 | 32/38 | 35/38 | 0.79 | 0.29 s |
+| Hybrid (BM25 + vector) | 28/38 | 31/38 | 35/38 | 0.80 | 0.28 s |
+| **Hybrid + ONNX reranker (deployed)** | **31/38** | **34/38** | **35/38** | **0.86** | 1.25 s |
+
+- **Cross-user leaks: 0.** The other user's document never appeared in results.
+- The reranker puts the right passage first more often (+4 questions) for about 1 s more
+  per query on CPU. It does not change *whether* the passage is in the top 6.
+- Hybrid adds nothing measurable over vector search on this set (1 question either way).
+- The 3 misses are all paraphrases with different wording from the document
+  ("notification callback" vs "webhook").
+
+**Answers** (`python -m evals.rag_eval answers`, Groq free tier, full pipeline: retrieval,
+answer, CRAG check, semantic cache). The first run found two bugs; v3.4.8 fixed them
+(see [CHANGELOG](CHANGELOG.md)).
+
+| | v3.4.7 (first run) | **v3.4.8** |
+|---|---|---|
+| Passed | 39/44 | **41/44** |
+| Correct fact (answerable) | 34/38 | **35/38** |
+| Source file named | 36/38 | **37/38** |
+| Said "not found" when the answer isn't there | 5/6 | **6/6** |
+| Said "not found" when the answer *was* there | 3/38 | 3/38 |
+| Figures in answers found in the documents | 97.7% | 97.7% |
+| Wrong answers served from the semantic cache | 2 | **0** |
+| Latency p50 / p95 | 2.5 s / 14.2 s | 2.4 s / 3.0 s |
+| Cost for 44 questions (Groq list prices) | $0.067 | $0.070 |
+
+- The 3 remaining failures are the 3 retrieval misses. The model says "not found" instead
+  of guessing.
+- The v3.4.7 p95 included free-tier rate-limit waits (`guard_waited: 2`); v3.4.8 had none.
+- The cost is at Groq list prices; on the free tier it is $0.
+
+**Limits:** small synthetic corpus (28 chunks), one run per version (LLM answers vary
+slightly between runs), latency from one PC, not the cluster. The agent eval
+(`evals/run.py`, 30 cases) has not been re-run on the current version, so no agent
+numbers are shown here.
 
 ---
 
@@ -85,10 +136,13 @@ reranker add over plain vector search (see `evals/README.md`).
    (`scripts/download_reranker.py`, `RERANKER_MODEL_DIR`) and fails if the model doesn't
    rank a relevant passage first. The startup log says which reranker is in use
    (`🔎 Reranker: onnx (...)`); without the model it falls back to a keyword reranker.
-3. **Contextual Retrieval** — a short summary of each document, written by the fast model,
-   is prepended to each semantic chunk (summaries are cached; restarts skip already-indexed
-   files). If the model returns no summary the chunks are stored without one; the upload
-   result says which (`contextual retrieval` vs `plain chunks`).
+3. **Contextual Retrieval** — **off by default** (`RAG_CONTEXTUAL=1` to enable): a short
+   summary of each document, written by the fast model, is prepended to each semantic chunk.
+   Until v3.4.8 the summary call had a 100-token budget that the reasoning model used up on
+   hidden thinking, so most documents got no summary (the RAG eval showed 1 of 7). The budget
+   is fixed (`RAG_SUMMARY_MAX_TOKENS`), but whether summaries improve retrieval is not
+   measured yet, so the default stays on plain chunks, the setup the RAG eval measures. The
+   upload result says which was used (`contextual retrieval` vs `plain chunks`).
 4. **Query Decomposition** — splits complex questions into sub-questions. **Off by default**
    (`RAG_DECOMPOSE=1` to enable).
 5. **Corrective RAG (CRAG)** — on by default: the fast model checks every document answer
@@ -99,8 +153,12 @@ reranker add over plain vector search (see `evals/README.md`).
    the conversation's last document question before retrieval. (6b) `OptimizedRAG.retrieve`
    can also rewrite follow-ups with the LLM when given chat history (`RAG_QUERY_REWRITE`),
    but the chat path does not pass history to it, so this rewrite is not used there.
-7. **Semantic Cache** — near-duplicate questions return the cached answer (per user;
-   invalidated when that user's documents change). Entries carry an answer-format version
+7. **Semantic Cache** — a repeated question returns the cached answer (per user;
+   invalidated when that user's documents change). A hit needs cosine distance ≤ 0.05
+   (`RAG_CACHE_MAX_DISTANCE`) **and** the same numbers, years and quarters in both questions.
+   The RAG eval found that the old, looser limit (0.3) answered "How much does the Team plan
+   cost?" with the cached Team-plan *rate limit*, and a Q2 2025 question with a Q3 2026
+   answer. A missed hit only costs tokens; a wrong hit is a wrong answer. Entries carry an answer-format version
    (`SemanticCache.ANSWER_VERSION`), so answers from an older prompt are never served;
    errors, cut-off and unverified answers are never cached.
 
@@ -470,7 +528,9 @@ Admin endpoints need `users.is_admin = true`
 | `LLM_MODEL_STRONG` | Strong model (agents, one-shot answers, RAG) | `qwen/qwen3.8-27b` |
 | `LLM_MODEL_FAST` | Fast model (streaming chat, reformulation, 429 fallback) | `openai/gpt-oss-20b` |
 | `JWT_EXPIRE_MINUTES` / `JWT_REFRESH_EXPIRE_DAYS` | Access / refresh token lifetime | `30` / `7` |
-| `USE_OPTIMIZED_RAG` | Hybrid BM25+vector search, reranker, contextual chunks, semantic cache | `true` (Compose/k8s) |
+| `USE_OPTIMIZED_RAG` | Hybrid BM25+vector search, reranker, CRAG, semantic cache | `true` (Compose/k8s) |
+| `RAG_CONTEXTUAL` / `RAG_SUMMARY_MAX_TOKENS` | Contextual chunk summaries at upload (not measured yet) / their token budget (the fast model reasons first) | `0` / `1024` |
+| `RAG_CACHE_MAX_DISTANCE` | Semantic cache: max cosine distance for a repeated question (numbers must also match) | `0.05` |
 | `RAG_CRAG` / `RAG_DECOMPOSE` / `RAG_QUERY_REWRITE` | Corrective-RAG answer check / sub-question decomposition / follow-up rewrite | `1` / `0` / `1` |
 | `RAG_CRAG_MAX_TOKENS` / `RAG_CRAG_CONTEXT_CHARS` | CRAG check budget (the fast model reasons first) / excerpt characters it sees | `1024` / `12000` |
 | `RERANKER_MODEL_DIR` / `RERANKER_THREADS` | ONNX cross-encoder location (set in the image) / onnxruntime threads | `/opt/models/reranker` / `2` |
@@ -538,7 +598,7 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.4.7):** 495 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+**Current status (v3.4.8):** 502 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
 23 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
