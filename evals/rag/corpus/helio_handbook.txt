@@ -1,0 +1,53 @@
+Helio Labs Employee Handbook (2026 edition)
+
+1. Purpose of this handbook
+
+This handbook explains how we work at Helio Labs, what you can expect from the company, and what the company expects from you. It applies to all permanent employees in every office. Contractors follow the terms of their own agreements. If anything in this handbook conflicts with your employment contract, the contract wins. The People team reviews the handbook every January and publishes changes on the intranet.
+
+2. Working hours and location
+
+Our standard working week is 40 hours. Teams agree their own schedules, but everyone should be reachable during core hours, which run from 10:00 to 15:00 local time, Monday to Friday. Meetings that involve more than one team should be scheduled inside core hours.
+
+Employees may work remotely for up to three days per week. Remote days must be agreed with your manager in advance and recorded in the HR portal. Fully remote arrangements are possible only with written approval from a department head. When you work remotely you must use the company VPN and keep confidential papers out of public view.
+
+3. Time off
+
+Full-time employees receive 24 days of paid annual leave per calendar year, plus public holidays. Part-time employees receive a pro-rated amount. You may carry over a maximum of 5 unused days into the next year, and carried-over days expire if they are not used by March 31. Leave requests should be submitted at least two weeks ahead for absences longer than three days.
+
+Sick leave is paid for up to 10 days per year. If you are ill for more than three consecutive working days, a doctor's note is required. Please tell your manager as early as possible on the first day of absence.
+
+Parents are entitled to paid parental leave. The primary caregiver receives 20 weeks of fully paid leave and the secondary caregiver receives 6 weeks. Parental leave can be taken in up to two blocks within the first year after the birth or adoption.
+
+4. Expenses and travel
+
+Business expenses must be submitted through Expensify within 30 days of the purchase. Claims submitted later than that need approval from the finance director. A receipt is required for every item above $25.
+
+Meal allowances depend on where you travel. The daily cap is $60 for domestic trips and $90 for international trips, including tips. Alcohol is not reimbursed unless it is part of an approved client dinner.
+
+Flights must be booked in economy class when the flight time is under six hours. For flights of six hours or more, business class is allowed with approval from a vice president. Hotel bookings are capped at $220 per night; in a short list of high-cost cities published by finance, the cap is raised to $300 per night. Book travel through the company travel desk so that the security team can reach you in an emergency.
+
+5. Equipment
+
+Every employee receives a laptop on their first day. Laptops are replaced every three years, or sooner if they fail. New employees also receive a one-time home-office stipend of $500 for a desk, chair or monitor, which must be claimed within the first six months. Company equipment remains company property and must be returned within five working days of leaving.
+
+6. Information security
+
+All accounts must be protected with multi-factor authentication, and passwords must be stored in 1Password, the company password manager. Never share your credentials, even with colleagues from IT.
+
+Report any security incident, suspected phishing email or lost device to security@heliolabs.example within one hour of noticing it. A lost or stolen laptop is wiped remotely as soon as it is reported, so report it even if you think you will find it.
+
+Company information has four classification levels: Public, Internal, Confidential and Restricted. Restricted data, such as customer payment details or unreleased financial results, may only be stored in the approved vault and must never be sent by email.
+
+7. Learning and growth
+
+Each employee has a learning budget of $1,500 per year for courses, books, certifications and conferences. Unused budget does not roll over. Requests above $500 for a single item need manager approval.
+
+Performance reviews take place twice a year, in April and October. Reviews cover goals, impact and behaviour, and they feed into the annual salary review in October.
+
+8. Joining and leaving
+
+New employees complete a probation period of 90 days. During probation either side may end employment with one week of notice. After probation, the notice period is 30 days for most employees and 60 days for people managers.
+
+9. Conduct
+
+We expect everyone to treat colleagues, customers and partners with respect. Harassment and discrimination are not tolerated. Gifts from suppliers or customers worth more than $100 must be declared to the compliance team, and cash gifts must always be refused. Concerns can be raised with your manager, the People team, or anonymously through the ethics hotline.

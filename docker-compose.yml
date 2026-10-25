@@ -65,7 +65,7 @@
 #   - web            (Streamlit UI)
 #   - mcp-server     (Model Context Protocol agent server)
 #   - frontend       (Next.js UI)
-#   - nginx          (SSL + Load Balancer + CDN headers)
+#   - nginx          (SSL + Load Balancer + security headers)
 #   - prometheus      (metrics collection)
 #   - grafana         (monitoring dashboards)
 #   - loki            (log aggregation)
@@ -87,7 +87,7 @@ services:
       POSTGRES_DB: llama_agent  # DB name to create
     volumes:
       - postgres_data:/var/lib/postgresql/data  # Named volume for persistence (survives container recreate)
-      # Initialize schema, extensions (pgvector, pg_trgm, uuid-ossp) and grants on first start of empty volume
+      # Initialize schema, extensions (pg_trgm, uuid-ossp) and grants on first start of empty volume
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro  # Mount init.sql as read-only, runs on first start
     secrets:
       - postgres_password  # Mount secret at /run/secrets/postgres_password
@@ -289,7 +289,7 @@ services:
       - backend
 
   # =============================================
-  # 7. Nginx (SSL + Load Balancer + CDN Headers, Reverse Proxy)
+  # 7. Nginx (SSL + Load Balancer + Security Headers, Reverse Proxy)
   # =============================================
   nginx:
     build:

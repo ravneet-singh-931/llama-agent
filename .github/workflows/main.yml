@@ -54,6 +54,24 @@ jobs:
           pytest tests/ -v -m "not mcp" --tb=short -p no:phoenix \
             --cov=. --cov-report=xml --cov-report=term
 
+      # Retrieval quality on the committed sample corpus (evals/rag/), real
+      # embedding model + real reranker, no LLM. Fails on a cross-user leak or
+      # a broken label; the hit@6 floor is report-only (0) until a baseline
+      # has been measured. Numbers go to the job summary and an artifact.
+      - name: "\U0001F4CF RAG retrieval eval"
+        env:
+          RERANKER_MODEL_DIR: /tmp/reranker-model
+          GIT_SHA: ${{ github.sha }}
+        run: python -m evals.rag_eval retrieval --min-hit6 0 --out rag-retrieval.json
+
+      - name: "\U0001F4CE Upload RAG retrieval report"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-retrieval-report
+          path: rag-retrieval.json
+          if-no-files-found: ignore
+
       - name: "\U0001F4CA Upload coverage"
         if: matrix.python-version == '3.11'
         uses: codecov/codecov-action@v4

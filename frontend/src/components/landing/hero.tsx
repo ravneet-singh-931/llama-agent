@@ -48,7 +48,7 @@ export function Hero() {
           transition={{ duration: 0.5, delay: 0.2 }}
           className="mx-auto mb-8 max-w-2xl text-lg text-muted-foreground md:text-xl"
         >
-          A production-grade multi-agent system with RAG, memory, real-time chat,
+          A multi-agent system with RAG, memory, real-time chat,
           and a team of specialized AI agents working together.
         </motion.p>
 

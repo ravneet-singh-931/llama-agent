@@ -34,10 +34,11 @@ Include the following information:
 
 This project includes:
 - JWT-based authentication
-- File upload validation (type, size, content scanning)
+- File upload validation (extension, size, filename sanitizing, path confinement)
 - Rate limiting and brute-force protection
 - Security headers (CSP, HSTS, X-Frame-Options, etc.)
-- Input sanitization (SQL injection, XSS, command injection detection)
+- Input sanitization (regex removal of script tags/event handlers) and a prompt-injection
+  heuristic on the non-streaming `/chat` endpoint; SQL goes through parameterized queries
 - CSRF protection
 - Audit logging
 - Secrets management (Docker secrets, never in code)
@@ -46,6 +47,7 @@ This project includes:
 
 - **Bandit**: Static analysis for Python security issues
 - **pip-audit**: Dependency vulnerability scanning
+- **Gitleaks**: Secret leak detection
 - **flake8**: Critical error detection (E9, F63, F7, F82)
 
 ## Security Best Practices

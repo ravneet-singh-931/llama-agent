@@ -1,8 +1,9 @@
 """
-RAG Optimizations Module — Production-Grade RAG Pipeline
+RAG Optimizations Module — retrieval and answer-checking steps on top of ChromaDB
 
-Implements 7 proven RAG techniques that improve retrieval accuracy,
-reduce hallucination, and lower cost:
+Implements 7 well-known RAG techniques (none of them is measured by a RAG eval in
+this repo yet). In the deployed chat path, 4 is off by default and the LLM rewrite
+in 6 is not used:
 
 1. Hybrid Search (BM25 + Vector) — fixes keyword-heavy queries
    like "INV-8847", "API_KEY", "Section 4.2" that vector search misses.
@@ -12,11 +13,12 @@ reduce hallucination, and lower cost:
 3. Contextual Retrieval + Semantic Chunking — prepends a 2-line
    document summary to each chunk AND splits on sentence boundaries.
 4. Query Decomposition + Step-Back — breaks complex queries into
-   sub-questions and answers each separately.
+   sub-questions and answers each separately (opt-in: RAG_DECOMPOSE=1).
 5. Corrective RAG (CRAG) — self-correction loop that detects
    unsupported answers and re-retrieves with a rewritten query.
 6. Conversational / History-Aware Retrieval — rewrites follow-up
-   queries using chat history.
+   queries using chat history (only when a caller passes history; the api.py
+   chat path combines follow-ups with the last document question instead).
 7. Semantic Cache — caches answers by question similarity (versioned,
    so answers from an older answer prompt are never served).
 
@@ -562,7 +564,8 @@ class ContextualRetriever:
 
     Contextual Retrieval (Anthropic): before embedding a chunk, prepend a
     2-line summary of the full document.  This gives each chunk document-level
-    context, improving recall by ~10% (per Anthropic's paper).
+    context (technique from Anthropic's "Contextual Retrieval" write-up; its
+    effect is not measured in this repo).
 
     Semantic Chunking: splits text on sentence boundaries and groups
     sentences into chunks of a target size, preserving table structures
@@ -881,7 +884,8 @@ class CRAGRetriever:
       3. If NO → retrieve again with rewritten query
       4. Re-answer
 
-    This single feature beats 95% of RAG repos.
+    (The deployed api.py path uses OptimizedRAG.verify_answer for the check
+    and does its own single retry.)
     """
 
     def __init__(self, vector_store, llm_client: Optional[LLMClient] = None):
@@ -1039,9 +1043,8 @@ class SemanticCache:
 
     Uses ChromaDB to store query-answer pairs.  When a query is
     asked again, the cache is checked first.  If a similar answer
-    is found, it is returned without calling the LLM again.
-
-    This saves 80% cost and 20ms latency.
+    is found, it is returned without calling the LLM again, which saves
+    that call's tokens and latency (hit rate is not measured yet).
     """
 
     # Version of the document-answer format (api._ask_doc_question prompt and

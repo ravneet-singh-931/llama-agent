@@ -19,7 +19,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Llama Agent - Multi-Agent AI System",
   description:
-    "A production-grade multi-agent AI system with RAG, memory, real-time chat, and enterprise security.",
+    "A multi-agent AI system with RAG, memory, real-time chat, and built-in security.",
   keywords: [
     "AI",
     "agent",
