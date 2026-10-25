@@ -5,6 +5,33 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] - 2026-10-25
+
+Per-agent metrics: see which part of the app spends the LLM budget, and how fast and how
+reliable each agent is, in Prometheus/Grafana.
+
+### Added
+- **`component` label** on `llama_agent_llm_tokens_total` and `llama_agent_llm_cost_usd_total`:
+  the part of the app that made the call - `research`, `coder`, `writer`, `analyzer`,
+  `planner` (each agent, including tool rounds, critic and reflection; @team planning runs on
+  the planner agent), `chat` (general chat), `doc_answer` (answers from uploaded documents),
+  `rag` (RAG helpers: contextual chunk summaries, HyDE, query decomposition,
+  conversational query rewrite, CRAG check), `router` (agent routing) and
+  `judge` (eval judge). Values are a fixed list; anything else is recorded as `other`.
+  `record_llm_usage()` takes an optional `component`; `GroqLLM` and `InstrumentedGroqClient`
+  take one and pass it on.
+- **`llama_agent_agent_run_seconds{agent,outcome}`** histogram: wall time of each specialist
+  agent run (streaming and non-streaming). Outcome: `ok`, `failed` (empty answer or one of the
+  failure messages the eval's `completed` check uses), `cached` (semantic-cache hit), `error`
+  (exception) or `cancelled` (the client disconnected mid-stream).
+- **3 Grafana panels**: estimated spend by component, agent run time p50/p95, agent failure
+  rate (21 panels in total).
+
+### Changed
+- Existing dashboard panels and the $10/24h cost alert aggregate with `sum` / `sum by (model)`,
+  so they work unchanged. Queries that matched these two series by exact label set must add
+  `component`.
+
 ## [3.4.9] - 2026-10-25
 
 Fixes found by the v3.4.8 agent eval, which hit the Groq free tier's daily token limit

@@ -143,7 +143,7 @@ def _get_groq_client(api_key: str):
     global _groq_client
     if _groq_client is None:
         from multi_agent import InstrumentedGroqClient
-        _groq_client = InstrumentedGroqClient(api_key=api_key)
+        _groq_client = InstrumentedGroqClient(api_key=api_key, component="doc_answer")
     return _groq_client
 
 

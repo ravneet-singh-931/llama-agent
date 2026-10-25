@@ -119,7 +119,7 @@ def judge(case: Dict, answer: str, sources: List[str], client=None,
         from modules.prompt_rules import today_str
         if client is None:
             from multi_agent import InstrumentedGroqClient
-            client = InstrumentedGroqClient(api_key=os.environ["GROQ_API_KEY"])
+            client = InstrumentedGroqClient(api_key=os.environ["GROQ_API_KEY"], component="judge")
         model = model or os.getenv("EVAL_JUDGE_MODEL") or resolve_model("fast")
         messages = build_messages(case, answer, sources, today_str())
         for _ in range(2):  # one retry on unparsable output

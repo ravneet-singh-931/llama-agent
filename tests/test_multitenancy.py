@@ -463,7 +463,7 @@ def test_llm_usage_is_costed_and_route_labels_are_templates(api_client):
     c.get("/conversations/some-random-id-123")
     body = c.get("/metrics").text
     assert "some-random-id-123" not in body
-    assert 'llama_agent_llm_cost_usd_total{model="openai/gpt-oss-20b"}' in body
+    assert 'llama_agent_llm_cost_usd_total{component="other",model="openai/gpt-oss-20b"}' in body
 
 
 def test_aiter_in_thread_does_not_block_event_loop():

@@ -88,7 +88,7 @@ class GroqLLMClient:
     def _get_client(self):
         if self._client is None and self._api_key:
             from multi_agent import InstrumentedGroqClient
-            self._client = InstrumentedGroqClient(api_key=self._api_key)
+            self._client = InstrumentedGroqClient(api_key=self._api_key, component="rag")
         return self._client
 
     def complete(self, system_prompt: str, user_prompt: str,

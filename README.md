@@ -483,7 +483,8 @@ Every turn is a **full trace** in Phoenix:
 - **HTTP layer** → `http send` / `http receive` children capture the full request/response
 
 In addition:
-- **Prometheus + Grafana** — a pre-provisioned dashboard (18 panels) + 9 alert rules (no Alertmanager, so alerts are not delivered anywhere)
+- **Prometheus + Grafana** — a pre-provisioned dashboard (21 panels) + 9 alert rules (no Alertmanager, so alerts are not delivered anywhere)
+- **Per-agent LLMOps metrics** — every LLM call's tokens and estimated cost carry a `component` label (research / coder / writer / analyzer / planner agent, chat, doc_answer, rag, router, eval judge), and `llama_agent_agent_run_seconds{agent,outcome}` times each specialist run (outcome: ok / failed / cached / error / cancelled). Grafana shows spend by component, p50/p95 run time per agent and failure rate per agent
 - **Loki + Promtail** — centralized log aggregation
 - **Monitoring dashboard** — `GET /monitoring/dashboard` (costs, business metrics, SLA, alerts). In-memory and per replica; the business/SLA numbers count only the non-streaming `/chat` endpoint, not `/chat/stream` (which the main UI uses), and no downtime is ever recorded, so its uptime figure is not meaningful. Use Prometheus/Grafana for real traffic.
 - **Cost tracking** — Groq spend per model/user/day
@@ -598,13 +599,13 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.4.9):** 509 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
-23 test modules. The 4 skipped tests need the reranker model file, which CI downloads
+**Current status (v3.5.0):** 523 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+24 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
 the Phoenix span-instrumentation path, the Point 9 multi-provider chain/fallback logic, and
 multi-tenancy (`test_multitenancy.py`: tenant isolation, guest identity, WS tickets, metrics
-exposure, hybrid search, cost tracking, streaming). These are unit/integration tests with
+exposure, hybrid search, cost tracking, streaming) and per-agent metrics (`test_agent_metrics.py`). These are unit/integration tests with
 the LLM stubbed; answer quality is measured separately by the eval suite (`evals/`).
 
 ---
