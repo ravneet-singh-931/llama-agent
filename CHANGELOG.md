@@ -5,6 +5,22 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.9] - 2026-10-25
+
+Eval-harness fixes found by the v3.4.8 agent eval, which hit the Groq free tier's daily token
+limit (200,000 tokens/day on the fast model) halfway through. No change to how the app answers.
+
+### Fixed
+- **A failed judge counted as a pass.** When the judge call failed (16 cases returned a 429),
+  a case passed on the rule-based checks alone; 6 did. Such cases are now **not graded**: they
+  don't count as passes, the summary lists them (`not_graded`), the table marks them
+  "⚠️ not graded", and `--compare` ignores them.
+
+### Added
+- **The report keeps the source text the judge saw** (`judge_sources`, the same passages, up to
+  `EVAL_JUDGE_SOURCE_CHARS`), so every verdict, including fabrication flags, can be checked by
+  hand. Before, only the length of each tool result was saved.
+
 ## [3.4.8] - 2026-10-25
 
 Two bugs found by the first real run of the RAG answer eval (44 questions, Groq): 39/44

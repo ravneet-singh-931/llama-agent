@@ -15,7 +15,7 @@ category gets worse.
 | Used search | at least one `web_search` call when the case needs live data | `checks.py` |
 | **Grounding rate** | share of figures in the answer found in the tool results | `modules/grounding.py` |
 | Case expectations | `must_include_any` / `must_not_include` / `max_words` | `dataset.jsonl` |
-| Quality (1-5) | LLM judge rubric: correctness, completeness, relevance, clarity, fabrication | `judge.py` |
+| Quality (1-5) | LLM judge rubric: correctness, completeness, relevance, clarity, fabrication. If the judge call fails (e.g. the daily token limit), the case is **not graded**: it doesn't count as a pass and is listed separately. The report keeps the exact source text the judge saw (`judge_sources`), so each verdict can be checked by hand | `judge.py` |
 | Cost / LLMOps | latency, input/output tokens, USD, guard actions (compacted / downgraded / waited / retried) | Prometheus counters |
 
 All checks run on every case. A case only declares *what* it expects (for

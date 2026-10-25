@@ -190,3 +190,58 @@ def test_summary_compare_and_markdown(tmp_path):
     p_new.write_text(json.dumps({"summary": sn, "results": new}))
     assert run.main(["--compare", str(p_old), str(p_new), "--fail-on-regression"]) == 1
     assert run.main(["--compare", str(p_old), str(p_old), "--fail-on-regression"]) == 0
+
+
+# ============ JUDGE FAILURES + AUDITABLE SOURCES (v3.4.9) ============
+# The v3.4.8 agent eval hit the daily token limit: the judge returned a 429
+# error for 16 cases, and 6 of them still counted as passes.
+
+def _answering(prompt, dsa=True, timeout_s=300):
+    from modules import agent_tools
+    agent_tools.dispatch_tool("teleport", {})  # unknown tool: no network
+    return {"route": "agent:writer", "answer": "A complete answer in English.", "reasoning": []}
+
+
+def test_a_failed_judge_means_not_graded_not_passed():
+    case = {"id": "w1", "category": "writing", "prompt": "p"}
+    r = run.run_case(case, executor=_answering, use_judge=True,
+                     judge_fn=lambda c, a, s: {"error": "RateLimitError: 429 tokens per day"})
+    assert r["graded"] is False and r["passed"] is False
+    s = run.summarize([r, {**_result("ok", "coding", True, 5.0), "graded": True}])
+    assert s["not_graded"] == ["w1"] and s["pass_rate"] == 50.0
+    md = run.render_markdown(s, [r])
+    assert "not graded" in md and "| w1 |" in md and "⚠️ not graded" in md
+
+
+def test_judged_and_no_judge_runs_are_graded():
+    case = {"id": "w2", "category": "writing", "prompt": "p"}
+    r = run.run_case(case, executor=_answering, use_judge=True,
+                     judge_fn=lambda c, a, s: {"overall": 4.5})
+    assert r["graded"] is True and r["passed"] is True
+    r = run.run_case(case, executor=_answering, use_judge=False)
+    assert r["graded"] is True and r["passed"] is True and r["judge_sources"] == ""
+    assert run.summarize([r])["not_graded"] == []
+
+
+def test_report_keeps_the_sources_the_judge_saw(monkeypatch):
+    from modules import agent_tools
+    monkeypatch.setattr(agent_tools, "dispatch_tool",
+                        lambda name, args: "Singapore GP: 11 Oct 2026, won by Verstappen.")
+    seen = {}
+
+    def fake_judge(case, answer, sources):
+        seen["msg"] = judge.build_messages(case, answer, sources, "2026-10-25")[1]["content"]
+        return {"overall": 4.0}
+
+    r = run.run_case({"id": "f1", "category": "research_news", "prompt": "p"},
+                     executor=_answering, use_judge=True, judge_fn=fake_judge)
+    assert "11 Oct 2026" in r["judge_sources"]
+    assert r["judge_sources"] in seen["msg"]  # exactly the text the judge was shown
+
+
+def test_compare_ignores_cases_that_were_not_graded():
+    old = [_result("a", "x", True, 4.0)]
+    new = [{**_result("a", "x", False, 4.0), "graded": False, "judge": {"error": "429"}}]
+    diff = run.compare({"summary": run.summarize(old), "results": old},
+                       {"summary": run.summarize(new), "results": new})
+    assert diff["regressed_cases"] == []
