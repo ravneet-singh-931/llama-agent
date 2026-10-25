@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Known limits: mixed-version agent eval, agents still invent figures, empty `git_sha` in
   eval reports.
 - **README screenshots** (`docs/screenshots/`): the chat UI (Analyzer agent), the Grafana
-  LLMOps and per-agent panels, and a Phoenix trace, from the live cluster.
+  LLMOps and per-agent panels, and a Phoenix trace and LLM span, from the live
+  cluster.
 
 ## [3.5.2] - 2026-10-25
 

@@ -92,6 +92,12 @@ has no prices for these Groq models; spend is tracked in Prometheus (panels abov
 
 ![Phoenix trace of a POST /chat/stream request with GroqLLM.chat spans](docs/screenshots/phoenix-trace.png)
 
+**Phoenix: one LLM call inside that trace.** Clicking a `GroqLLM.chat` span shows the
+model (`qwen/qwen3.8-27b`), status, latency (387 ms) and the exact messages sent, here
+the Planner agent's system prompt with today's date.
+
+![Phoenix GroqLLM.chat span: model, latency and the prompt sent](docs/screenshots/phoenix-llm-span.png)
+
 ---
 
 ## 📚 Documentation
