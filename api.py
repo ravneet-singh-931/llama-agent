@@ -497,7 +497,7 @@ async def lifespan(app: FastAPI):
     app.state.memory = ConversationMemory()
     app.state.facts = FactMemory()
     
-    # Use OptimizedRAG (hybrid search, reranker, contextual chunks, CRAG, cache) when enabled via env var.
+    # Use OptimizedRAG (hybrid search, reranker, CRAG, cache; contextual chunks opt-in) when enabled via env var.
     # Falls back to SimpleRAG for backward compatibility / when ChromaDB is unavailable.
     use_optimized = os.environ.get("USE_OPTIMIZED_RAG", "").lower() in ("true", "1", "yes")
     if use_optimized:
@@ -507,7 +507,8 @@ async def lifespan(app: FastAPI):
             vector_store = get_vector_store()
             app.state.rag = OptimizedRAG(vector_store)
             print("✅ OptimizedRAG initialized (hybrid search, cross-encoder reranker, "
-                  "contextual retrieval, semantic cache; query decomposition: "
+                  "semantic cache; contextual summaries: "
+                  f"{'on' if os.getenv('RAG_CONTEXTUAL', '0') == '1' else 'off'}; query decomposition: "
                   f"{'on' if os.getenv('RAG_DECOMPOSE', '0') == '1' else 'off'})")
             # Load the reranker now (not on the first question) and say which
             # backend is really in use - "keyword" means no model was found.

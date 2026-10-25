@@ -380,11 +380,48 @@ def test_a_nearer_old_answer_does_not_hide_a_current_one():
     from modules.rag_optimizations import SemanticCache
     old = {"answer": "stale", "owner": ""}
     new = {"answer": GOOD, "owner": "", "v": SemanticCache.ANSWER_VERSION}
-    cache, _ = _cache_with([(0.02, old), (0.10, new)])
+    cache, _ = _cache_with([(0.01, old), (0.04, new)])
     assert cache.lookup("q") == GOOD
     # but never beyond the similarity threshold
-    cache, _ = _cache_with([(0.02, old), (0.50, new)])
+    cache, _ = _cache_with([(0.01, old), (0.50, new)])
     assert cache.lookup("q") is None
+
+
+# Regressions from the v3.4.7 RAG answer eval: both cache hits were answers to
+# OTHER questions. A related question must miss; only a repeat may hit.
+
+def _entry(query, answer):
+    from modules.rag_optimizations import SemanticCache
+    return {"query": query, "answer": answer, "owner": "", "v": SemanticCache.ANSWER_VERSION}
+
+
+def test_a_related_but_different_question_misses_the_cache():
+    # "Team plan cost?" vs cached "Team plan rate limit?" - similar wording,
+    # different question (the old 0.3 limit served the rate-limit answer).
+    rate = _entry("What is the rate limit on the Team plan?", "600 requests per minute.")
+    for distance in (0.06, 0.2, 0.29):
+        cache, _ = _cache_with([(distance, rate)])
+        assert cache.lookup("How much does the Team plan cost?") is None
+
+
+def test_questions_with_different_numbers_never_share_an_answer():
+    rev = _entry("What was Kestrel's revenue in the third quarter of 2026?", "$48.6 million.")
+    for q in ("What was Kestrel's revenue in the second quarter of 2026?",
+              "What was Kestrel's revenue in the third quarter of 2025?",
+              "What was Kestrel's revenue in the quarter?"):
+        cache, _ = _cache_with([(0.01, rev)])  # even when the embeddings are almost equal
+        assert cache.lookup(q) is None, q
+    price = _entry("What is the monthly price of the Team plan?", "$49 per user.")
+    cache, _ = _cache_with([(0.01, price)])
+    assert cache.lookup("What is the annual price of the Team plan?") is None
+
+
+def test_a_repeated_or_reworded_question_still_hits():
+    rev = _entry("What was Kestrel's revenue in Q3 2026?", "$48.6 million.")
+    cache, _ = _cache_with([(0.0, rev)])
+    assert cache.lookup("What was Kestrel's revenue in Q3 2026?") == "$48.6 million."
+    cache, _ = _cache_with([(0.03, rev)])
+    assert cache.lookup("what's Kestrel's revenue in Q3 2026") == "$48.6 million."
 
 
 def test_new_entries_carry_the_version_and_round_trip():

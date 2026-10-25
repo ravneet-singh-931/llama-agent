@@ -5,6 +5,28 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.8] - 2026-10-25
+
+Two bugs found by the first real run of the RAG answer eval (44 questions, Groq): 39/44
+passed, and 2 of the 5 failures came from the semantic cache.
+
+### Fixed
+- **Semantic cache served answers to different questions.** Both cache hits in the eval were
+  wrong: "How much does the Team plan cost?" got the cached answer about the Team plan's rate
+  limit, and "What was Kestrel's gross margin in Q2 2025?" (not in the documents) got the
+  cached Q3 2026 revenue answer instead of "not found". A hit now needs cosine distance
+  <= 0.05 instead of 0.3 (`RAG_CACHE_MAX_DISTANCE`) and the same numbers, years, quarters and
+  period words in both questions. This is live in production (v3.4.5) too.
+- **Contextual chunk summaries were mostly empty.** The summary call had `max_tokens=100`,
+  which the reasoning fast model spent on hidden thinking: 1 of 7 eval documents got a
+  summary. The budget is now 1024 (`RAG_SUMMARY_MAX_TOKENS`) and an empty summary is no
+  longer cached.
+
+### Changed
+- **Contextual summaries are opt-in** (`RAG_CONTEXTUAL=1`, default off). In practice production
+  ran on plain chunks, and that is what the retrieval eval measures; summaries stay off until
+  they are measured to help. The startup log says whether they are on.
+
 ## [3.4.7] - 2026-10-24
 
 Claims cleanup, and a RAG eval so the RAG claims can be measured. No change to how the app

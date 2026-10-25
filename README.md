@@ -55,7 +55,7 @@ AI:   (searches the web with Tavily, answers with dated sources)
 
 - **Multi-Agent Orchestration** — five specialized agents + team mode, keyword-routed (`@Research Agent ...`) or automatic
 - **Document RAG** — upload files, retrieve with ChromaDB; answers cite the file + chunk they came from
-- **OptimizedRAG** — hybrid search (BM25 + dense vectors), an ONNX cross-encoder reranker, contextual chunk summaries with semantic chunking, a corrective-RAG answer check (CRAG) and a versioned semantic cache; query decomposition is opt-in (`RAG_DECOMPOSE=1`). Enabled by `USE_OPTIMIZED_RAG=true` (on in Compose and k8s).
+- **OptimizedRAG** — hybrid search (BM25 + dense vectors), an ONNX cross-encoder reranker, semantic chunking, a corrective-RAG answer check (CRAG) and a versioned semantic cache for repeated questions; contextual chunk summaries (`RAG_CONTEXTUAL=1`) and query decomposition (`RAG_DECOMPOSE=1`) are opt-in. Enabled by `USE_OPTIMIZED_RAG=true` (on in Compose and k8s).
 - **Two-Pass Retrieval** — thin answers trigger query reformulation and a second search
 - **Streaming Chat** — SSE streaming with agent/tool transcript markers
 - **LLMOps on the Groq free tier** — token budgeting and context compaction, rate-limit-aware model routing shared via Redis, 413 shrink-and-retry (`modules/llm_guard.py`)
@@ -85,10 +85,13 @@ reranker add over plain vector search (see `evals/README.md`).
    (`scripts/download_reranker.py`, `RERANKER_MODEL_DIR`) and fails if the model doesn't
    rank a relevant passage first. The startup log says which reranker is in use
    (`🔎 Reranker: onnx (...)`); without the model it falls back to a keyword reranker.
-3. **Contextual Retrieval** — a short summary of each document, written by the fast model,
-   is prepended to each semantic chunk (summaries are cached; restarts skip already-indexed
-   files). If the model returns no summary the chunks are stored without one; the upload
-   result says which (`contextual retrieval` vs `plain chunks`).
+3. **Contextual Retrieval** — **off by default** (`RAG_CONTEXTUAL=1` to enable): a short
+   summary of each document, written by the fast model, is prepended to each semantic chunk.
+   Until v3.4.8 the summary call had a 100-token budget that the reasoning model used up on
+   hidden thinking, so most documents got no summary (the RAG eval showed 1 of 7). The budget
+   is fixed (`RAG_SUMMARY_MAX_TOKENS`), but whether summaries improve retrieval is not
+   measured yet, so the default stays on plain chunks, the setup the RAG eval measures. The
+   upload result says which was used (`contextual retrieval` vs `plain chunks`).
 4. **Query Decomposition** — splits complex questions into sub-questions. **Off by default**
    (`RAG_DECOMPOSE=1` to enable).
 5. **Corrective RAG (CRAG)** — on by default: the fast model checks every document answer
@@ -99,8 +102,12 @@ reranker add over plain vector search (see `evals/README.md`).
    the conversation's last document question before retrieval. (6b) `OptimizedRAG.retrieve`
    can also rewrite follow-ups with the LLM when given chat history (`RAG_QUERY_REWRITE`),
    but the chat path does not pass history to it, so this rewrite is not used there.
-7. **Semantic Cache** — near-duplicate questions return the cached answer (per user;
-   invalidated when that user's documents change). Entries carry an answer-format version
+7. **Semantic Cache** — a repeated question returns the cached answer (per user;
+   invalidated when that user's documents change). A hit needs cosine distance ≤ 0.05
+   (`RAG_CACHE_MAX_DISTANCE`) **and** the same numbers, years and quarters in both questions.
+   The RAG eval found that the old, looser limit (0.3) answered "How much does the Team plan
+   cost?" with the cached Team-plan *rate limit*, and a Q2 2025 question with a Q3 2026
+   answer. A missed hit only costs tokens; a wrong hit is a wrong answer. Entries carry an answer-format version
    (`SemanticCache.ANSWER_VERSION`), so answers from an older prompt are never served;
    errors, cut-off and unverified answers are never cached.
 
@@ -470,7 +477,9 @@ Admin endpoints need `users.is_admin = true`
 | `LLM_MODEL_STRONG` | Strong model (agents, one-shot answers, RAG) | `qwen/qwen3.8-27b` |
 | `LLM_MODEL_FAST` | Fast model (streaming chat, reformulation, 429 fallback) | `openai/gpt-oss-20b` |
 | `JWT_EXPIRE_MINUTES` / `JWT_REFRESH_EXPIRE_DAYS` | Access / refresh token lifetime | `30` / `7` |
-| `USE_OPTIMIZED_RAG` | Hybrid BM25+vector search, reranker, contextual chunks, semantic cache | `true` (Compose/k8s) |
+| `USE_OPTIMIZED_RAG` | Hybrid BM25+vector search, reranker, CRAG, semantic cache | `true` (Compose/k8s) |
+| `RAG_CONTEXTUAL` / `RAG_SUMMARY_MAX_TOKENS` | Contextual chunk summaries at upload (not measured yet) / their token budget (the fast model reasons first) | `0` / `1024` |
+| `RAG_CACHE_MAX_DISTANCE` | Semantic cache: max cosine distance for a repeated question (numbers must also match) | `0.05` |
 | `RAG_CRAG` / `RAG_DECOMPOSE` / `RAG_QUERY_REWRITE` | Corrective-RAG answer check / sub-question decomposition / follow-up rewrite | `1` / `0` / `1` |
 | `RAG_CRAG_MAX_TOKENS` / `RAG_CRAG_CONTEXT_CHARS` | CRAG check budget (the fast model reasons first) / excerpt characters it sees | `1024` / `12000` |
 | `RERANKER_MODEL_DIR` / `RERANKER_THREADS` | ONNX cross-encoder location (set in the image) / onnxruntime threads | `/opt/models/reranker` / `2` |
@@ -538,7 +547,7 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.4.7):** 495 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+**Current status (v3.4.8):** 502 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
 23 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,

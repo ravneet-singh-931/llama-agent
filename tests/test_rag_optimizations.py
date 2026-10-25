@@ -85,7 +85,9 @@ class FakeChromaCollection:
         return {
             "documents": [list(self._documents[:n_results])],
             "metadatas": [list(self._metadatas[:n_results])],
-            "distances": [[0.1] * min(n_results, len(self._documents))],
+            # Like ChromaDB: an identical text is at distance ~0.
+            "distances": [[0.0 if d == query_texts[0] else 0.1
+                           for d in self._documents[:n_results]]],
         }
 
     def count(self):
@@ -395,7 +397,7 @@ class TestContextualRetriever:
 
         store = FakeVectorStore()
         llm = FakeLLMClient(summary="Summary of the document.")
-        retriever = ContextualRetriever(store, llm_client=llm)
+        retriever = ContextualRetriever(store, llm_client=llm, contextual=True)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("A" * 2000)
@@ -418,7 +420,7 @@ class TestContextualRetriever:
 
         store = FakeVectorStore()
         llm = FakeLLMClient(summary="Cached summary.")
-        retriever = ContextualRetriever(store, llm_client=llm)
+        retriever = ContextualRetriever(store, llm_client=llm, contextual=True)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("B" * 2000)
@@ -437,7 +439,7 @@ class TestContextualRetriever:
 
         store = FakeVectorStore()
         llm = FakeLLMClient(summary="")  # LLM returns nothing
-        retriever = ContextualRetriever(store, llm_client=llm)
+        retriever = ContextualRetriever(store, llm_client=llm, contextual=True)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("Some content here.")
@@ -459,7 +461,7 @@ class TestContextualRetriever:
 
         store = FakeVectorStore()
         llm = FakeLLMClient(summary="Summary text.")
-        retriever = ContextualRetriever(store, llm_client=llm)
+        retriever = ContextualRetriever(store, llm_client=llm, contextual=True)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("Content.")
@@ -473,6 +475,55 @@ class TestContextualRetriever:
                 assert meta["has_context"] is True
         finally:
             os.unlink(file_path)
+
+
+    # v3.4.8: summaries are opt-in, and the budget covers the reasoning model.
+    def _add(self, retriever):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("Content.")
+            path = f.name
+        try:
+            return retriever.add_document(path)
+        finally:
+            os.unlink(path)
+
+    def test_summaries_are_off_by_default(self, monkeypatch):
+        from modules.rag_optimizations import ContextualRetriever
+        monkeypatch.delenv("RAG_CONTEXTUAL", raising=False)
+        store, llm = FakeVectorStore(), FakeLLMClient(summary="Summary text.")
+        result = self._add(ContextualRetriever(store, llm_client=llm))
+        assert llm.summary_calls == []
+        assert "plain chunks" in result
+        assert all(m["has_context"] is False for m in store.collection._data[0]["metadatas"])
+
+    def test_env_flag_turns_summaries_on(self, monkeypatch):
+        from modules.rag_optimizations import ContextualRetriever
+        monkeypatch.setenv("RAG_CONTEXTUAL", "1")
+        store, llm = FakeVectorStore(), FakeLLMClient(summary="Summary text.")
+        assert "contextual retrieval" in self._add(ContextualRetriever(store, llm_client=llm))
+        assert len(llm.summary_calls) == 1
+
+    def test_summary_budget_leaves_room_for_reasoning(self):
+        """max_tokens=100 left the reasoning fast model nothing to answer with."""
+        from modules.rag_optimizations import ContextualRetriever
+        budgets = []
+
+        class Recording(FakeLLMClient):
+            def complete(self, system_prompt, user_prompt, max_tokens=500):
+                budgets.append(max_tokens)
+                return super().complete(system_prompt, user_prompt, max_tokens)
+
+        self._add(ContextualRetriever(FakeVectorStore(), llm_client=Recording(), contextual=True))
+        assert budgets and budgets[0] >= 256
+
+    def test_empty_summary_is_not_cached(self):
+        from modules.rag_optimizations import ContextualRetriever
+        llm = FakeLLMClient(summary="")
+        retriever = ContextualRetriever(FakeVectorStore(), llm_client=llm, contextual=True)
+        self._add(retriever)
+        self._add(retriever)
+        assert len(llm.summary_calls) == 2  # retried, not served from the summary cache
+        assert retriever._summaries == {}
 
 
 # =============================================================================

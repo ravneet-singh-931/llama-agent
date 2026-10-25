@@ -571,8 +571,14 @@ class ContextualRetriever:
     sentences into chunks of a target size, preserving table structures
     and code blocks.
 
-    If the LLM is unavailable, chunks are stored without the prefix
-    (identical to the original VectorStore behavior).
+    Summaries are opt-in (RAG_CONTEXTUAL=1, default off). Before v3.4.8 the
+    summary call had max_tokens=100, which the reasoning "fast" model spent on
+    hidden thinking, so most documents silently got no summary (1 of 7 in the
+    RAG eval). The retrieval numbers in the README are for plain chunks, so
+    that is the default until summaries are measured to help.
+
+    If summaries are off or the LLM returns nothing, chunks are stored without
+    the prefix (identical to the original VectorStore behavior).
     """
 
     def __init__(
@@ -581,9 +587,12 @@ class ContextualRetriever:
         llm_client: Optional[LLMClient] = None,
         semantic_chunk_size: int = 1000,
         semantic_chunk_overlap: int = 100,
+        contextual: Optional[bool] = None,
     ):
         self._store = vector_store
         self._llm = llm_client or GroqLLMClient()
+        # None = follow RAG_CONTEXTUAL at upload time.
+        self._contextual_flag = contextual
         self._summaries: Dict[str, str] = {}
         self._semantic_chunker = SemanticChunker(
             chunk_size=semantic_chunk_size,
@@ -614,8 +623,8 @@ class ContextualRetriever:
         if not text.strip():
             return "File is empty or unreadable"
 
-        # Generate a 2-line summary of the full document
-        summary = self._generate_summary(file_path, text)
+        # Generate a 2-line summary of the full document (opt-in)
+        summary = self._generate_summary(file_path, text) if self.contextual_enabled() else ""
 
         # Semantic chunking: split on sentence boundaries
         chunks = self._semantic_chunker.split(text)
@@ -650,8 +659,13 @@ class ContextualRetriever:
             ids=ids, documents=documents, metadatas=metadatas
         )
 
-        label = "contextual retrieval" if summary else "no LLM (plain chunks)"
+        label = "contextual retrieval" if summary else "plain chunks"
         return f"Added {len(chunks)} chunks from {file_name} ({label})"
+
+    def contextual_enabled(self) -> bool:
+        if self._contextual_flag is not None:
+            return bool(self._contextual_flag)
+        return os.getenv("RAG_CONTEXTUAL", "0") == "1"
 
     def _generate_summary(self, file_path: str, text: str) -> str:
         """Generate a 2-line summary of the document."""
@@ -670,8 +684,12 @@ class ContextualRetriever:
         )
         user_prompt = f"Document: {os.path.basename(file_path)}\n\n{truncated}"
 
-        summary = self._llm.complete(system_prompt, user_prompt, max_tokens=100)
-        self._summaries[cache_key] = summary
+        # The fast model is a reasoning model: hidden thinking counts against
+        # max_tokens, so the budget must cover it plus ~60 words of summary.
+        budget = max(256, int(os.getenv("RAG_SUMMARY_MAX_TOKENS", "1024")))
+        summary = (self._llm.complete(system_prompt, user_prompt, max_tokens=budget) or "").strip()
+        if summary:  # never cache an empty result: the next upload retries
+            self._summaries[cache_key] = summary
         return summary
 
     def search(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> List[Dict]:
@@ -1038,14 +1056,37 @@ class ConversationalRetriever:
 # =============================================================================
 
 
+# Numbers, years, quarters and number words. Two questions that differ in any
+# of these ask about different things ("Q2 2025" vs "Q3 2026"), even when
+# their embeddings are almost identical.
+_NUMBER_TOKEN_RE = re.compile(
+    r"\d+(?:[.,]\d+)*|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|first|second|third|fourth|fifth|half|quarter|annual|yearly|"
+    r"monthly|weekly|daily)\b", re.IGNORECASE)
+
+
+def _number_tokens(text: str) -> frozenset:
+    return frozenset(m.lower() for m in _NUMBER_TOKEN_RE.findall(text or ""))
+
+
 class SemanticCache:
     """Semantic cache: caches answers by query embedding similarity.
 
     Uses ChromaDB to store query-answer pairs.  When a query is
-    asked again, the cache is checked first.  If a similar answer
-    is found, it is returned without calling the LLM again, which saves
-    that call's tokens and latency (hit rate is not measured yet).
+    asked again, the cache is checked first.  If a near-identical question
+    is found, its answer is returned without calling the LLM again, which
+    saves that call's tokens and latency.
+
+    It only serves REPEATS, not related questions: the RAG answer eval
+    (v3.4.7) found that the old 0.3 cosine-distance limit served the answer
+    to "What is the rate limit on the Team plan?" for "How much does the Team
+    plan cost?", and a Q3 2026 revenue answer for a Q2 2025 margin question.
+    A missed cache hit only costs tokens; a wrong hit is a wrong answer.
     """
+
+    # Max cosine distance for a hit (similarity >= 0.95): rewordings such as
+    # "what's"/"what is" or punctuation, not different questions.
+    MAX_DISTANCE = float(os.getenv("RAG_CACHE_MAX_DISTANCE", "0.05"))
 
     # Version of the document-answer format (api._ask_doc_question prompt and
     # pipeline). Bump it whenever that changes: answers cached under an older
@@ -1080,15 +1121,17 @@ class SemanticCache:
             )
         return self._cache_collection
 
-    def lookup(self, query: str, top_k: int = 3, threshold: float = 0.3,
+    def lookup(self, query: str, top_k: int = 3, threshold: Optional[float] = None,
                owner: Optional[str] = None) -> Optional[str]:
         """Look up a cached answer for the query.
 
-        Returns the cached answer only if the closest stored query is within
-        `threshold` cosine distance (i.e. a near-duplicate question). This
-        prevents serving an unrelated cached answer for a different question.
-        Returns None if there is no sufficiently similar cached answer.
+        Returns the cached answer only if a stored query is within `threshold`
+        cosine distance (default MAX_DISTANCE, i.e. a near-duplicate question)
+        AND mentions the same numbers/years/quarters. Returns None otherwise.
         """
+        if threshold is None:
+            threshold = self.MAX_DISTANCE
+        wanted_numbers = _number_tokens(query)
         try:
             cache_collection = self._get_cache_collection()
         except Exception:
@@ -1115,13 +1158,17 @@ class SemanticCache:
                 and results.get("distances") and results["distances"][0]):
             # ChromaDB returns metadatas/distances as lists of lists (one per query),
             # nearest first. Only a near-duplicate question (within `threshold`)
-            # counts, and only an answer cached under the CURRENT answer version.
+            # with the same numbers counts, and only an answer cached under the
+            # CURRENT answer version.
             for meta, distance in zip(results["metadatas"][0], results["distances"][0]):
                 if distance > threshold:
                     break
                 meta = meta or {}
-                if meta.get("v") == self.ANSWER_VERSION:
-                    return meta.get("answer")
+                if meta.get("v") != self.ANSWER_VERSION:
+                    continue
+                if _number_tokens(meta.get("query", "")) != wanted_numbers:
+                    continue
+                return meta.get("answer")
         return None
 
     def store(self, query: str, answer: str, owner: Optional[str] = None):
