@@ -49,6 +49,20 @@ FAILURE_MARKERS = [
     "error while generating response",
 ]
 
+# The app's own notices when the model provider failed (llm_guard.friendly_llm_error:
+# rate limit or outage). Such an answer says nothing about quality, so the case
+# is not graded (and not passed) instead of being judged.
+PROVIDER_FAILURE_MARKERS = [
+    "so i can't answer right now",
+    "the ai model is unavailable right now",
+]
+
+
+def is_provider_failure(answer: str) -> bool:
+    low = (answer or "").lower()
+    return any(m in low for m in PROVIDER_FAILURE_MARKERS)
+
+
 _LANG_ALIASES = {
     "python": {"python", "py", "python3"},
     "javascript": {"javascript", "js", "jsx", "ts", "typescript", "html"},

@@ -940,15 +940,8 @@ class BaseAgent:
 
         # No answer yet (round cap hit / empty) — force a wrap-up
         # generation, falling back to the fast tier once.
-        stream_messages = messages + [
-            {"role": "user", "content": (
-                "You have used all your tool calls. Write your final "
-                "answer now using the tool results above: include the "
-                "actual facts, names, numbers, and details from the "
-                "results. Do not say what you would do or that you will "
-                "search - just deliver the answer."
-            )}
-        ]
+        from modules.agent_tools import WRAP_UP_INSTRUCTION, plain_wrap_up_messages
+        stream_messages = messages + [{"role": "user", "content": WRAP_UP_INSTRUCTION}]
         try:
             stream = self.client.chat.completions.create(
                 model=model, messages=stream_messages, stream=True,
@@ -966,13 +959,26 @@ class BaseAgent:
             )
         yield from _guard_events()
         streamed: List[str] = []
-        got = yield from _tokens(stream, sink=streamed)
+        stream_failed = False
+        try:
+            got = yield from _tokens(stream, sink=streamed)
+        except Exception as e:
+            # Groq can fail a stream midway, e.g. "Tool choice is none, but
+            # model called a tool" when the model tries another tool call
+            # here. Keep what already streamed; otherwise rescue below.
+            logger.warning("%s wrap-up stream failed: %s", self.name, str(e)[:200])
+            stream_failed = True
+            got = bool("".join(streamed).strip())
         if got:
             # Streamed live, so it can only be reported on, not marked: run
             # the same fact check as the other paths (they used to skip it).
             yield from _fact_check("".join(streamed))
         else:
-            rescued = _fast_rescue(stream_messages)
+            # After a failed stream, ask without the tool-call turns so the
+            # model can't repeat the rejected tool call.
+            rescued = "" if stream_failed else _fast_rescue(stream_messages)
+            if not rescued:
+                rescued = _fast_rescue(plain_wrap_up_messages(messages))
             if rescued:
                 rescued = strip_citation_markers(rescued)
                 rescued = yield from self._review_stream(

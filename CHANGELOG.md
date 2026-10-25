@@ -5,6 +5,27 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.2] - 2026-10-25
+
+Found by the agent eval (team cases, `team-todo-landing`).
+
+### Fixed
+- **An agent step crashed when the model tried a tool call after its last tool round.**
+  When an agent uses all its tool rounds, it is asked for the final answer with no tools
+  offered. Sometimes the model tries another tool call anyway, and Groq fails the stream
+  midway: `APIError: Tool choice is none, but model called a tool`. The error was not caught
+  while streaming, so the whole step failed ("could not complete this step") and the existing
+  empty-answer rescue never ran. Now: if part of the answer already streamed, it is kept;
+  otherwise one more call is made on the fast model with the task and the tool results as
+  plain text and **no tool-call turns in the history**, so the model has no tool call to
+  repeat. The non-streaming path (`run_tool_loop`) retries the same way on this error (other
+  errors, e.g. rate limits, still reach the strong-to-fast fallback). Applies to all 5 agents.
+- **The eval graded the app's own rate-limit notice.** An answer that is the app's "so I can't
+  answer right now" (rate limit) or "the AI model is unavailable" notice is now **not graded**
+  (and not passed) instead of being judged: one such case had been scored 1.0 and counted as
+  "fabrication flagged". The live progress line shows `NOT GRADED` instead of `FAIL` for
+  these.
+
 ## [3.5.1] - 2026-10-25
 
 Fixes found by checking the v3.5.0 Grafana panels against the raw `/metrics` of each API pod

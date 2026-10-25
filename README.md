@@ -599,8 +599,8 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.5.1):** 526 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
-24 test modules. The 4 skipped tests need the reranker model file, which CI downloads
+**Current status (v3.5.2):** 534 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+25 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
 the Phoenix span-instrumentation path, the Point 9 multi-provider chain/fallback logic, and
