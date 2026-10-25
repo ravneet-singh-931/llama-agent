@@ -73,8 +73,8 @@ average 115, +50% from January to April.
 
 **Grafana: LLMOps panels.** Input tokens per minute by model, the LLM guard's actions
 (`downgraded` = a call moved from the strong to the fast model because the free-tier
-window was nearly full) and estimated spend per model at Groq list prices. "No data" for
-context compaction means no prompt needed trimming in this window.
+window was nearly full) and estimated spend per model at Groq list prices. Most of the
+spend is the strong model; the fast model handles routing, checks and fallbacks.
 
 ![Grafana LLMOps panels: tokens per minute, guard actions, spend](docs/screenshots/grafana-llmops.png)
 
