@@ -85,16 +85,11 @@ agent, p50 / p95 are estimates from histogram buckets, not percentiles of many r
 
 ![Grafana per-agent panels: spend by component, run time, failure rate](docs/screenshots/grafana-agents.png)
 
-**Phoenix: one chat request traced.** Left: the span list for the project. Right: the
-trace of one `POST /chat/stream` request (5.6 s), with its `GroqLLM.chat` LLM spans in the
-span tree and the HTTP attributes of the request. Phoenix shows "Total Cost $0" because it
-has no prices for these Groq models; spend is tracked in Prometheus (panels above).
-
-![Phoenix trace of a POST /chat/stream request with GroqLLM.chat spans](docs/screenshots/phoenix-trace.png)
-
-**Phoenix: one LLM call inside that trace.** Clicking a `GroqLLM.chat` span shows the
-model (`qwen/qwen3.8-27b`), status, latency (387 ms) and the exact messages sent, here
-the Planner agent's system prompt with today's date.
+**Phoenix: one chat request traced.** The span tree (middle) holds the
+`POST /chat/stream` request and its `GroqLLM.chat` LLM calls. The selected LLM span shows
+the model (`qwen/qwen3.8-27b`), status, latency (387 ms) and the exact messages sent, here
+the Planner agent's system prompt with today's date. Phoenix shows "Total Cost $0" because
+it has no prices for these Groq models; spend is tracked in Prometheus (panels above).
 
 ![Phoenix GroqLLM.chat span: model, latency and the prompt sent](docs/screenshots/phoenix-llm-span.png)
 
