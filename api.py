@@ -14,7 +14,6 @@ import asyncio
 import heapq
 import json
 import logging
-import math
 import os
 import re
 import sys
@@ -1887,32 +1886,8 @@ class DocAnswerUnavailable(Exception):
     user-facing message; such results are never cached."""
 
 
-_RETRY_IN_RE = re.compile(
-    r"try again in\s+(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:([\d.]+)s)?", re.I)
-
-
-def friendly_llm_error(error) -> str:
-    """User-facing text for a failed model call. Never the raw provider
-    error: it carries the organisation ID, quota numbers and an upgrade
-    link. The full error goes to the logs instead."""
-    text = str(error)
-    low = text.lower()
-    if "429" in text or "rate limit" in low or "rate_limit" in low:
-        daily = "per day" in low or "(tpd)" in low or "(rpd)" in low
-        what = ("today's free-tier AI usage limit" if daily
-                else "the free-tier per-minute AI limit")
-        wait = " Please try again shortly."
-        m = _RETRY_IN_RE.search(text)
-        if m and any(m.groups()):
-            h, mins, secs = m.groups()
-            total = int(h or 0) * 3600 + int(mins or 0) * 60 + float(secs or 0)
-            if total < 60:
-                wait = " Please try again in a minute."
-            else:
-                n = math.ceil(total / 60)
-                wait = f" Please try again in about {n} minutes."
-        return f"⚠️ I've hit {what}, so I can't answer right now.{wait}"
-    return "⚠️ The AI model is unavailable right now. Please try again in a moment."
+# User-facing text for a failed model call (shared with general chat).
+from modules.llm_guard import friendly_llm_error  # noqa: E402
 
 
 # Questions about a document AS A WHOLE ("summarize it", "what is this

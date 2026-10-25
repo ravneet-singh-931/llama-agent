@@ -5,6 +5,33 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.9] - 2026-10-25
+
+Fixes found by the v3.4.8 agent eval, which hit the Groq free tier's daily token limit
+(200,000 tokens/day on the fast model) halfway through.
+
+### Fixed
+- **A failed judge counted as a pass.** When the judge call failed (16 cases returned a 429),
+  a case passed on the rule-based checks alone; 6 did. Such cases are now **not graded**: they
+  don't count as passes, the summary lists them (`not_graded`), the table marks them
+  "⚠️ not graded", and `--compare` ignores them.
+- **General chat on a rate limit (429) showed two contradictory warnings**: "Error while
+  generating response" and "The model returned an empty answer ... or rephrase the question",
+  after a retry that could not succeed, and the warning was stored in the model's memory as
+  its answer. It now shows the same notice as document answers, e.g. "I've hit today's
+  free-tier AI usage limit, so I can't answer right now. Please try again in about 16
+  minutes." (the wait is Groq's own "try again in" time), skips the retry and keeps the
+  notice out of the model's memory. Other errors keep the old behaviour.
+  `friendly_llm_error()` moved from `api.py` to `modules/llm_guard.py` (still importable from
+  `api`), next to the new `llm_guard.is_rate_limited()`.
+- **Eval failure markers** now include that notice and "error while generating response", so
+  an error message can't pass the `completed` check.
+
+### Added
+- **The report keeps the source text the judge saw** (`judge_sources`, the same passages, up to
+  `EVAL_JUDGE_SOURCE_CHARS`), so every verdict, including fabrication flags, can be checked by
+  hand. Before, only the length of each tool result was saved.
+
 ## [3.4.8] - 2026-10-25
 
 Two bugs found by the first real run of the RAG answer eval (44 questions, Groq): 39/44

@@ -70,14 +70,21 @@ def relevant_sources(sources: List[str], answer: str, limit: int) -> str:
     return "\n---\n".join(passages[i][:1500] for i in sorted(keep))
 
 
+def judge_sources(sources: List[str], answer: str) -> str:
+    """Exactly the SOURCES text the judge is shown (also saved in the eval
+    report, so every verdict - e.g. a fabrication flag - can be checked)."""
+    if not sources:
+        return ""
+    return relevant_sources(sources, answer, int(os.getenv("EVAL_JUDGE_SOURCE_CHARS", "8000")))
+
+
 def build_messages(case: Dict, answer: str, sources: List[str], today: str) -> List[Dict]:
     parts = [f"TODAY: {today}", f"REQUEST:\n{case.get('prompt', '')}"]
     if case.get("reference"):
         parts.append(f"REFERENCE NOTE (what a good answer does):\n{case['reference']}")
     if sources:
-        limit = int(os.getenv("EVAL_JUDGE_SOURCE_CHARS", "8000"))
         parts.append("SOURCES (the passages of what the assistant retrieved that "
-                     "relate to its answer):\n" + relevant_sources(sources, answer, limit))
+                     "relate to its answer):\n" + judge_sources(sources, answer))
     parts.append(f"ANSWER:\n{_clip(answer, 9000)}")
     return [{"role": "system", "content": RUBRIC},
             {"role": "user", "content": "\n\n".join(parts)}]

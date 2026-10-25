@@ -14,7 +14,10 @@ call and its raw result, the reasoning events, latency, LLM tokens/cost and
 LLMOps guard actions (from this process's Prometheus counters), then runs
 the deterministic checks (evals/checks.py) and the LLM judge
 (evals/judge.py). A case passes when every applicable check passes and the
-judge's overall score is >= --judge-threshold.
+judge's overall score is >= --judge-threshold. If the judge itself fails
+(e.g. the daily token limit), the case is NOT GRADED: it does not count as a
+pass, and the report lists it separately. The report also keeps the source
+text the judge saw, so every verdict can be checked by hand.
 
 Compare two runs (exit code 1 on regression with --fail-on-regression):
 
@@ -210,18 +213,22 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
 
     results = checks.evaluate(case, out["answer"], rec.calls, grounding_threshold,
                               route=out.get("route"))
-    verdict = None
+    verdict, graded, judge_src = None, True, ""
     if use_judge and out["answer"]:
-        from evals.judge import judge
-        verdict = (judge_fn or judge)(case, out["answer"],
-                                      [c["result"] for c in rec.calls])
+        from evals.judge import judge, judge_sources
+        sources = [c["result"] for c in rec.calls]
+        judge_src = judge_sources(sources, out["answer"])
+        verdict = (judge_fn or judge)(case, out["answer"], sources)
+        # A judge failure (429, no JSON) is not a pass: the case is not graded.
+        graded = bool(verdict) and "overall" in verdict
     passed = all(r["pass"] for r in results.values())
     if verdict and "overall" in verdict:
         passed = passed and verdict["overall"] >= judge_threshold
+    passed = passed and graded
     return {
         "id": case["id"], "category": case["category"], "prompt": case["prompt"],
-        "route": out["route"], "passed": passed, "latency_s": latency,
-        "checks": results, "judge": verdict, "usage": usage,
+        "route": out["route"], "passed": passed, "graded": graded, "latency_s": latency,
+        "checks": results, "judge": verdict, "judge_sources": judge_src, "usage": usage,
         "tools": [{"name": c["name"], "arguments": c["arguments"],
                    "result_chars": len(c["result"] or "")} for c in rec.calls],
         "reasoning": out["reasoning"], "answer": out["answer"],
@@ -253,9 +260,12 @@ def summarize(results: List[Dict]) -> Dict:
     for r in results:
         for k, v in r["usage"].items():
             usage[k] += v
+    not_graded = [r["id"] for r in results if not r.get("graded", True)]
     return {
         "cases": n,
+        # Not-graded cases count as not passed; see "not_graded".
         "pass_rate": _pct(sum(r["passed"] for r in results), n),
+        "not_graded": not_graded,
         "by_category": {c: {"cases": len(rs), "pass_rate": _pct(sum(r["passed"] for r in rs), len(rs))}
                         for c, rs in sorted(by_cat.items())},
         "check_failures": dict(sorted(check_fail.items())),
@@ -272,7 +282,9 @@ def render_markdown(summary: Dict, results: List[Dict]) -> str:
     s = summary
     lines = [
         "# Evaluation report", "",
-        f"- Cases: **{s['cases']}** - pass rate **{s['pass_rate']}%**",
+        f"- Cases: **{s['cases']}** - pass rate **{s['pass_rate']}%**"
+        + (f" - **not graded** (judge failed, counted as not passed): {len(s['not_graded'])}"
+           if s.get("not_graded") else ""),
         f"- Judge overall (1-5): **{s['judge_overall']}** - fabrication flagged: {s['fabrication_rate']}%",
         f"- Grounding rate (figures found in sources): **{s['grounding_rate']}**",
         f"- Latency p50 / p95: {s['latency_p50_s']}s / {s['latency_p95_s']}s",
@@ -288,7 +300,8 @@ def render_markdown(summary: Dict, results: List[Dict]) -> str:
                   for k, c in r["checks"].items() if not c["pass"]]
         j = r.get("judge") or {}
         score = j.get("overall", j.get("error", "-"))
-        lines.append(f"| {r['id']} | {r.get('route', '-')} | {'✅' if r['passed'] else '❌'} | {score} "
+        status = "⚠️ not graded" if not r.get("graded", True) else ("✅" if r["passed"] else "❌")
+        lines.append(f"| {r['id']} | {r.get('route', '-')} | {status} | {str(score)[:120]} "
                      f"| {r['latency_s']}s | {'; '.join(failed)[:160]} |")
     return "\n".join(lines)
 
@@ -302,8 +315,9 @@ def compare(old: Dict, new: Dict) -> Dict:
         a, b = so.get(k), sn.get(k)
         metrics[k] = {"old": a, "new": b,
                       "delta": None if a is None or b is None else round(b - a, 3)}
-    old_pass = {r["id"]: r["passed"] for r in old["results"]}
-    new_pass = {r["id"]: r["passed"] for r in new["results"]}
+    # Only cases graded in both runs can regress or be fixed.
+    old_pass = {r["id"]: r["passed"] for r in old["results"] if r.get("graded", True)}
+    new_pass = {r["id"]: r["passed"] for r in new["results"] if r.get("graded", True)}
     common = old_pass.keys() & new_pass.keys()
     regressed = sorted(i for i in common if old_pass[i] and not new_pass[i])
     fixed = sorted(i for i in common if not old_pass[i] and new_pass[i])

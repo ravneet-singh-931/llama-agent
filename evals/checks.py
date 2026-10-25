@@ -45,6 +45,8 @@ FAILURE_MARKERS = [
     "stream timed out",
     "returned an empty answer",
     "i couldn't produce an answer",
+    "so i can't answer right now",         # llm_guard.friendly_llm_error (429)
+    "error while generating response",
 ]
 
 _LANG_ALIASES = {

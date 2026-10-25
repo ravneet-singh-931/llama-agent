@@ -697,6 +697,13 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
         except Exception as e:
             # Never let the stream die silently, and never leak internals.
             logger.log_error(e, context=f"Streaming user input: {user_input}")
+            if llm_guard.is_rate_limited(e):
+                # Groq's token limit (often the free tier's daily cap): the
+                # retry below can't succeed, and "rephrase" doesn't help. Say
+                # so once - which limit and Groq's "try again in" time, as the
+                # document answers do - and keep it out of the model's memory.
+                yield llm_guard.friendly_llm_error(e)
+                return
             yield "\n\n⚠️ Error while generating response. Please try again."
         if not full_response.strip():
             # The model streamed nothing (reasoning models occasionally spend

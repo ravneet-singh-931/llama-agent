@@ -365,3 +365,78 @@ def test_research_prompt_requires_grounded_cited_facts():
     from multi_agent import ResearchAgent
     p = ResearchAgent._task_prompt.format(task="todo app market")
     assert "GROUNDING" in p and "(unverified)" in p and "Never invent" in p
+
+
+# ---- v3.4.9: a 429 in general chat gives one clear notice ------------------
+
+def test_is_rate_limited_detects_groq_429s_only():
+    from modules import llm_guard
+
+    class E429(Exception):
+        status_code = 429
+
+    assert llm_guard.is_rate_limited(E429("x"))
+    assert llm_guard.is_rate_limited(Exception(
+        "Error code: 429 - {'error': {'message': 'Rate limit reached for model "
+        "`openai/gpt-oss-20b` ... tokens per day (TPD): Limit 200000, Used 197991'}}"))
+    assert not llm_guard.is_rate_limited(Exception("Error code: 413 - Request too large"))
+    assert not llm_guard.is_rate_limited(Exception("Used 14290 tokens"))
+    assert not llm_guard.is_rate_limited(ConnectionError("connection reset"))
+
+
+class _Mem:
+    def __init__(self):
+        self.saved = []
+
+    def get_messages(self, **kw):
+        return []
+
+    def add_message(self, role, content, **kw):
+        self.saved.append((role, content))
+
+
+class _Facts:
+    def get_context_string(self, **kw):
+        return "No facts stored yet."
+
+
+class _FailingLLM:
+    model = "openai/gpt-oss-20b"
+
+    def __init__(self, error):
+        self.error, self.chat_calls = error, 0
+
+    def stream_chat(self, *a, **kw):
+        raise self.error
+
+    def chat(self, *a, **kw):
+        self.chat_calls += 1
+        raise self.error
+
+
+def _stream(monkeypatch, error):
+    import llama_agent1
+    llm = _FailingLLM(error)
+    monkeypatch.setattr(llama_agent1, "stream_llm", llm)
+    mem = _Mem()
+    out = "".join(llama_agent1.run_agent_stream("hi", memory=mem, facts=_Facts(),
+                                                user_id="u", conversation_id="c"))
+    return out, llm, mem
+
+
+def test_daily_limit_gives_one_clear_notice_and_no_doomed_retry(monkeypatch):
+    out, llm, mem = _stream(monkeypatch, Exception(
+        "Error code: 429 - Rate limit reached for model `openai/gpt-oss-20b` ... tokens per "
+        "day (TPD): Limit 200000, Used 199600, Requested 1433. Please try again in 15m26.2s."))
+    # Same message as document answers: which limit + Groq's wait time.
+    assert out == ("⚠️ I've hit today's free-tier AI usage limit, so I can't answer right "
+                   "now. Please try again in about 16 minutes.")
+    assert "rephrase" not in out and "empty answer" not in out and "org_" not in out
+    assert llm.chat_calls == 0          # no retry that can't succeed
+    assert mem.saved == []              # the notice is not stored as the model's answer
+
+
+def test_other_errors_keep_the_old_retry(monkeypatch):
+    out, llm, _ = _stream(monkeypatch, ConnectionError("connection reset"))
+    assert "Error while generating response" in out
+    assert llm.chat_calls == 1
