@@ -101,11 +101,13 @@ kubectl -n llama-agent exec deploy/llama-agent-api -- \
 ```
 
 Notes:
-- The retrieval mode indexes chunks **without** contextual summaries (no LLM),
-  so it measures search and reranking only. The answers mode uses the fast model
-  for summaries and the CRAG check, as in production.
-- CI's hit@6 floor is 0 (report only) until a baseline has been measured. Then
-  it is set a little below the baseline (`--min-hit6`), so a retrieval
-  regression fails the build.
+- Both modes index plain chunks: contextual summaries are off by default
+  (`RAG_CONTEXTUAL`), as in production. The retrieval mode measures search and
+  reranking only; the answers mode adds the answer model, the CRAG check and the
+  semantic cache.
+- CI's hit@6 floor is 0.89 (`--min-hit6`): the measured baseline is 35/38 =
+  0.921, so one question may slip before a retrieval regression fails the build.
+  Run the same command locally before a manual deploy while CI is not running.
+  The measured numbers are in the README's "Results" section.
 - The corpus is small (about 28 chunks for the user), so these are regression
   signals for this pipeline, not benchmark scores to compare with other systems.

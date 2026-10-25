@@ -23,6 +23,9 @@ passed, and 2 of the 5 failures came from the semantic cache.
   longer cached.
 
 ### Changed
+- **README "Results" section** with the measured retrieval and answer numbers (v3.4.7 vs
+  v3.4.8: 39/44 -> 41/44 passed, unanswerable questions 5/6 -> 6/6, wrong cache answers 2 -> 0).
+- **CI retrieval gate:** `--min-hit6 0.89` (was 0, report-only). Baseline hit@6 is 35/38 = 0.921.
 - **Contextual summaries are opt-in** (`RAG_CONTEXTUAL=1`, default off). In practice production
   ran on plain chunks, and that is what the retrieval eval measures; summaries stay off until
   they are measured to help. The startup log says whether they are on.

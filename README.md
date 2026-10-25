@@ -67,6 +67,57 @@ AI:   (searches the web with Tavily, answers with dated sources)
 
 ---
 
+## 📊 Results (measured)
+
+Measured with the RAG eval (`evals/rag_eval.py`, see `evals/README.md`) on a committed
+sample corpus: 6 documents (3 with the answers, 3 distractors), 44 fixed questions
+(17 keyword, 21 paraphrased, 6 not answerable from the documents), plus a second user's
+document to test isolation. Run on a home PC (Docker Desktop, CPU), 2026-10-25.
+
+**Retrieval** (`python -m evals.rag_eval retrieval`, no LLM): is the right passage among
+the 6 excerpts the answer model sees? 38 answerable questions.
+
+| Setup | Right passage #1 | In top 3 | In top 6 | MRR | p50 latency |
+|---|---|---|---|---|---|
+| Vector search only | 27/38 | 32/38 | 35/38 | 0.79 | 0.29 s |
+| Hybrid (BM25 + vector) | 28/38 | 31/38 | 35/38 | 0.80 | 0.28 s |
+| **Hybrid + ONNX reranker (deployed)** | **31/38** | **34/38** | **35/38** | **0.86** | 1.25 s |
+
+- **Cross-user leaks: 0.** The other user's document never appeared in results.
+- The reranker puts the right passage first more often (+4 questions) for about 1 s more
+  per query on CPU. It does not change *whether* the passage is in the top 6.
+- Hybrid adds nothing measurable over vector search on this set (1 question either way).
+- The 3 misses are all paraphrases with different wording from the document
+  ("notification callback" vs "webhook").
+
+**Answers** (`python -m evals.rag_eval answers`, Groq free tier, full pipeline: retrieval,
+answer, CRAG check, semantic cache). The first run found two bugs; v3.4.8 fixed them
+(see [CHANGELOG](CHANGELOG.md)).
+
+| | v3.4.7 (first run) | **v3.4.8** |
+|---|---|---|
+| Passed | 39/44 | **41/44** |
+| Correct fact (answerable) | 34/38 | **35/38** |
+| Source file named | 36/38 | **37/38** |
+| Said "not found" when the answer isn't there | 5/6 | **6/6** |
+| Said "not found" when the answer *was* there | 3/38 | 3/38 |
+| Figures in answers found in the documents | 97.7% | 97.7% |
+| Wrong answers served from the semantic cache | 2 | **0** |
+| Latency p50 / p95 | 2.5 s / 14.2 s | 2.4 s / 3.0 s |
+| Cost for 44 questions (Groq list prices) | $0.067 | $0.070 |
+
+- The 3 remaining failures are the 3 retrieval misses. The model says "not found" instead
+  of guessing.
+- The v3.4.7 p95 included free-tier rate-limit waits (`guard_waited: 2`); v3.4.8 had none.
+- The cost is at Groq list prices; on the free tier it is $0.
+
+**Limits:** small synthetic corpus (28 chunks), one run per version (LLM answers vary
+slightly between runs), latency from one PC, not the cluster. The agent eval
+(`evals/run.py`, 30 cases) has not been re-run on the current version, so no agent
+numbers are shown here.
+
+---
+
 ## 🧠 OptimizedRAG
 
 The deployed API uses **OptimizedRAG** — a drop-in replacement for the basic RAG
