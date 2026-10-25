@@ -12,7 +12,7 @@
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
       "targets": [
         {
-          "expr": "llama_agent_requests_total",
+          "expr": "sum(llama_agent_requests_total)",
           "legendFormat": "Total"
         }
       ],
@@ -38,7 +38,7 @@
       "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
       "targets": [
         {
-          "expr": "llama_agent_errors_total",
+          "expr": "sum(llama_agent_errors_total)",
           "legendFormat": "Errors"
         }
       ],
@@ -61,7 +61,7 @@
       "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
       "targets": [
         {
-          "expr": "rate(llama_agent_response_time_seconds_sum[5m]) / rate(llama_agent_response_time_seconds_count[5m])",
+          "expr": "sum without (instance) (rate(llama_agent_response_time_seconds_sum[5m])) / sum without (instance) (rate(llama_agent_response_time_seconds_count[5m]))",
           "legendFormat": "Avg Time"
         }
       ],
@@ -85,7 +85,7 @@
       "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
       "targets": [
         {
-          "expr": "time() - llama_agent_start_time",
+          "expr": "time() - min(llama_agent_start_time)",
           "legendFormat": "Uptime"
         }
       ],
@@ -108,7 +108,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "targets": [
         {
-          "expr": "rate(llama_agent_requests_total[5m])",
+          "expr": "sum without (instance) (rate(llama_agent_requests_total[5m]))",
           "legendFormat": "req/s"
         }
       ],
@@ -125,15 +125,15 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "targets": [
         {
-          "expr": "rate(llama_agent_response_time_seconds_sum[5m]) / rate(llama_agent_response_time_seconds_count[5m])",
+          "expr": "sum without (instance) (rate(llama_agent_response_time_seconds_sum[5m])) / sum without (instance) (rate(llama_agent_response_time_seconds_count[5m]))",
           "legendFormat": "Avg Response Time"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(llama_agent_response_time_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, sum without (instance) (rate(llama_agent_response_time_seconds_bucket[5m])))",
           "legendFormat": "P95"
         },
         {
-          "expr": "histogram_quantile(0.99, rate(llama_agent_response_time_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.99, sum without (instance) (rate(llama_agent_response_time_seconds_bucket[5m])))",
           "legendFormat": "P99"
         }
       ],
@@ -151,7 +151,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "targets": [
         {
-          "expr": "rate(llama_agent_http_responses_total[5m])",
+          "expr": "sum without (instance) (rate(llama_agent_http_responses_total[5m]))",
           "legendFormat": "{{status_code}}"
         }
       ],
@@ -167,7 +167,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "targets": [
         {
-          "expr": "llama_agent_active_connections",
+          "expr": "sum(llama_agent_active_connections)",
           "legendFormat": "Active"
         }
       ],
@@ -191,7 +191,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
       "targets": [
         {
-          "expr": "topk(10, llama_agent_requests_total)",
+          "expr": "topk(10, sum without (instance) (llama_agent_requests_total))",
           "legendFormat": "{{endpoint}}"
         }
       ],
@@ -207,7 +207,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "targets": [
         {
-          "expr": "rate(llama_agent_errors_total[5m])",
+          "expr": "sum without (instance) (rate(llama_agent_errors_total[5m]))",
           "legendFormat": "errors/s"
         }
       ],
@@ -285,7 +285,7 @@
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
       "targets": [
         {
-          "expr": "llama_agent_response_time_seconds_bucket",
+          "expr": "sum without (instance) (llama_agent_response_time_seconds_bucket)",
           "legendFormat": "{{le}}"
         }
       ],

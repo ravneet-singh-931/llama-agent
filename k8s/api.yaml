@@ -292,3 +292,23 @@ spec:
       targetPort: 8000  # Container port
       name: http
   type: ClusterIP  # Internal only (Ingress exposes it externally)
+
+---
+# Headless Service: no load balancing - its DNS name resolves to EVERY ready API
+# Pod IP. Prometheus uses it (dns_sd_configs) to scrape each replica on its own;
+# scraping llama-agent-api-service would hit a random Pod per scrape, so series
+# from different replicas would interleave (gaps, false counter resets).
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-agent-api-headless  # DNS: llama-agent-api-headless.llama-agent.svc.cluster.local
+  namespace: llama-agent
+spec:
+  clusterIP: None   # headless
+  selector:
+    app: llama-agent
+    component: api
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http

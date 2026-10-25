@@ -96,6 +96,16 @@ def _component(name: str) -> str:
     return name if name in LLM_COMPONENTS else "other"
 
 
+# Create every agent x outcome series at 0 on startup. Prometheus can't see the
+# first increment of a series that appears already at 1 (rate/increase need two
+# samples), so the first run per pod was missing, and "failure rate" showed no
+# data instead of 0% while nothing had failed.
+AGENT_NAMES = ("research", "coder", "writer", "analyzer", "planner")
+for _agent in AGENT_NAMES:
+    for _outcome in AGENT_RUN_OUTCOMES:
+        AGENT_RUN_SECONDS.labels(agent=_agent, outcome=_outcome)
+
+
 def record_agent_run(agent: str, seconds: float, outcome: str) -> None:
     """Record one agent run. Never raises - metrics must not break chat."""
     try:
