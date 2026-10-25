@@ -214,7 +214,11 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
     results = checks.evaluate(case, out["answer"], rec.calls, grounding_threshold,
                               route=out.get("route"))
     verdict, graded, judge_src = None, True, ""
-    if use_judge and out["answer"]:
+    if checks.is_provider_failure(out["answer"]):
+        # Rate limit / outage notice: don't grade an error message.
+        verdict = {"error": "not judged: the answer is the app's rate-limit/outage notice"}
+        graded = False
+    elif use_judge and out["answer"]:
         from evals.judge import judge, judge_sources
         sources = [c["result"] for c in rec.calls]
         judge_src = judge_sources(sources, out["answer"])
@@ -388,8 +392,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                      judge_threshold=args.judge_threshold, timeout_s=args.timeout)
         results.append(r)
         j = (r.get("judge") or {}).get("overall", "-")
+        status = "PASS" if r["passed"] else ("NOT GRADED" if not r["graded"] else "FAIL")
         print(f"[{i}/{len(cases)}] {r['id']:<22} {r['route']:<16} "
-              f"{'PASS' if r['passed'] else 'FAIL'}  judge={j}  {r['latency_s']}s", flush=True)
+              f"{status}  judge={j}  {r['latency_s']}s", flush=True)
         if i < len(cases) and args.pause > 0:
             time.sleep(args.pause)
 

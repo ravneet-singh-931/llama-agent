@@ -21,12 +21,15 @@ iteration cap so a misbehaving model can never loop forever.
 """
 
 import json
+import logging
 import os
 import re
 from typing import Dict, List, Optional, Tuple
 
 from modules.secrets import get_secret
 from modules.web_tools import web_search, WEB_SEARCH_TOOL
+
+logger = logging.getLogger(__name__)
 
 _MAX_TOOL_ROUNDS = 4
 _MAX_READ_CHARS = 6000
@@ -200,6 +203,41 @@ def _is_tool_use_failed(e: Exception) -> bool:
         return err.get("code") == "tool_use_failed"
     text = str(body or e)
     return "tool_use_failed" in text
+
+
+def is_tool_call_error(e: Exception) -> bool:
+    """True when Groq rejected the reply because the model emitted a tool call
+    it was not allowed to make: 'Tool choice is none, but model called a tool'
+    (no tools offered, e.g. the wrap-up after the tool-round cap) or
+    'tool_use_failed' (unparsable tool-call marker)."""
+    if _is_tool_use_failed(e):
+        return True
+    low = f"{getattr(e, 'body', '') or ''} {e}".lower()
+    return "tool choice is none" in low or "model called a tool" in low
+
+
+WRAP_UP_INSTRUCTION = (
+    "You have used all your tool calls. Write your final answer now using the "
+    "tool results above: include the actual facts, names, numbers, and details "
+    "from the results. Do not say what you would do or that you will search - "
+    "just deliver the answer."
+)
+
+
+def plain_wrap_up_messages(messages: List[dict], max_result_chars: int = 4000) -> List[dict]:
+    """The conversation without its tool-call turns: the system prompt and the
+    first user message, with the tool results pasted in as plain text, then the
+    wrap-up instruction. With no tool calls in the history the model has
+    nothing to continue, so it answers instead of trying another tool call."""
+    system = [m for m in messages if m.get("role") == "system"][:1]
+    task = next((str(m.get("content") or "") for m in messages if m.get("role") == "user"), "")
+    results = [str(m.get("content") or "")[:max_result_chars]
+               for m in messages if m.get("role") == "tool"]
+    body = task
+    if results:
+        body += "\n\nResults from your tools:\n\n" + "\n\n---\n\n".join(results)
+    body += "\n\n" + WRAP_UP_INSTRUCTION.replace("tool results above", "tool results")
+    return system + [{"role": "user", "content": body}]
 
 
 def _parse_transcript_tool_calls(content: str) -> List[Tuple[str, dict]]:
@@ -412,19 +450,20 @@ def run_tool_loop(client, model: str, messages: List[dict],
     )
     if final_content is None:
         # Iteration cap reached without a final answer - tell the model to wrap up.
-        messages.append({
-            "role": "user",
-            "content": (
-                "You have used all your tool calls. Write your final answer "
-                "now using the tool results above: include the actual facts, "
-                "names, numbers, and details from the results. Do not say "
-                "what you would do or that you will search - just deliver "
-                "the answer."
-            ),
-        })
-        response = client.chat.completions.create(
-            model=model, messages=messages, max_tokens=max_tokens
-        )
+        messages.append({"role": "user", "content": WRAP_UP_INSTRUCTION})
+        try:
+            response = client.chat.completions.create(
+                model=model, messages=messages, max_tokens=max_tokens
+            )
+        except Exception as e:
+            # The model tried yet another tool call with no tools offered:
+            # ask again without the tool-call turns in the history.
+            if not is_tool_call_error(e):
+                raise
+            logger.warning("wrap-up rejected (%s); retrying without tool history", str(e)[:120])
+            response = client.chat.completions.create(
+                model=model, messages=plain_wrap_up_messages(messages), max_tokens=max_tokens
+            )
         if response.choices[0].message.content:
             messages.append({"role": "assistant", "content": response.choices[0].message.content})
     return messages, events
