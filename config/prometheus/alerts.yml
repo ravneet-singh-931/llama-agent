@@ -31,7 +31,7 @@ groups:
 
       # Alert: High error rate (>5 errors/sec for 5 minutes)
       - alert: HighErrorRate
-        expr: rate(llama_agent_errors_total[5m]) > 5
+        expr: sum without (instance) (rate(llama_agent_errors_total[5m])) > 5
         for: 5m
         labels:
           severity: warning
@@ -42,7 +42,7 @@ groups:
 
       # Alert: High response time (P95 > 5 seconds for 5 minutes)
       - alert: HighResponseTime
-        expr: histogram_quantile(0.95, rate(llama_agent_response_time_seconds_bucket[5m])) > 5
+        expr: histogram_quantile(0.95, sum without (instance) (rate(llama_agent_response_time_seconds_bucket[5m]))) > 5
         for: 5m
         labels:
           severity: warning
@@ -53,7 +53,7 @@ groups:
 
       # Alert: Very high response time (P99 > 10 seconds for 5 minutes)
       - alert: VeryHighResponseTime
-        expr: histogram_quantile(0.99, rate(llama_agent_response_time_seconds_bucket[5m])) > 10
+        expr: histogram_quantile(0.99, sum without (instance) (rate(llama_agent_response_time_seconds_bucket[5m]))) > 10
         for: 5m
         labels:
           severity: critical
@@ -64,7 +64,7 @@ groups:
 
       # Alert: 5xx errors detected
       - alert: ServerErrors
-        expr: rate(llama_agent_http_responses_total{status_code=~"5.."}[5m]) > 1
+        expr: sum without (instance) (rate(llama_agent_http_responses_total{status_code=~"5.."}[5m])) > 1
         for: 5m
         labels:
           severity: warning

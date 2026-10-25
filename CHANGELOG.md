@@ -5,6 +5,30 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1] - 2026-10-25
+
+Fixes found by checking the v3.5.0 Grafana panels against the raw `/metrics` of each API pod
+(2 coder runs, about 3.0 s each on average; Grafana showed a p50 of 0.5 s, broken lines and
+"No data" for failure rate).
+
+### Fixed
+- **Prometheus scraped the load-balanced API Service**, so each scrape reached a random one of
+  the 2 API pods. Series from the two pods interleaved: gaps (dotted lines) whenever a scrape
+  hit the pod without that series, and false counter resets when both had it. This affected
+  every API panel and alert, not only the new ones. Prometheus now scrapes **each API pod**
+  through a new headless Service, `llama-agent-api-headless` (DNS service discovery; no RBAC,
+  allowed by the existing NetworkPolicies).
+- **The first agent run on each pod was invisible**, and "Agent failure rate" showed "No
+  data" instead of 0%. A series that first appears with value 1 has no increase Prometheus
+  can see, and with nothing failed yet the failed/error series did not exist. All agent x
+  outcome series (5 x 5) are now created at 0 when the app starts.
+
+### Changed
+- Dashboard panels and alert rules over the app's metrics add the pods up
+  (`sum without (instance) (...)`, keeping their per-endpoint / per-status breakdowns) instead
+  of showing one line per pod. `ApiDown` now fires when **any** API pod can't be scraped for 2
+  minutes. A test checks that every app query and alert aggregates across pods.
+
 ## [3.5.0] - 2026-10-25
 
 Per-agent metrics: see which part of the app spends the LLM budget, and how fast and how

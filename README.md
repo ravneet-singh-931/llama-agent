@@ -484,7 +484,7 @@ Every turn is a **full trace** in Phoenix:
 
 In addition:
 - **Prometheus + Grafana** — a pre-provisioned dashboard (21 panels) + 9 alert rules (no Alertmanager, so alerts are not delivered anywhere)
-- **Per-agent LLMOps metrics** — every LLM call's tokens and estimated cost carry a `component` label (research / coder / writer / analyzer / planner agent, chat, doc_answer, rag, router, eval judge), and `llama_agent_agent_run_seconds{agent,outcome}` times each specialist run (outcome: ok / failed / cached / error / cancelled). Grafana shows spend by component, p50/p95 run time per agent and failure rate per agent
+- **Per-agent LLMOps metrics** — every LLM call's tokens and estimated cost carry a `component` label (research / coder / writer / analyzer / planner agent, chat, doc_answer, rag, router, eval judge), and `llama_agent_agent_run_seconds{agent,outcome}` times each specialist run (outcome: ok / failed / cached / error / cancelled). Grafana shows spend by component, p50/p95 run time per agent and failure rate per agent. Prometheus scrapes **each API pod** (DNS discovery through a headless Service, not the load balancer), and dashboard queries and alerts add the pods up
 - **Loki + Promtail** — centralized log aggregation
 - **Monitoring dashboard** — `GET /monitoring/dashboard` (costs, business metrics, SLA, alerts). In-memory and per replica; the business/SLA numbers count only the non-streaming `/chat` endpoint, not `/chat/stream` (which the main UI uses), and no downtime is ever recorded, so its uptime figure is not meaningful. Use Prometheus/Grafana for real traffic.
 - **Cost tracking** — Groq spend per model/user/day
@@ -599,7 +599,7 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.5.0):** 523 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+**Current status (v3.5.1):** 526 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
 24 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,

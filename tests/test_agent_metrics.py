@@ -202,3 +202,65 @@ def test_stream_with_tools_is_timed(monkeypatch, runs):
     out = list(agent._stream_with_tools("plan it"))
     assert len(out) == 4
     assert runs == [("planner", "ok")]
+
+
+# ---------- v3.5.1: one scrape target per API pod + series start at 0 ----------
+
+def test_agent_run_series_exist_at_zero_from_startup():
+    """Prometheus can't see the first increment of a series born at 1, and the
+    failure-rate panel needs the failed/error series to exist at 0."""
+    import modules.prometheus_metrics  # noqa: F401 - creates the series
+    for agent in ("research", "coder", "writer", "analyzer", "planner"):
+        for outcome in ("ok", "failed", "cached", "error", "cancelled"):
+            assert REGISTRY.get_sample_value(
+                "llama_agent_agent_run_seconds_count",
+                {"agent": agent, "outcome": outcome}) is not None, (agent, outcome)
+
+
+def _k8s_docs(path):
+    import yaml
+    with open(path) as f:
+        return [d for d in yaml.safe_load_all(f) if d]
+
+
+def test_prometheus_scrapes_every_api_pod_via_headless_service():
+    import yaml
+    docs = _k8s_docs("k8s/api.yaml")
+    services = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Service"}
+    headless = services["llama-agent-api-headless"]
+    assert headless["spec"]["clusterIP"] == "None"
+    assert headless["spec"]["selector"] == services["llama-agent-api-service"]["spec"]["selector"]
+    assert headless["spec"]["ports"][0]["port"] == 8000
+
+    cm = next(d for d in _k8s_docs("k8s/prometheus.yaml")
+              if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "prometheus-config")
+    jobs = {j["job_name"]: j for j in yaml.safe_load(cm["data"]["prometheus.yml"])["scrape_configs"]}
+    api = jobs["llama-agent-api"]
+    assert "static_configs" not in api  # the load-balanced Service mixes replicas
+    sd = api["dns_sd_configs"][0]
+    assert sd["names"] == ["llama-agent-api-headless.llama-agent.svc.cluster.local"]
+    assert sd["type"] == "A" and sd["port"] == 8000
+
+
+def _app_exprs():
+    """Every dashboard query / alert rule over the app's own metrics."""
+    import json
+    import yaml
+    with open("config/grafana/dashboards/llama-agent.json") as f:
+        dash = json.load(f)
+    exprs = [t["expr"] for p in dash["panels"] for t in p.get("targets", [])]
+    cm = next(d for d in _k8s_docs("k8s/prometheus.yaml") if d["kind"] == "ConfigMap")
+    for path_rules in (yaml.safe_load(cm["data"]["alerts.yml"]),
+                       yaml.safe_load(open("config/prometheus/alerts.yml"))):
+        exprs += [r["expr"] for g in path_rules["groups"] for r in g["rules"]]
+    return [e for e in exprs if "llama_agent_" in e]
+
+
+def test_app_queries_and_alerts_aggregate_across_pods():
+    """With one target per pod, a bare series query shows one line per pod
+    (and a per-pod alert threshold). Every query over llama_agent_* metrics
+    must add the pods up."""
+    exprs = _app_exprs()
+    assert len(exprs) > 20
+    for e in exprs:
+        assert any(a in e for a in ("sum(", "sum by", "sum without", "min(", "max(")), e
