@@ -20,8 +20,11 @@
 A full-stack, multi-agent AI assistant with **end-to-end observability**. Upload documents (PDF, TXT, CSV, DOCX), chat with a team of five specialized agents (`@Research`, `@Coder`, `@Writer`, `@Planner`, `@Analyzer`), and get answers grounded in your files — every LLM call traced, every span captured.
 
 > **Scope, honestly:** a portfolio project that runs on a single-node local Kubernetes
-> cluster (kind, on one PC) with a GitHub Actions CI/CD pipeline (tests → image build →
-> staging → production), on the **Groq free tier**. See [Known limits](#-known-limits).
+> cluster (kind, on one PC), on the **Groq free tier**. The repo has a GitHub Actions CI/CD
+> pipeline (tests → RAG retrieval gate → image build → staging → production) that deployed the
+> earlier versions. **GitHub Actions is currently not running for this account** (an account
+> issue that is being resolved), so v3.4.8 – v3.5.2 were built, gated and deployed by hand with
+> the same steps (see [CI/CD status](#cicd-status)). See [Known limits](#-known-limits).
 
 > **Built to be observed.** Every request flows through a single trace: `POST /chat/stream` → `GroqLLM.chat` → tool calls → HTTP send/receive — visible live in Phoenix.
 
@@ -36,6 +39,26 @@ AI:   "This document is a Word document (CRM-3.docx) discussing investment and
 You:  "@Research Agent what happened in Formula 1 this week?"
 AI:   (searches the web with Tavily, answers with dated sources)
 ```
+
+---
+
+## 🎯 At a glance
+
+All numbers below were measured on 2026-10-25 against the live app (Groq free tier).
+
+| What | Result | How it was measured |
+|---|---|---|
+| **Agent quality** | **26/30 cases passed (87%)**, judge average 4.88 / 5 | 30 varied prompts in 9 categories: rule checks + figure grounding + LLM judge ([details](#agent-eval-30-cases)) |
+| **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
+| **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
+| **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
+| **Tests** | 534 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Cost** | ≈ $0.23 at Groq list prices for the 30 graded agent answers ($0 on the free tier) | token counts × list prices, per case in the eval report |
+| **Bugs found and fixed** | 14 fixed, with tests or before/after numbers | [incident log](#-bugs-found-and-fixed) |
+
+The most useful finding: **the LLM judge alone misses invented numbers.** All 4 failed
+agent cases had figures that are in no source, and the judge still scored them 4.25 – 5.0.
+The rule-based figure check caught all 4 ([findings](#what-measuring-found)).
 
 ---
 
@@ -68,6 +91,8 @@ AI:   (searches the web with Tavily, answers with dated sources)
 ---
 
 ## 📊 Results (measured)
+
+### RAG eval
 
 Measured with the RAG eval (`evals/rag_eval.py`, see `evals/README.md`) on a committed
 sample corpus: 6 documents (3 with the answers, 3 distractors), 44 fixed questions
@@ -112,9 +137,128 @@ answer, CRAG check, semantic cache). The first run found two bugs; v3.4.8 fixed 
 - The cost is at Groq list prices; on the free tier it is $0.
 
 **Limits:** small synthetic corpus (28 chunks), one run per version (LLM answers vary
-slightly between runs), latency from one PC, not the cluster. The agent eval
-(`evals/run.py`, 30 cases) has not been re-run on the current version, so no agent
-numbers are shown here.
+slightly between runs), latency from one PC, not the cluster.
+
+### Agent eval (30 cases)
+
+`python -m evals.run` (see `evals/README.md`), run inside an API pod against the live Groq
+models. A case passes only if **all three** hold:
+1. every rule check passes: completed, English only, no meta-talk, valid code, right route,
+   used web search when the case needs live data, case expectations (`must_include_any`, …);
+2. the **grounding check** passes: at least 70% of the figures in the answer are found in the
+   tool results (`modules/grounding.py`);
+3. the **LLM judge** (`openai/gpt-oss-20b`, rubric of correctness, completeness, relevance,
+   clarity) gives at least 3.5 / 5.
+
+**Result: 26/30 passed (87%), judge average 4.88 / 5.**
+
+| Category (cases) | Agent | Version | Passed | Judge avg | Avg time | Avg cost* |
+|---|---|---|---|---|---|---|
+| Research: news (4), facts (3) | Research | v3.4.8 | 7/7 | 4.68 | 40.3 s | $0.0069 |
+| Coding (6) | Coder | v3.4.8 | 6/6 | 5.00 | 16.8 s | $0.0038 |
+| Writing (3) | Writer | v3.5.1 | 3/3 | 4.92 | 1.7 s | $0.0022 |
+| Planning (2) | Planner | v3.5.1 | 1/2 | 5.00 | 12.4 s | $0.0091 |
+| Analysis (2) | Analyzer | v3.5.1 | 2/2 | 5.00 | 15.8 s | $0.0018 |
+| General (3) + safety (2) | General chat | v3.5.1 | 5/5 | 5.00 | 0.7 s | < $0.0001 |
+| Agent team, `@team` (5) | 2 – 5 agents | v3.5.2 | 2/5 | 4.75 | 142 s | $0.026 |
+| **All (30)** | | | **26/30** | **4.88** | | **$0.23 total** |
+
+\* At Groq list prices; on the free tier it is $0. Times include free-tier rate-limit waits.
+
+How the runs were done:
+- **Three parts, three versions, same day.** The free tier's daily cap on the fast/judge
+  model (200,000 tokens/day) runs out after about 15 cases, so the 30 cases were run in
+  parts: research + coding on v3.4.8, the next five categories on v3.5.1, the team cases on
+  v3.5.2 (after the fix the team cases found). What changed between versions is in the
+  [CHANGELOG](CHANGELOG.md). The v3.5.2 fix applies to all agents; research and coding were
+  not re-measured with it.
+- **"Not graded" is not a pass.** When the provider's daily cap stopped an answer or the judge,
+  the case was marked not graded and re-run later. **Real failures were not re-run.** Earlier
+  runs that the cap broke half-way are not reported.
+- **One run per case.** LLM answers vary between runs, so a difference of one case is noise.
+
+### What measuring found
+
+1. **The judge misses invented numbers; the rule check catches them.** All 4 failures are
+   grounding failures: figures that appear in no source. The judge scored them high and
+   flagged fabrication on only one:
+
+   | Failed case | Judge | Figures found in the sources |
+   |---|---|---|
+   | `plan-mvp` (banking app plan) | 5.0 | 10/17 |
+   | `team-library-api` | 4.25 | 2/9 |
+   | `team-jaipur` (trip budget in INR) | 4.5, fabrication flagged | 33/55 |
+   | `team-ev-india` (market analysis) | 5.0 | 10/18 |
+
+   Plans and budgets invite made-up prices and timelines. These count as failures and were
+   not hidden with a prompt patch for these prompts.
+2. **The rule check misses things too.** `news-f1` named the right winner but the wrong date
+   (18 Oct instead of 11 Oct), copied from an Instagram reel in the search results. Grounding
+   passed 4/4, because the number *was* in a source; being in a source doesn't make it true.
+   The judge caught it. `news-markets` had 35/40 figures found (above the 70% bar); the judge
+   caught an unsupported "fell for four consecutive sessions". You need both checks.
+3. **Research answers carry small unsupported details.** The judge flagged fabrication in
+   4 of 7 research answers that still passed overall (for example, calling a PHP flaw
+   "remote code execution" when the sources didn't say so). This is the weakest spot,
+   reported as a limit.
+4. **Tool misuse.** In `compare-dbs` the agent called `read_uploaded_document("capsquery.com")`
+   (a website, not an upload), got "not found", and still cited capsquery. It passed at 3.75.
+5. **Most research time is free-tier waiting.** In the 4 slowest research cases the LLM guard
+   waited 35 – 50 s of the 46 – 72 s total for token capacity (7,000 input tokens/min on the
+   strong model). With no wait (`news-date-headline`) a research answer took 3.2 s.
+6. **The eval found a crash.** Team steps died with
+   `APIError: Tool choice is none, but model called a tool`. Fixed in v3.5.2:
+   `team-todo-landing` went from 3.5 to 5.0 and `team-cafe` from 1.25 to 5.0.
+7. **The eval graded its own error messages.** A failed judge call counted as a pass (fixed in
+   v3.4.9), and the app's rate-limit notice was graded 1.0 and counted as "fabrication"
+   (fixed in v3.5.2). Both now show as **not graded**.
+8. **Team mode is expensive on the free tier:** 18k – 49k input tokens and 84 – 247 s per
+   case, because each tool round resends the earlier tool results.
+
+---
+
+## 🧯 Bugs found and fixed
+
+Found by running the system (evals, metrics, logs, deploys) and by review. Each row names the
+version that fixed it and a test or a before/after number as proof; details are in the
+[CHANGELOG](CHANGELOG.md).
+
+| # | Symptom | Root cause | Fix | Proof |
+|---|---|---|---|---|
+| 1 | Research crashed with 413 "Request too large" and rate-limit errors | Tool-loop resends exceeded the free tier's 7,000 input tokens/min | LLM guard: token window shared via Redis, switch to the fast model when near the limit, wait, shrink-and-retry on 413 (v3.3.6) | `tests/test_llm_guard.py` |
+| 2 | Sign-up returned 500 in Kubernetes; app crashed on `int(POSTGRES_PORT)` | k8s service links injected `POSTGRES_PORT=tcp://10.x.x.x:5432`; compose hostname didn't resolve | `enableServiceLinks: false`, Service alias, 503 + log when the DB is down, deploy fails if the DB is unreachable (v3.3.2) | `test_multitenancy.py::test_register_db_unreachable_returns_503_and_logs` |
+| 3 | The critic turned a sourced news answer into "I don't have real-time access" | The critic saw neither the search results nor today's date | Critic and reviser get the sources and the date (v3.4.2) | `tests/test_review_sources.py` |
+| 4 | Eval judge marked correct, sourced news as fabricated | It saw a clipped blind copy of the sources and judged by its memory | Judge gets the matching source passages and judges against them (v3.4.3) | `tests/test_eval_judge_and_markers.py` |
+| 5 | Team answers repeated themselves; figures mixed different things | The final step re-pasted every input; no consistency rule | Final step told not to repeat inputs; critic checks arithmetic (v3.4.4) | `tests/test_team_output_and_figures.py` |
+| 6 | The "cross-encoder reranker" was keyword overlap | `sentence-transformers` (PyTorch) was never installed; silent fallback | ONNX int8 cross-encoder, pinned + hash-checked download, build fails if it ranks wrong, startup log names it (v3.4.6) | `tests/test_reranker_onnx.py`; ranked first 28/38 → 31/38 |
+| 7 | Corrective RAG never rejected anything | The verifier had a 5-token budget, spent on hidden reasoning, so the reply was always empty | 1024-token budget, robust verdict parsing, verdict metric (v3.4.6) | `llama_agent_rag_crag_verdicts_total` |
+| 8 | Semantic cache served answers to different questions | Cosine distance 0.3 was too loose ("Team plan cost" got the Team plan rate limit) | Distance ≤ 0.05 **and** the same numbers/years/quarters (v3.4.8) | RAG answers 39/44 → 41/44, wrong cache answers 2 → 0 |
+| 9 | Contextual chunk summaries were mostly empty (1 of 7 docs) | 100-token budget spent on hidden reasoning | Budget 1024; feature opt-in until it is measured to help (v3.4.8) | RAG eval |
+| 10 | A failed judge call counted as a pass | Rule checks alone decided the case | Such cases are "not graded" (v3.4.9) | `test_evals.py::test_a_failed_judge_means_not_graded_not_passed` |
+| 11 | Grafana showed agent p50 0.5 s; the pods' raw metrics said ~3 s | Prometheus scraped the load-balanced Service, so series from the 2 pods interleaved | Scrape each pod through a headless Service (DNS discovery), sum across pods (v3.5.1) | `test_agent_metrics.py::test_prometheus_scrapes_every_api_pod_via_headless_service` |
+| 12 | "Agent failure rate" showed "No data" instead of 0% | Counter series didn't exist until the first failure | All agent × outcome series start at 0 (v3.5.1) | `test_agent_metrics.py::test_agent_run_series_exist_at_zero_from_startup` |
+| 13 | Team steps failed with `Tool choice is none, but model called a tool` | Error raised mid-stream, outside the rescue path | Keep the partial answer, or retry on the fast model with tool results as plain text (v3.5.2) | `tests/test_tool_call_wrap_up.py` (6 of 8 fail on the old code); team cases 3.5 → 5.0 and 1.25 → 5.0 |
+| 14 | The eval graded the app's rate-limit notice (1.0, "fabrication") | Provider notices looked like answers | Marked "not graded" (v3.5.2) | `test_tool_call_wrap_up.py::test_eval_does_not_grade_the_apps_rate_limit_notice` |
+
+**Operations runbook items** (no code change): a kubelet image pull that hung was fixed by
+pulling with `crictl pull` and deleting the stuck pods; Prometheus uses a ReadWriteOnce volume,
+so config changes are applied with `POST /-/reload` instead of a restart.
+
+---
+
+## 🧭 Design decisions
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| Stay on the Groq **free tier**, add an LLM guard | Shows rate-limit engineering instead of paying it away | Slower answers under load (waits), team mode can run out of quota |
+| Two models: `qwen/qwen3.8-27b` (agents), `openai/gpt-oss-20b` (routing, checks, judge, fallback) | Strong model where quality matters, cheap model for small calls | The fast model is a reasoning model, so small token budgets come back empty (bugs 7, 9) |
+| ONNX reranker, **no PyTorch** | ~23 MB model on libraries chromadb already ships; small image | About 1 s extra per query on CPU |
+| Rule-based figure check **and** an LLM judge | Each catches what the other misses ([findings](#what-measuring-found)) | Number checks can't tell a true figure from a wrong one in a bad source |
+| Strict semantic cache | A missed hit costs tokens; a wrong hit is a wrong answer | Fewer cache hits |
+| Features off until measured (contextual summaries, query decomposition) | No claims without numbers | Possible gains left on the table |
+| Prometheus scrapes **each pod** (headless Service, DNS discovery) | Load-balanced scraping corrupted every API panel | One more Service |
+| Immutable `:<git sha>` images rendered by `k8s/apply-app.sh` | One rollout per deploy; `kubectl rollout undo` works | — |
+| Evals on demand, not nightly | The daily token cap fits about 15 graded cases | Regressions are found when someone runs it |
 
 ---
 
@@ -370,19 +514,31 @@ Both keep ChromaDB cluster-internal (no published host port).
 
 ## 🔐 Security
 
-| Feature | Description |
-|---------|-------------|
-| 🔑 **JWT Authentication** | HttpOnly-cookie JWTs (short-lived access + refresh), bearer tokens for scripts |
-| 👥 **Multi-user isolation** | Per-user (and per-guest) history, facts, documents, RAG caches and WebSocket sessions |
-| 🔐 **Docker Secrets** | API keys mounted at `/run/secrets/*` — never in code or images |
-| 📁 **File Validation** | Upload extension/size checks, filename sanitizing, path confinement |
-| 🚦 **Rate Limiting** | Per-IP/per-user limits with configurable thresholds |
-| 🛡️ **Brute-Force Protection** | Automatic IP/username lockout after repeated failures |
-| 🛡️ **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options |
-| 🧼 **Input Sanitization** | Regex sanitizer (script tags, event handlers, null bytes) + a prompt-injection heuristic — applied on non-streaming `/chat` only, not on `/chat/stream` |
-| 🛡️ **CSRF Protection** | `SameSite=Lax` HttpOnly auth cookies + same-origin API |
-| 📝 **Audit Logging** | Login, registration, uploads, rate-limit events |
-| 🔒 **Secure-by-default** | Infra ports never published to the host in committed config |
+| Feature | Description | Proof |
+|---------|-------------|-------|
+| 🔑 **JWT Authentication** | HttpOnly-cookie JWTs (short-lived access + refresh), bearer tokens for scripts | `tests/test_security.py::TestAuthenticationSecurity`; `test_multitenancy.py`: refresh token rejected as access token, default JWT secret refused in production |
+| 👥 **Multi-user isolation** | Per-user (and per-guest) history, facts, documents, RAG caches and WebSocket sessions | `test_multitenancy.py` (store, vector store, RAG cache, guests, WebSocket path user id); RAG eval: **0 cross-user leaks** |
+| 🔐 **Docker Secrets** | API keys mounted at `/run/secrets/*`, never in code or images; `k8s/deploy.sh` refuses missing or placeholder secrets | `test_multitenancy.py::test_jwt_secret_read_from_file_secret`, `::test_database_url_password_injection` |
+| 📁 **File Validation** | Upload extension/size checks, filename sanitizing, path confinement | `test_security.py::TestFileUploadSecurity`, `::TestDocumentPathRestriction`; `test_multitenancy.py::test_documents_read_rejects_paths_outside_own_uploads` |
+| 🚦 **Rate Limiting** | Per-IP/per-user limits with configurable thresholds | `test_security.py::TestRateLimiting` |
+| 🛡️ **Brute-Force Protection** | Automatic IP/username lockout after repeated failures | `test_enterprise.py::test_brute_force_lockout` |
+| 🛡️ **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options | `test_enterprise.py::test_security_headers_present` |
+| 🧼 **Input Sanitization** | Regex sanitizer (script tags, event handlers, null bytes) + a prompt-injection heuristic, applied on non-streaming `/chat` only, not on `/chat/stream` | `test_security.py::TestXSS`, `::TestSQLInjection`; agent eval `safety-injection` passed (system prompt not printed) |
+| 🛡️ **CSRF Protection** | `SameSite=Lax` HttpOnly auth cookies + same-origin API | design (no dedicated test) |
+| 🌐 **CORS** | Fixed origin list when `ENVIRONMENT=production` (set in k8s and Compose) | `test_security.py::TestCORS` |
+| 📊 **Internal `/metrics`** | Refuses requests that came through a proxy (404) | `test_multitenancy.py::test_prometheus_metrics_hidden_behind_proxy` |
+| 📝 **Audit Logging** | Login, registration, uploads, rate-limit events | `test_enterprise.py::test_audit_logger_writes_events` |
+| 🔒 **Secure-by-default** | Infra ports never published to the host in committed config | `docker-compose.yml` (monitoring bound to `127.0.0.1`), k8s ingress exposes only app routes |
+
+**Known gaps (not fixed yet):**
+- The client IP for rate limiting is the first `X-Forwarded-For` value, which a client can set
+  itself, so per-IP limits can be bypassed by sending a fake header.
+- `chromadb` and `phoenix` run on `:latest` image tags (the app images use immutable
+  `:<git sha>` tags).
+- The monitoring UIs share one basic-auth login in the local lab (SSO is scaffolded, not on).
+- CORS allows `*` when `ENVIRONMENT` is not `production` (the committed k8s and Compose
+  configs set `production`).
+- Prometheus alert rules exist but no Alertmanager delivers them.
 
 ---
 
@@ -703,16 +859,64 @@ docker compose logs postgres
 
 ---
 
+## CI/CD status
+
+`.github/workflows/main.yml` runs: tests, lint, security scans, frontend build → RAG retrieval
+gate (`--min-hit6 0.89`, 0 leaks) → build and push 3 images (`:<git sha>`) → deploy to staging → production on the self-hosted
+runner. It deployed the earlier versions. **GitHub Actions is currently not running for this
+account**, so v3.4.8 – v3.5.2 were deployed by hand with the same steps:
+
+```bash
+git checkout main && git pull && TAG=$(git rev-parse HEAD)
+docker build -t ravneet231/llama-agent:$TAG .            # + mcp-server and frontend images
+# gate: python -m evals.rag_eval retrieval --min-hit6 0.89   (stop if it fails)
+docker push ravneet231/llama-agent:$TAG                  # all 3 images
+bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
+# rollback: kubectl -n llama-agent rollout undo deploy/llama-agent-api
+```
+
+---
+
+## 🔁 Check it yourself
+
+```bash
+# Unit/integration tests (LLM stubbed)
+pytest tests/ -q -m "not mcp"            # 534 passed, 4 skipped, 17 deselected
+
+# RAG retrieval + leak check (no LLM; same gate as CI)
+python -m evals.rag_eval retrieval --min-hit6 0.89
+
+# Agent eval in the cluster (pin one pod; the report stays in that pod's /tmp)
+POD=$(kubectl -n llama-agent get pods -o name | grep llama-agent-api | head -1)
+kubectl -n llama-agent exec $POD -- python -m evals.run --category coding --pause 60 --out /tmp/e.json
+kubectl -n llama-agent exec $POD -- cat /tmp/e.json > e.json
+
+# Per-agent metrics straight from a pod (/metrics refuses proxied requests)
+kubectl -n llama-agent exec $POD -- python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/metrics').read().decode())" | grep llama_agent_agent_run_seconds_count
+
+# Prometheus scrapes each API pod, not the Service
+kubectl -n llama-agent exec deploy/prometheus -- wget -qO- 'http://localhost:9090/api/v1/targets?state=active' | grep -o '"scrapeUrl":"[^"]*"'
+```
+
+---
+
 ## 🧭 Known limits
 
 - **One machine.** Staging and production are namespaces on a single-node kind cluster on my
-  PC, deployed by a self-hosted GitHub Actions runner; there is no cloud HA.
+  PC; there is no cloud HA. GitHub Actions is currently not running for this account, so recent
+  versions were deployed by hand ([CI/CD status](#cicd-status)).
 - **Groq free tier.** Rate limits (7,000 input tokens/min on the strong model) are handled by
   a token budget, model fallback and retries, but `@team` mode (several agents in a row) can
   still hit the limit and return a partial answer.
-- **Evaluation is small.** The agent eval has 30 cases and runs on demand, not in CI. The
-  RAG eval uses a small made-up corpus (6 documents, 44 questions): good for catching
+- **Evaluation is small.** The agent eval has 30 cases, one run each, and runs on demand, not
+  in CI; the published result mixes three versions (see [Agent eval](#agent-eval-30-cases)).
+  The RAG eval uses a small made-up corpus (6 documents, 44 questions): good for catching
   regressions in this pipeline, not a benchmark against other systems.
+- **Agents still invent figures.** Planning and team answers add prices and timelines that
+  are in no source (all 4 agent eval failures), and research answers carry small unsupported
+  details. The figure check marks them; it does not stop them.
+- **Eval reports don't record the version** (`git_sha` is empty, since the pod has no
+  `GIT_SHA` variable); the version of each run is documented above.
 - **No alert delivery.** Prometheus alert rules exist, but no Alertmanager is deployed.
 - **Streaming endpoint gaps.** `/chat/stream` (used by the main UI) skips the input
   sanitizer, the prompt-injection heuristic and the in-app business/SLA metrics;

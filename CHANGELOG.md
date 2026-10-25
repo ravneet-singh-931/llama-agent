@@ -5,6 +5,21 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+- **README: agent eval results** (26/30 passed, judge average 4.88 / 5), per category and agent
+  with time and cost, and how the runs were done: three parts on v3.4.8, v3.5.1 and v3.5.2
+  because of the free tier's daily token cap; "not graded" cases re-run, real failures not.
+- **"What measuring found":** all 4 failures are figures that are in no source, which the LLM
+  judge scored 4.25 - 5.0; a wrong date copied from a source passed the figure check. Both
+  checks are needed.
+- New sections: at a glance, bugs found and fixed (14, with proof), design decisions, CI/CD
+  status (GitHub Actions currently not running for this account; recent versions deployed by
+  hand), commands to check the numbers, and a Proof column plus known gaps in Security.
+- Known limits: mixed-version agent eval, agents still invent figures, empty `git_sha` in
+  eval reports.
+
 ## [3.5.2] - 2026-10-25
 
 Found by the agent eval (team cases, `team-todo-landing`).
