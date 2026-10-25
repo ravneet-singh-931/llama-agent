@@ -19,14 +19,25 @@
 
 A full-stack, multi-agent AI assistant with **end-to-end observability**. Upload documents (PDF, TXT, CSV, DOCX), chat with a team of five specialized agents (`@Research`, `@Coder`, `@Writer`, `@Planner`, `@Analyzer`), and get answers grounded in your files — every LLM call traced, every span captured.
 
-> **Scope, honestly:** a portfolio project that runs on a single-node local Kubernetes
-> cluster (kind, on one PC), on the **Groq free tier**. The repo has a GitHub Actions CI/CD
-> pipeline (tests → RAG retrieval gate → image build → staging → production) that deployed the
-> earlier versions. **GitHub Actions is currently not running for this account** (an account
-> issue that is being resolved), so v3.4.8 – v3.5.2 were built, gated and deployed by hand with
-> the same steps (see [CI/CD status](#cicd-status)). See [Known limits](#-known-limits).
+<a href="docs/screenshots/phoenix-llm-span.png"><img src="docs/screenshots/phoenix-llm-span.png" alt="Phoenix trace of one chat request: span tree and one GroqLLM.chat call with its tool call, token usage and prompt" width="100%"></a>
 
-> **Built to be observed.** Every request flows through a single trace: `POST /chat/stream` → `GroqLLM.chat` → tool calls → HTTP send/receive — visible live in Phoenix.
+<sub>**One chat request, traced in Phoenix.** The `POST /chat/stream` request with its LLM
+calls nested inside; the selected call shows the agent's `web_search` tool call, Groq's token
+usage (1,248 prompt + 51 completion tokens) and the model. Click any image for full size;
+captions in [Screenshots](#-screenshots).</sub>
+
+<table>
+<tr>
+<td align="center" width="33%"><a href="docs/screenshots/app-analyzer.png"><img src="docs/screenshots/app-analyzer.png" alt="Chat UI: Analyzer agent answer"></a><br><sub>Chat UI (Analyzer agent)</sub></td>
+<td align="center" width="33%"><a href="docs/screenshots/grafana-llmops.png"><img src="docs/screenshots/grafana-llmops.png" alt="Grafana LLMOps panels"></a><br><sub>Grafana: tokens, free-tier guard, spend</sub></td>
+<td align="center" width="33%"><a href="docs/screenshots/grafana-agents.png"><img src="docs/screenshots/grafana-agents.png" alt="Grafana per-agent panels"></a><br><sub>Grafana: cost, run time, failures per agent</sub></td>
+</tr>
+</table>
+
+> **Scope, honestly:** a portfolio project on a single-node local Kubernetes cluster (kind, on
+> one PC) and the **Groq free tier**. **GitHub Actions is currently not running for this
+> account**, so v3.4.8 – v3.5.2 were built, gated and deployed by hand with the pipeline's steps
+> ([CI/CD status](#cicd-status)). See [Known limits](#-known-limits).
 
 > 🔒 **Secure by default, observable by design.** App-layer auth (JWT, rate limiting, brute-force lockout, CSRF, CSP/HSTS headers, audit logging) and full LLM observability (Phoenix traces, Prometheus metrics, Grafana dashboards, Loki logs) — with all infrastructure locked down and **never exposed publicly**.
 
@@ -85,7 +96,7 @@ agent, p50 / p95 are estimates from histogram buckets, not percentiles of many r
 
 ![Grafana per-agent panels: spend by component, run time, failure rate](docs/screenshots/grafana-agents.png)
 
-**Phoenix: one chat request traced.** Left: the span tree. The `POST /chat/stream` request
+**Phoenix: one chat request traced** (also shown at the top). Left: the span tree. The `POST /chat/stream` request
 holds its HTTP send/receive spans and the `GroqLLM.chat` LLM calls. Right: the selected LLM
 call (OK, 387 ms) from the Planner agent. Its output is a `web_search` tool call (the agent
 decided to look up a Docker learning path), Groq's usage report (1,248 prompt + 51

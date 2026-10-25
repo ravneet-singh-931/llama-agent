@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **README screenshots** (`docs/screenshots/`): the chat UI (Analyzer agent), the Grafana
   LLMOps and per-agent panels, and a Phoenix trace with an LLM span, from the
   live cluster.
+- **Screenshots at the top of the README:** the Phoenix trace right under the project
+  description, with the chat and Grafana screenshots as clickable thumbnails; shorter
+  scope note.
 
 ## [3.5.2] - 2026-10-25
 
