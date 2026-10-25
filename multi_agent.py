@@ -276,6 +276,10 @@ class InstrumentedGroqClient:
                 llm = self._client._llms.get(model)
                 if llm is None:
                     llm = self._GroqLLM(model=model, api_key=self._client._api_key)
+                    try:  # metrics label: which agent / component made the call
+                        llm.component = self._client._component
+                    except Exception:  # nosec B110 - a label must never break a call
+                        pass
                     self._client._llms[model] = llm
                 return llm
 
@@ -327,8 +331,10 @@ class InstrumentedGroqClient:
         def __init__(self, client: "InstrumentedGroqClient"):
             self.completions = InstrumentedGroqClient._Completions(client)
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, component: str = "other"):
         self._api_key = api_key
+        # Metrics label for every call made through this client.
+        self._component = component
         self._llms = {}
         # Guards _llms creation when multiple agents run concurrently
         # (parallel collaboration) on shared worker threads.
@@ -350,6 +356,51 @@ def _to_llama_chat_message(message: Dict) -> ChatMessage:
         content=message.get("content") or "",
         additional_kwargs=additional_kwargs,
     )
+
+
+# ============ PER-AGENT RUN METRICS ============
+# Failure messages the agents and the team return instead of an answer (the
+# eval's "completed" check uses the same ones, evals/checks.py).
+_RUN_FAILURE_MARKERS = (
+    "couldn't complete that task", "could not complete this step",
+    "stream timed out", "returned an empty answer", "i couldn't produce an answer",
+    "so i can't answer right now", "error while generating response",
+)
+_run_state = threading.local()  # per-thread: was this run served from the cache?
+
+
+def _run_outcome(text: str) -> str:
+    low = (text or "").strip().lower()
+    if not low or any(m in low for m in _RUN_FAILURE_MARKERS):
+        return "failed"
+    return "ok"
+
+
+def _record_run(agent: str, start: float, outcome: str) -> None:
+    from modules.prometheus_metrics import record_agent_run
+    record_agent_run(agent, time.monotonic() - start, outcome)
+
+
+def _timed_events(agent: str, events):
+    """Pass a run's event stream through unchanged and record its wall time
+    and outcome (from the streamed answer tokens) when it ends."""
+    start, outcome, parts = time.monotonic(), "error", []
+    try:
+        while True:
+            try:
+                ev = next(events)
+            except StopIteration as stop:
+                outcome = _run_outcome("".join(parts))
+                return stop.value
+            if isinstance(ev, dict) and ev.get("type") == "token":
+                parts.append(ev.get("content") or "")
+            yield ev
+    except GeneratorExit:  # the client went away mid-answer
+        outcome = "cancelled"
+        events.close()
+        raise
+    finally:
+        _record_run(agent, start, outcome)
 
 
 # ============ BASE AGENT ============
@@ -400,7 +451,9 @@ class BaseAgent:
             api_key = get_secret("GROQ_API_KEY", default="")
             if api_key:
                 os.environ["GROQ_API_KEY"] = api_key
-        self.client = InstrumentedGroqClient(api_key=api_key)
+        # Metrics label: ResearchAgent -> "research", CoderAgent -> "coder"...
+        self.component = type(self).__name__.removesuffix("Agent").lower() or "other"
+        self.client = InstrumentedGroqClient(api_key=api_key, component=self.component)
         self.memory: List[Dict] = []
 
     def _chat(self, messages, max_tokens: Optional[int] = None):
@@ -466,6 +519,19 @@ class BaseAgent:
 
     def _execute_with_tools(self, task: str, reflect: bool = False,
                             critique: bool = False, use_memory: bool = True) -> str:
+        """Timed wrapper (per-agent run metric) around _execute_with_tools_impl."""
+        start, outcome = time.monotonic(), "error"
+        _run_state.cached = False
+        try:
+            result = self._execute_with_tools_impl(task, reflect=reflect, critique=critique,
+                                                   use_memory=use_memory)
+            outcome = "cached" if getattr(_run_state, "cached", False) else _run_outcome(result)
+            return result
+        finally:
+            _record_run(getattr(self, "component", "other"), start, outcome)
+
+    def _execute_with_tools_impl(self, task: str, reflect: bool = False,
+                                 critique: bool = False, use_memory: bool = True) -> str:
         """Run a task through the real tool loop and return the final answer.
 
         Enhancements layered on top of the core loop:
@@ -478,6 +544,7 @@ class BaseAgent:
         # 2. Semantic cache: serve a near-duplicate task from cache.
         cached = _semantic_lookup(task, self.name)
         if cached is not None:
+            _run_state.cached = True
             return cached
 
         # 9. Episodic memory: retrieve similar past results as context.
@@ -686,7 +753,16 @@ class BaseAgent:
 
     def _stream_with_tools(self, task: str, critique: bool = False,
                            reflect: bool = False,
-                       sources: Optional[list] = None) -> Iterator[Dict]:
+                           sources: Optional[list] = None) -> Iterator[Dict]:
+        """Timed wrapper (per-agent run metric) around _stream_with_tools_impl."""
+        return (yield from _timed_events(
+            getattr(self, "component", "other"),
+            self._stream_with_tools_impl(task, critique=critique, reflect=reflect,
+                                         sources=sources)))
+
+    def _stream_with_tools_impl(self, task: str, critique: bool = False,
+                                reflect: bool = False,
+                                sources: Optional[list] = None) -> Iterator[Dict]:
         """Run a task through the real tool loop with streaming.
 
         Yields dicts: {"type": "tool", "content": ...} for each tool call as
@@ -1214,7 +1290,8 @@ class MultiAgentOrchestrator:
             if routed is not None:
                 agent_key = routed
             else:
-                client = InstrumentedGroqClient(api_key=os.getenv("GROQ_API_KEY"))
+                client = InstrumentedGroqClient(api_key=os.getenv("GROQ_API_KEY"),
+                                                component="router")
                 response = client.chat.completions.create(
                     model=resolve_model("fast"),
                     messages=[

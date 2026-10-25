@@ -326,6 +326,33 @@
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 62 },
       "targets": [{ "expr": "sum(increase(llama_agent_grounding_claims_total{result=\"supported\"}[1h])) / sum(increase(llama_agent_grounding_claims_total[1h]))", "legendFormat": "grounded share" }],
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
+    },
+    {
+      "title": "Estimated LLM spend by component (USD, cumulative)",
+      "description": "Which part of the app spends the tokens: each agent, chat, doc answers, RAG helpers, router, eval judge.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 70 },
+      "targets": [{ "expr": "sum by (component) (llama_agent_llm_cost_usd_total)", "legendFormat": "{{component}}" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } }
+    },
+    {
+      "title": "Agent run time p50 / p95 (1h)",
+      "description": "Wall time of one specialist-agent run (tool loop + answer), excluding cancelled runs.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 70 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by (agent, le) (rate(llama_agent_agent_run_seconds_bucket{outcome!=\"cancelled\"}[1h])))", "legendFormat": "{{agent}} p50" },
+        { "expr": "histogram_quantile(0.95, sum by (agent, le) (rate(llama_agent_agent_run_seconds_bucket{outcome!=\"cancelled\"}[1h])))", "legendFormat": "{{agent}} p95" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "title": "Agent failure rate (1h)",
+      "description": "Share of agent runs that ended in an error or a failure message (same markers as the eval's completed check). Cancelled runs are excluded.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 78 },
+      "targets": [{ "expr": "sum by (agent) (increase(llama_agent_agent_run_seconds_count{outcome=~\"failed|error\"}[1h])) / sum by (agent) (increase(llama_agent_agent_run_seconds_count{outcome!=\"cancelled\"}[1h]))", "legendFormat": "{{agent}}" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
     }
   ],
   "time": { "from": "now-1h", "to": "now" },

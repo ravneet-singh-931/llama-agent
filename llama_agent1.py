@@ -171,6 +171,8 @@ class GroqLLM(LLM):
     model: str
     api_key: str
     base_url: Optional[str] = None
+    # Part of the app making the calls (metrics label): an agent, chat, rag...
+    component: str = "other"
     _client: Groq = PrivateAttr()
 
     def __init__(self, **kwargs: Any) -> None:
@@ -218,7 +220,8 @@ class GroqLLM(LLM):
         try:
             from modules.prometheus_metrics import record_llm_usage
             get = (lambda k: usage.get(k)) if isinstance(usage, dict) else (lambda k: getattr(usage, k, 0))
-            record_llm_usage(self.model, get("prompt_tokens") or 0, get("completion_tokens") or 0)
+            record_llm_usage(self.model, get("prompt_tokens") or 0, get("completion_tokens") or 0,
+                             component=self.component)
         except Exception:
             pass
 
@@ -279,13 +282,13 @@ class GroqLLM(LLM):
 
 # One-shot (non-streaming) agent runs use the strong model tier; the
 # streaming path below uses the fast tier for low latency.
-llm = GroqLLM(model=resolve_model("strong"), api_key=GROQ_API_KEY)
+llm = GroqLLM(model=resolve_model("strong"), api_key=GROQ_API_KEY, component="chat")
 
 # Streaming agent runs (run_agent_stream) use the fast tier. Keeping a
 # dedicated llama-index LLM here - instead of calling the raw Groq SDK
 # client - ensures streaming calls are instrumented and show up as
 # GroqLLM.* spans in Phoenix.
-stream_llm = GroqLLM(model=resolve_model("fast"), api_key=GROQ_API_KEY)
+stream_llm = GroqLLM(model=resolve_model("fast"), api_key=GROQ_API_KEY, component="chat")
 
 # ===================== ENHANCED TOOLS =====================
 

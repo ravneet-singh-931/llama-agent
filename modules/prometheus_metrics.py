@@ -9,6 +9,11 @@ Metrics exposed:
 - llama_agent_active_connections (gauge)
 - llama_agent_http_responses_total (counter by status code)
 - llama_agent_start_time (gauge)
+- llama_agent_llm_tokens_total / llama_agent_llm_cost_usd_total (by model, component)
+- llama_agent_agent_run_seconds (histogram by agent, outcome)
+
+"component" is the part of the app that made the LLM call: an agent
+(research, coder, writer, analyzer, planner), chat, rag, router or judge.
 """
 
 import time
@@ -64,14 +69,42 @@ START_TIME = Gauge(
 LLM_TOKENS = Counter(
     "llama_agent_llm_tokens_total",
     "LLM tokens consumed (Groq)",
-    ["model", "kind"],  # kind = input | output
+    ["model", "kind", "component"],  # kind = input | output
 )
 
 LLM_COST = Counter(
     "llama_agent_llm_cost_usd_total",
     "Estimated LLM spend in USD (Groq list prices)",
-    ["model"],
+    ["model", "component"],
 )
+
+# Components and run outcomes are fixed sets (bounded label cardinality).
+LLM_COMPONENTS = ("research", "coder", "writer", "analyzer", "planner",
+                  "chat", "doc_answer", "rag", "router", "judge", "other")
+AGENT_RUN_OUTCOMES = ("ok", "failed", "cached", "error", "cancelled")
+
+AGENT_RUN_SECONDS = Histogram(
+    "llama_agent_agent_run_seconds",
+    "Wall time of one agent run (one specialist agent task), by outcome: "
+    "ok | failed (empty or failure message) | cached | error (exception) | cancelled",
+    ["agent", "outcome"],
+    buckets=[1, 2.5, 5, 10, 20, 30, 60, 120, 300],
+)
+
+
+def _component(name: str) -> str:
+    return name if name in LLM_COMPONENTS else "other"
+
+
+def record_agent_run(agent: str, seconds: float, outcome: str) -> None:
+    """Record one agent run. Never raises - metrics must not break chat."""
+    try:
+        AGENT_RUN_SECONDS.labels(
+            agent=_component(agent),
+            outcome=outcome if outcome in AGENT_RUN_OUTCOMES else "error",
+        ).observe(max(0.0, float(seconds)))
+    except Exception:
+        pass
 
 
 LLM_GUARD_EVENTS = Counter(
@@ -101,9 +134,11 @@ RAG_CRAG_VERDICTS = Counter(
 )
 
 
-def record_llm_usage(model: str, input_tokens: int, output_tokens: int) -> float:
+def record_llm_usage(model: str, input_tokens: int, output_tokens: int,
+                     component: str = "other") -> float:
     """Record one LLM call's token usage in Prometheus + the CostTracker
-    (/monitoring/dashboard). Never raises - metrics must not break chat."""
+    (/monitoring/dashboard), labelled with the component that made the call.
+    Never raises - metrics must not break chat."""
     try:
         input_tokens = int(input_tokens or 0)
         output_tokens = int(output_tokens or 0)
@@ -117,9 +152,10 @@ def record_llm_usage(model: str, input_tokens: int, output_tokens: int) -> float
             user = "anonymous"
         cost = cost_tracker.record_usage(model or "unknown", input_tokens, output_tokens,
                                          user_id=user)
-        LLM_TOKENS.labels(model=model or "unknown", kind="input").inc(input_tokens)
-        LLM_TOKENS.labels(model=model or "unknown", kind="output").inc(output_tokens)
-        LLM_COST.labels(model=model or "unknown").inc(cost)
+        comp = _component(component)
+        LLM_TOKENS.labels(model=model or "unknown", kind="input", component=comp).inc(input_tokens)
+        LLM_TOKENS.labels(model=model or "unknown", kind="output", component=comp).inc(output_tokens)
+        LLM_COST.labels(model=model or "unknown", component=comp).inc(cost)
         return cost
     except Exception:
         return 0.0
