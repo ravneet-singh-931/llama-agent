@@ -26,6 +26,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description, with the chat and Grafana screenshots as clickable thumbnails; shorter
   scope note.
 
+## [3.5.4] - 2026-10-26
+
+Found by checking the live cluster ([docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md)).
+Kubernetes manifests only; the app images are unchanged.
+
+### Fixed
+- **The nightly Postgres backup failed 3 days in a row.** The PC is off at 02:00 UTC, so
+  Kubernetes ran the missed job at boot, 13 s after Postgres started and before it accepted
+  connections; the job used up its 2 retries within seconds. It now waits for `pg_isready`
+  (every 5 s, up to 5 min) before `pg_dump`. Proven by stopping Postgres: the job waited and
+  finished when Postgres came back.
+- **The autoscalers could never scale.** The cluster had no metrics-server, so both HPAs read
+  `cpu: <unknown>`. metrics-server v0.9.0 is vendored in `k8s/metrics-server.yaml`
+  (`--kubelet-insecure-tls` for local kind only); the HPAs now read `3%/70%`.
+
+### Changed
+- Chroma and Phoenix pinned by image digest instead of `:latest` (k8s and Docker Compose), so
+  a restart can't silently pull a new version.
+
+### Verified (no change needed)
+- **Restore drill:** the newest dump restored into a throwaway Postgres has the same row
+  counts as the live database in all 6 tables.
+- **NetworkPolicy is enforced:** a pod in another namespace can't reach the API; a pod in
+  `llama-agent` can.
+
 ## [3.5.3] - 2026-10-25
 
 ### Fixed

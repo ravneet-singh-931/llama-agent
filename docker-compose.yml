@@ -124,7 +124,7 @@ services:
   # replica is invisible to search on another. Mirrors k8s chromadb Deployment.
   # Cluster-internal only (no published host ports, secure).
   chromadb:
-    image: chromadb/chroma:latest  # Official ChromaDB
+    image: chromadb/chroma@sha256:1e0b73a187a28757c572acba508c46f48c9e8b0acaf5c20e6d95cdedce1acdf6  # Official ChromaDB
     container_name: llama-agent-chromadb
     restart: unless-stopped
     # NOTE: chromadb/chroma image already sets `chroma` as entrypoint, so Compose `command` is appended
@@ -416,7 +416,7 @@ services:
   # 13. Phoenix (LLM Observability by Arize AI, Tracing)
   # =============================================
   phoenix:
-    image: arizephoenix/phoenix:latest
+    image: arizephoenix/phoenix@sha256:fac79c5d87ef33c0e7512d475dbf5036ed28cb95a0eb4f5b1ead6c61c6fbaf6f
     ports:
       - "127.0.0.1:6006:6006"  # localhost only (use an SSH tunnel remotely)
     container_name: llama-agent-phoenix
