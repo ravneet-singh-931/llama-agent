@@ -38,7 +38,7 @@
 # FLOW:
 # -----
 # 1. kubectl apply -f k8s/phoenix.yaml
-# 2. Deployment creates Pod with arizephoenix/phoenix:latest
+# 2. Deployment creates Pod with arizephoenix/phoenix@sha256:fac79c5d87ef33c0e7512d475dbf5036ed28cb95a0eb4f5b1ead6c61c6fbaf6f
 # 3. Pod listens on 0.0.0.0:6006, stores traces in /mnt/data (PVC)
 # 4. Service creates DNS: phoenix → Pod IP
 # 5. API pods auto-instrument and push traces
@@ -72,7 +72,7 @@ spec:
     spec:
       containers:
         - name: phoenix
-          image: arizephoenix/phoenix:latest  # Phoenix image (latest)
+          image: arizephoenix/phoenix@sha256:fac79c5d87ef33c0e7512d475dbf5036ed28cb95a0eb4f5b1ead6c61c6fbaf6f  # Phoenix image (latest)
           ports:
             - containerPort: 6006  # Phoenix UI + OTLP collector port
               name: http

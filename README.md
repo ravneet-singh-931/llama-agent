@@ -63,9 +63,9 @@ All numbers below were measured on 2026-10-25 against the live app (Groq free ti
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 560 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 563 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
 | **Cost** | ≈ $0.23 at Groq list prices for the 30 graded agent answers ($0 on the free tier) | token counts × list prices, per case in the eval report |
-| **Bugs found and fixed** | 15 fixed, with tests or before/after numbers | [incident log](#-bugs-found-and-fixed) |
+| **Bugs found and fixed** | 17 fixed, with tests or before/after numbers | [incident log](#-bugs-found-and-fixed) |
 
 The most useful finding: **the LLM judge alone misses invented numbers.** All 4 failed
 agent cases had figures that are in no source, and the judge still scored them 4.25 – 5.0.
@@ -286,6 +286,8 @@ version that fixed it and a test or a before/after number as proof; details are 
 | 13 | Team steps failed with `Tool choice is none, but model called a tool` | Error raised mid-stream, outside the rescue path | Keep the partial answer, or retry on the fast model with tool results as plain text (v3.5.2) | `tests/test_tool_call_wrap_up.py` (6 of 8 fail on the old code); team cases 3.5 → 5.0 and 1.25 → 5.0 |
 | 14 | The eval graded the app's rate-limit notice (1.0, "fabrication") | Provider notices looked like answers | Marked "not graded" (v3.5.2) | `test_tool_call_wrap_up.py::test_eval_does_not_grade_the_apps_rate_limit_notice` |
 | 15 | "Avg Response Time" and the latency alerts never saw a slow chat | The middleware stopped the timer when the headers were ready, before a streamed answer even started | Time to the last byte of the body; chat SLOs per route (v3.5.3) | `test_chat_slo_metrics.py::test_streamed_response_time_is_measured_to_the_end_of_the_body`: a 2.0 s stream was recorded as 0.002 s, now 2.008 s |
+| 16 | Nightly Postgres backup failed 3 days in a row | The PC is off at 02:00, so the missed job ran at boot, 13 s after Postgres started and before it accepted connections | Wait for `pg_isready` (up to 5 min) before `pg_dump` (v3.5.4) | `test_k8s_ops.py`; Postgres scaled to 0: the job waited and finished when it was back; restore drill: same row counts as the live DB ([checks](docs/KUBERNETES_CHECKS.md)) |
+| 17 | The autoscalers could never scale | No metrics-server in the cluster, so both HPAs read `cpu: <unknown>` | Vendored metrics-server v0.9.0 (`k8s/metrics-server.yaml`) (v3.5.4) | `kubectl get hpa`: `<unknown>/70%` → `3%/70%` |
 
 **Operations runbook items** (no code change): a kubelet image pull that hung was fixed by
 pulling with `crictl pull` and deleting the stuck pods; Prometheus uses a ReadWriteOnce volume,
@@ -803,8 +805,8 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.5.3):** 560 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
-26 test modules. The 4 skipped tests need the reranker model file, which CI downloads
+**Current status (v3.5.3):** 563 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+27 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
 the Phoenix span-instrumentation path, the Point 9 multi-provider chain/fallback logic, and
@@ -929,7 +931,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 560 passed, 4 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 563 passed, 4 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89
@@ -947,6 +949,10 @@ kubectl -n llama-agent exec $POD -- python -c "import urllib.request; print(urll
 
 # SLO burn-rate alerts loaded in Prometheus
 kubectl -n llama-agent exec deploy/prometheus -- wget -qO- http://localhost:9090/api/v1/rules | grep -o '"name":"Chat[A-Za-z]*SLOBurn"'
+
+# Kubernetes checks: backup wait, restore drill, HPA, NetworkPolicy (docs/KUBERNETES_CHECKS.md)
+kubectl -n llama-agent get hpa    # cpu: N%/70%, not <unknown>
+kubectl run np-test -n default --rm -i --restart=Never --image=busybox:1.36 -- wget -qO- -T 5 http://llama-agent-api-service.llama-agent:8000/health   # times out: blocked
 
 # Prometheus scrapes each API pod, not the Service
 kubectl -n llama-agent exec deploy/prometheus -- wget -qO- 'http://localhost:9090/api/v1/targets?state=active' | grep -o '"scrapeUrl":"[^"]*"'

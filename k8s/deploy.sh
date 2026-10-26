@@ -248,6 +248,8 @@ kubectl apply -f k8s/postgres-backup-cronjob.yaml
 
 echo "🛡️  Deploying PodDisruptionBudgets + HPA + ResourceQuota..."
 kubectl apply -f k8s/poddisruptionbudgets.yaml
+# The HPAs need metrics-server (kind / Docker Desktop don't ship it).
+kubectl apply -f k8s/metrics-server.yaml
 kubectl apply -f k8s/api-hpa.yaml
 kubectl apply -f k8s/resourcequota.yaml
 
