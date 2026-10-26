@@ -101,6 +101,13 @@ spec:
                   set -o pipefail
                   DATE=$(date +%F-%H%M%S)
                   OUT="/backup/llama_agent_${DATE}.sql.gz"
+                  # A missed 02:00 run starts right after the machine boots, while Postgres
+                  # may still be starting. Wait up to 5 min instead of failing the job.
+                  for i in $(seq 1 60); do
+                    pg_isready --host=postgres-service --username="$POSTGRES_USER" --dbname=llama_agent --timeout=5 && break
+                    [ "$i" = 60 ] && { echo "Postgres not ready after 5 min"; exit 1; }
+                    echo "Waiting for Postgres ($i/60)"; sleep 5
+                  done
                   echo "Backing up Postgres -> ${OUT}"
                   pg_dump \
                     --host=postgres-service \

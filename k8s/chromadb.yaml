@@ -35,7 +35,7 @@
 # FLOW:
 # -----
 # 1. kubectl apply -f k8s/chromadb.yaml
-# 2. Deployment creates Pod with chromadb/chroma:latest
+# 2. Deployment creates Pod with chromadb/chroma@sha256:1e0b73a187a28757c572acba508c46f48c9e8b0acaf5c20e6d95cdedce1acdf6
 # 3. Pod runs `chroma run --host 0.0.0.0 --port 8000 --path /chroma/chroma`
 # 4. Service creates DNS: chromadb-service → Pod IP
 # 5. API pods connect via CHROMA_SERVER_URL
@@ -64,7 +64,7 @@ spec:
     spec:
       containers:
         - name: chromadb
-          image: chromadb/chroma:latest  # Official ChromaDB image
+          image: chromadb/chroma@sha256:1e0b73a187a28757c572acba508c46f48c9e8b0acaf5c20e6d95cdedce1acdf6  # Official ChromaDB image
 
           # command: What to run inside container
           #   - The image's entrypoint is already `chroma`, so we pass `run ...`
