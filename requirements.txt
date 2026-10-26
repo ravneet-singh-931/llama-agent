@@ -81,7 +81,6 @@ prometheus-client==0.26.0
 
 # --- MCP (Model Context Protocol) - Pinned to <2 (mcp 2.x breaks FastMCP) ---
 mcp==1.30.0  # CVE-2026-59951 (stateful session leak)
-fastmcp==3.4.7
 
 # --- Utilities ---
 python-dateutil==2.9.0

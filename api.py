@@ -655,7 +655,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="🤖 Llama Agent API",
     description="Enterprise AI Agent with Memory, RAG, Auth, WebSockets, and 14+ Tools",
-    version="3.0.0",
+    version="3.5.6",
     lifespan=lifespan,
 )
 
@@ -794,7 +794,7 @@ async def root():
     """Root endpoint"""
     return {
         "name": "🤖 Llama Agent API",
-        "version": "3.0.0",
+        "version": "3.5.6",
         "docs": "/docs",
         "features": [
             "REST API",
@@ -828,7 +828,7 @@ async def health_check():
     return HealthResponse(
         status=health["status"],
         uptime=health["uptime_human"],
-        version="3.0.0",
+        version="3.5.6",
         modules={
             "memory": "active",
             "rag": "active",
