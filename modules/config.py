@@ -172,7 +172,7 @@ class AppConfig:
     environment: Environment = Environment.DEVELOPMENT
     debug: bool = False
     app_name: str = "Llama Agent"
-    version: str = "3.0.0"
+    version: str = "3.5.6"
 
     # Sub-configurations
     database: DatabaseConfig = field(default_factory=DatabaseConfig)

@@ -26,6 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description, with the chat and Grafana screenshots as clickable thumbnails; shorter
   scope note.
 
+## [3.5.6] - 2026-10-26
+
+Found by a hand-run audit of the whole repo (Bandit, flake8, pip-audit, the MCP server
+tests and read-only checks of the live cluster).
+
+### Security
+- Removed `fastmcp` from requirements.txt. Nothing imported it (the MCP server uses
+  `mcp.server.fastmcp` from the official `mcp` SDK), but it was installed with a known
+  advisory (GHSA-7xgj-8392-5q4r).
+- The image upgrades pip to 26.2.2 before it switches to the non-root user; pip 24.0 from the
+  base image had 6 advisories. pip is only used while the image is built.
+
+### Fixed
+- `/health`, the OpenAPI docs and the config reported version 3.0.0. They now report 3.5.6,
+  and a test fails when they don't match the newest version in this file.
+
 ## [3.5.5] - 2026-10-26
 
 ### Security

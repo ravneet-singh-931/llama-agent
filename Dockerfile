@@ -152,6 +152,8 @@ EXPOSE 8000 8501 8765
 #     - `docker run <image> streamlit run app.py --server.port 8501 ...` (for web)
 #     - `docker run <image> python mcp_agents_server.py --transport sse ...` (for mcp)
 # Run as the non-root user (k8s also enforces runAsNonRoot)
+# pip is only used at build time; upgrade it so the image ships no known pip advisories
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
 USER 1000:1000
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "120"]
 
