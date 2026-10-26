@@ -81,9 +81,32 @@ kubectl -n llama-agent run np-test-in --rm -i --restart=Never --image=busybox:1.
 a new version. They are pinned to the digests that were running (Chroma server 1.0.0,
 Phoenix 19.4.0). To upgrade, change the digest on purpose and test.
 
+## 6. Containers don't run as root (v3.5.5)
+
+```bash
+kubectl -n llama-agent exec deploy/llama-agent-api -- id                  # uid=1000(app)
+kubectl -n llama-agent exec deploy/llama-agent-frontend -- id             # uid=1001(nextjs)
+kubectl -n llama-agent exec deploy/llama-agent-api -- touch /app/api.py   # Permission denied
+kubectl label --dry-run=server --overwrite ns llama-agent pod-security.kubernetes.io/enforce=restricted
+```
+
+The dry run lists the pods the `restricted` level would reject: chromadb, phoenix, postgres,
+redis, grafana, loki, prometheus, node-exporter and promtail. The 4 app Deployments (api,
+mcp-server, web, frontend) are not in the list.
+
+## 7. Upload 502 was an OOMKilled API pod (v3.5.5)
+
+| | Before (reranker batch 16) | After (batch 4) |
+|---|---|---|
+| API pod after document questions | 1208 - 1288 MB, never released | 481 / 627 MB max |
+| Question + 65 KB .docx upload | ~1630 MB > 1536 MiB limit: OOMKilled, HTTP 502 | works, 0 restarts |
+| Reranker alone, 8 questions in a row (local, offline) | 1019 MB | 354 MB |
+| RAG retrieval (hit@1 / hit@3 / hit@6 / MRR) | 0.816 / 0.895 / 0.921 / 0.862 | same |
+
+Memory per pod: `process_resident_memory_bytes{job="llama-agent-api"}` in Prometheus.
+
 ## Still open
 
-- The API, MCP server and Streamlit containers run as root (uid 0).
 - Grafana, Loki and Prometheus set `runAsUser: 0`.
 - One node. Postgres, Redis and Chroma are single-replica Deployments, and the backups are on
   the same disk as the database (losing the disk loses both).

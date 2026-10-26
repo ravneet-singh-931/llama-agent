@@ -63,7 +63,7 @@ All numbers below were measured on 2026-10-25 against the live app (Groq free ti
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 563 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 571 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
 | **Cost** | ≈ $0.23 at Groq list prices for the 30 graded agent answers ($0 on the free tier) | token counts × list prices, per case in the eval report |
 | **Bugs found and fixed** | 17 fixed, with tests or before/after numbers | [incident log](#-bugs-found-and-fixed) |
 
@@ -288,6 +288,7 @@ version that fixed it and a test or a before/after number as proof; details are 
 | 15 | "Avg Response Time" and the latency alerts never saw a slow chat | The middleware stopped the timer when the headers were ready, before a streamed answer even started | Time to the last byte of the body; chat SLOs per route (v3.5.3) | `test_chat_slo_metrics.py::test_streamed_response_time_is_measured_to_the_end_of_the_body`: a 2.0 s stream was recorded as 0.002 s, now 2.008 s |
 | 16 | Nightly Postgres backup failed 3 days in a row | The PC is off at 02:00, so the missed job ran at boot, 13 s after Postgres started and before it accepted connections | Wait for `pg_isready` (up to 5 min) before `pg_dump` (v3.5.4) | `test_k8s_ops.py`; Postgres scaled to 0: the job waited and finished when it was back; restore drill: same row counts as the live DB ([checks](docs/KUBERNETES_CHECKS.md)) |
 | 17 | The autoscalers could never scale | No metrics-server in the cluster, so both HPAs read `cpu: <unknown>` | Vendored metrics-server v0.9.0 (`k8s/metrics-server.yaml`) (v3.5.4) | `kubectl get hpa`: `<unknown>/70%` → `3%/70%` |
+| 18 | Uploading a 65 KB .docx returned HTTP 502 | One document question made the ONNX reranker score 16 long passages in one batch (~940 MB); onnxruntime kept that memory, so the API pod sat at ~1.2 GB and the upload's embeddings (~420 MB) pushed it over the 1.5 GiB limit (OOMKilled). Older than v3.5.5: old pods also reached 1288 MB | Reranker batch 16 → 4 (v3.5.5) | Prometheus: pod 261 → 1221 MB after one question, killed at the upload. Reranker alone, 8 questions in a row: 1019 MB → 354 MB. Live after the fix: 481 / 627 MB max, 0 restarts. RAG eval unchanged. `test_reranker_memory.py` ([checks](docs/KUBERNETES_CHECKS.md)) |
 
 **Operations runbook items** (no code change): a kubelet image pull that hung was fixed by
 pulling with `crictl pull` and deleting the stuck pods; Prometheus uses a ReadWriteOnce volume,
@@ -633,6 +634,7 @@ repo).
 | 7 | **HPA / PDB / quotas / NetworkPolicies** | `k8s/api-hpa.yaml`, `k8s/poddisruptionbudgets.yaml`, `k8s/resourcequota.yaml`, `k8s/networkpolicy.yaml` | ✅ manifest | metrics-server (for HPA); enable `NETWORK_POLICY=true` to enforce |
 | 8 | **CI → cloud deploy** | `.github/workflows/main.yml` deploy jobs run real `kubectl apply` (guarded by `KUBE_CONFIG`) | ✅ manifest | A base64 `KUBE_CONFIG` repo secret + pre-created runtime Secrets |
 | 9 | **Paid / multi-provider LLM** | `modules/model_tiers.py` provider chain + fallback; `LLMConfig.provider_chain`; offline tests | 🔧 scaffold | Paid provider API keys (OpenAI/Anthropic); set `LLM_PROVIDER_CHAIN` |
+| 10 | Containers don't run as root | Dockerfile `USER 1000:1000` (code stays root-owned, read-only for the app); `securityContext` in the api, mcp-server, web and frontend Deployments: `runAsNonRoot`, no privilege escalation, drop ALL capabilities, `RuntimeDefault` seccomp | ✅ v3.5.5: all 4 app Deployments pass the `restricted` Pod Security level (server dry run); data and monitoring pods don't yet | Nothing |
 
 ### Activating the scaffolded points
 
@@ -805,8 +807,8 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.5.3):** 563 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
-27 test modules. The 4 skipped tests need the reranker model file, which CI downloads
+**Current status (v3.5.5):** 571 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+29 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
 the Phoenix span-instrumentation path, the Point 9 multi-provider chain/fallback logic, and
@@ -931,7 +933,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 563 passed, 4 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 571 passed, 4 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89
@@ -981,6 +983,8 @@ kubectl -n llama-agent exec deploy/prometheus -- wget -qO- 'http://localhost:909
 - **Streaming endpoint gaps.** `/chat/stream` (used by the main UI) skips the input
   sanitizer, the prompt-injection heuristic and the in-app business/SLA metrics;
   Prometheus request metrics and Phoenix traces do cover it.
+- **Pod Security:** only the 4 app Deployments pass the `restricted` level. Postgres, Redis, Chroma, Phoenix, Grafana, Loki, Prometheus, Promtail and node-exporter don't (Grafana, Loki and Prometheus run as root on purpose; node-exporter and Promtail need host access). Container filesystems are not read-only: local Chroma and the memory files write inside `/app`.
+- **`replicas: 2` in `k8s/api.yaml`:** every `kubectl apply` resets the API pod count until the HPA corrects it.
 
 ---
 

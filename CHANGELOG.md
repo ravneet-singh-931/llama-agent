@@ -26,6 +26,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description, with the chat and Grafana screenshots as clickable thumbnails; shorter
   scope note.
 
+## [3.5.5] - 2026-10-26
+
+### Security
+- **App containers no longer run as root.** The Python image runs as `app` (uid 1000, the
+  usual host uid, so docker-compose bind mounts stay writable). The code in `/app` stays
+  root-owned, so the app can't change it. Only the folders it writes to (found with a live
+  check of the pods and a grep of the code) belong to it: data, memory, backups, migrations,
+  logs, uploads and `config/*.json`. The embedding model cache moved from `/root/.cache` to
+  `/home/app/.cache` (still baked in; works with no network).
+- **Kubernetes enforces it:** the api, mcp-server, web and frontend Deployments set
+  `runAsNonRoot`, `allowPrivilegeEscalation: false`, drop ALL capabilities and use the
+  `RuntimeDefault` seccomp profile. All 4 pass the `restricted` Pod Security level (server
+  dry run). The frontend keeps its image user (nextjs, uid 1001).
+
+### Fixed
+- **Uploads returned HTTP 502: the API pod was OOMKilled.** One document question made the
+  ONNX reranker score 16 long passages in one batch (~940 MB). onnxruntime keeps that memory,
+  so the pod stayed at ~1.2 GB and the next upload's embeddings (~420 MB) pushed it over the
+  1.5 GiB limit. Found while testing the non-root change; Prometheus shows the old root pods
+  reached 1288 MB too, so the bug is older. Reranker batch 16 -> 4: the reranker alone peaks
+  at 354 MB instead of 1019 MB over 8 questions in a row, at the same speed, with the same RAG
+  eval numbers. Live pods after the fix: 481 / 627 MB max, 0 restarts.
+
+### Tests
+- `tests/test_nonroot.py` (6) and `tests/test_reranker_memory.py` (2): 571 passed, 4 skipped.
+
 ## [3.5.4] - 2026-10-26
 
 Found by checking the live cluster ([docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md)).
