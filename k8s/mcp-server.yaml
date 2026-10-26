@@ -89,8 +89,19 @@ spec:
       # PHOENIX_PORT=tcp://...) - Services named redis/postgres/phoenix would
       # otherwise inject them and clobber real config. DNS names still work.
       enableServiceLinks: false
+      securityContext:            # v3.5.5: never run as root
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: mcp-server
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           # image: MCP server image (same code as API, but separate tag)
           #   - Built by CI as ravneet231/llama-agent-mcp-server:v7
           #   - Pinned :v7 (Point 4)

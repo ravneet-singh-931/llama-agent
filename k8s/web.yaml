@@ -78,8 +78,19 @@ spec:
       # PHOENIX_PORT=tcp://...) - Services named redis/postgres/phoenix would
       # otherwise inject them and clobber real config. DNS names still work.
       enableServiceLinks: false
+      securityContext:            # v3.5.5: never run as root
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: web
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: ravneet231/llama-agent:v7  # SAME image as API!
           imagePullPolicy: IfNotPresent
 

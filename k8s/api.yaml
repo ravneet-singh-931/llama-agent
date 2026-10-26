@@ -97,8 +97,19 @@ spec:
       # preStop (10s) + graceful stream drain (120s) + margin. Kubernetes
       # SIGKILLs the pod when this runs out, so it must exceed both.
       terminationGracePeriodSeconds: 150
+      securityContext:            # v3.5.5: never run as root
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: api  # Container name
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
 
           # image: Docker image for the API
           #   - Built by CI (.github/workflows/main.yml) on every main push
