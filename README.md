@@ -63,7 +63,7 @@ All numbers below were measured on 2026-10-25 against the live app (Groq free ti
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 571 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 574 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
 | **Cost** | ≈ $0.23 at Groq list prices for the 30 graded agent answers ($0 on the free tier) | token counts × list prices, per case in the eval report |
 | **Bugs found and fixed** | 17 fixed, with tests or before/after numbers | [incident log](#-bugs-found-and-fixed) |
 
@@ -807,8 +807,8 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.5.5):** 571 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
-29 test modules. The 4 skipped tests need the reranker model file, which CI downloads
+**Current status (v3.5.6):** 574 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+30 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
 the Phoenix span-instrumentation path, the Point 9 multi-provider chain/fallback logic, and
@@ -933,7 +933,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 571 passed, 4 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 574 passed, 4 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89
@@ -985,6 +985,13 @@ kubectl -n llama-agent exec deploy/prometheus -- wget -qO- 'http://localhost:909
   Prometheus request metrics and Phoenix traces do cover it.
 - **Pod Security:** only the 4 app Deployments pass the `restricted` level. Postgres, Redis, Chroma, Phoenix, Grafana, Loki, Prometheus, Promtail and node-exporter don't (Grafana, Loki and Prometheus run as root on purpose; node-exporter and Promtail need host access). Container filesystems are not read-only: local Chroma and the memory files write inside `/app`.
 - **`replicas: 2` in `k8s/api.yaml`:** every `kubectl apply` resets the API pod count until the HPA corrects it.
+- **The Next.js UI doesn't use the WebSocket endpoint:** the API serves `/ws/ticket` → `/ws/x` (user-id handling is tested in `test_multitenancy.py`), but the UI chats over SSE and `getWsUrl` in `frontend/src/lib/api.ts` has no callers.
+- **docker-compose not re-run since v3.5.5:** Kubernetes (kind) is the deployment that runs and is checked. The Compose files are kept, but the stack wasn't started again after the non-root change (one 7.8 GB machine can't run both).
+- **Network policy is per namespace, not per service:** default-deny plus `allow-intra-namespace`, so any pod in `llama-agent` can reach any other. The ingress controller can't reach Chroma, and nothing outside the namespace can.
+- **14 open dependency advisories** (pip-audit on the v3.5.6 image, down from 27):
+  - `chromadb` 1.5.9, 5 advisories, no fixed release yet. The code-injection ones run in Chroma's Python server (this stack runs Chroma's Rust server) or in a client reading a poisoned collection config, which needs write access to Chroma. The cross-tenant ones are about Chroma's own tenants and RBAC; the app keeps users apart with an owner filter on every query (RAG eval: 0 cross-user leaks).
+  - `transformers` 4.57.6, 9 advisories. Only pulled in by `llama-index-llms-openai-like`; the app never imports it (embeddings and the reranker run on ONNX).
+  - Same audit, other scans: Bandit 0 High (4 Medium, all B104, the default host 0.0.0.0 that servers inside containers need), flake8 no real errors (102 style warnings), MCP server tests 17/17.
 
 ---
 

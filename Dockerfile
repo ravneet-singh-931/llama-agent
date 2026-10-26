@@ -87,7 +87,7 @@ COPY requirements.txt .
 #   - `--no-cache-dir` = Don't cache pip downloads (saves image size)
 #   - `-r requirements.txt` = Install all packages listed in file
 #   - This layer is cached unless requirements.txt changes
-#   - Note: mcp<2 and fastmcp are now in requirements.txt (pinned), so no separate install needed
+#   - Note: mcp<2 is in requirements.txt (pinned), so no separate install needed
 RUN pip install --no-cache-dir -r requirements.txt
 
 # RAG reranker model (ONNX cross-encoder, ~23 MB, no PyTorch)

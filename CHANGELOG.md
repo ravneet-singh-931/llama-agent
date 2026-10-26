@@ -42,6 +42,17 @@ tests and read-only checks of the live cluster).
 - `/health`, the OpenAPI docs and the config reported version 3.0.0. They now report 3.5.6,
   and a test fails when they don't match the newest version in this file.
 
+### Tests
+- New `tests/test_version_and_deps.py` (3 tests): the version matches this file, fastmcp is
+  not in requirements.txt, and pip is upgraded (>= 26.2) before `USER`. Full suite 574 passed,
+  4 skipped; MCP server tests 17/17 without fastmcp; pip-audit 27 -> 14 findings; retrieval
+  eval unchanged (hit@6 0.921, 0 cross-user leaks).
+
+### Docs
+- README Known limits: WebSocket not used by the UI, Compose not re-run, per-namespace network
+  policy, the 14 open advisories and why they don't apply. Fixed a stale fastmcp comment in
+  the Dockerfile.
+
 ## [3.5.5] - 2026-10-26
 
 ### Security
