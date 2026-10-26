@@ -65,6 +65,13 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
+# Non-root user (v3.5.5). uid 1000 matches the usual host user, so the
+# docker-compose bind mounts (./data, ./logs, ./uploads) stay writable.
+# The code in /app stays owned by root: the app can't modify its own code.
+RUN groupadd --gid 1000 app \
+    && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/app --shell /usr/sbin/nologin app
+ENV HOME=/home/app
+
 # Set working directory inside image to /app
 #   - All subsequent COPY, RUN, CMD will be relative to /app
 #   - If /app doesn't exist, Docker creates it
@@ -100,14 +107,17 @@ COPY . .
 # Pre-download the ChromaDB ONNX embedding model (all-MiniLM-L6-v2) at BUILD time
 #   - Why? At runtime, first boot would download ~80MB model (slow, especially on k8s)
 #   - By downloading at build time, runtime pods start FAST (model already in image)
-#   - CI has fast network, so build is quick; model lands in /root/.cache/chroma
+#   - CI has fast network, so build is quick; model lands in /home/app/.cache/chroma
 #   - `CHROMA_CACHE_DIR` = Where ChromaDB looks for cached models at runtime
 #   - `ONNXMiniLM_L6_V2().embed_with_retries(['warmup'])` = Trigger download
 #   - `rm -rf /tmp/chromadb*` = Clean up temp files
 #   - `true` = Ensure command succeeds even if cleanup fails
-ENV CHROMA_CACHE_DIR=/root/.cache/chroma
+ENV CHROMA_CACHE_DIR=/home/app/.cache/chroma
+# Warm the model cache as the app user so it lands in /home/app/.cache
+USER 1000:1000
 RUN python -c "from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2; ONNXMiniLM_L6_V2().embed_with_retries(['warmup'])" \
     && rm -rf /tmp/chromadb* 2>/dev/null; true
+USER root
 
 # Fail the build if the reranker model can't load or ranks a relevant
 # passage below an irrelevant one (catches a broken model or tokenizer).
@@ -117,7 +127,14 @@ RUN python -c "from modules.rag_optimizations import OnnxCrossEncoder as E; q='W
 #   - `mkdir -p` = Create dirs, no error if exists
 #   - `logs`, `data`, `documents`, `uploads` = Used by app for storage
 #   - These are also mounted as volumes in docker-compose.yml for persistence
-RUN mkdir -p logs data documents uploads
+# Folders the app writes to at runtime (found by a live check on the pods
+# and a grep of the code): data/chromadb (local Chroma), memory/ (conversation
+# and fact JSON), backups/ + migrations/ (database_improvements.py),
+# config/*.json (feature flags), logs/, uploads/. Only these belong to the app user.
+RUN mkdir -p logs data documents uploads memory backups migrations \
+    && chown -R 1000:1000 logs data documents uploads memory backups migrations \
+    && chown 1000:1000 config \
+    && (chown 1000:1000 config/*.json 2>/dev/null || true)
 
 # Expose ports (documentation, doesn't actually publish)
 #   - `EXPOSE 8000` = API (FastAPI)
@@ -134,6 +151,8 @@ EXPOSE 8000 8501 8765
 #   - Override examples:
 #     - `docker run <image> streamlit run app.py --server.port 8501 ...` (for web)
 #     - `docker run <image> python mcp_agents_server.py --transport sse ...` (for mcp)
+# Run as the non-root user (k8s also enforces runAsNonRoot)
+USER 1000:1000
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "120"]
 
 # 💡 LEARNER TIP: Docker Layer Caching
