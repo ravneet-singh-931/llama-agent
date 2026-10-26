@@ -391,7 +391,11 @@ class OnnxCrossEncoder:
 
     MODEL_FILES = ("model_quantized.onnx", "model.onnx")
 
-    def __init__(self, model_dir: str, max_length: int = 512, batch_size: int = 16):
+    # batch_size 4 (was 16), v3.5.5: peak memory grows with the batch. Measured:
+    # 16 pairs x 512 tokens ~940 MB, and onnxruntime keeps that peak reserved, so one
+    # chat question lifted an API pod from ~260 MB to ~1.2 GB and the next upload hit
+    # the 1.5 GiB limit (OOMKilled). Same scores: tests/test_reranker_memory.py.
+    def __init__(self, model_dir: str, max_length: int = 512, batch_size: int = 4):
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
