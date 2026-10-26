@@ -38,3 +38,27 @@ def test_deployment_security_context(fname, name):
         csc = c["securityContext"]
         assert csc["allowPrivilegeEscalation"] is False
         assert csc["capabilities"]["drop"] == ["ALL"]
+
+
+def _deployment(name):
+    for f in sorted((ROOT / "k8s").glob("*.yaml")):
+        try:
+            docs = list(yaml.safe_load_all(f.read_text()))
+        except yaml.YAMLError:
+            continue
+        for x in docs:
+            if isinstance(x, dict) and x.get("kind") == "Deployment" \
+                    and x.get("metadata", {}).get("name") == name:
+                return x
+    raise AssertionError(name + " Deployment not found")
+
+
+def test_frontend_security_context():
+    """The Next.js image already runs as nextjs (uid 1001); k8s now enforces it."""
+    pod = _deployment("llama-agent-frontend")["spec"]["template"]["spec"]
+    psc = pod["securityContext"]
+    assert psc["runAsNonRoot"] is True and psc["runAsUser"] == 1001
+    assert psc["seccompProfile"]["type"] == "RuntimeDefault"
+    for c in pod["containers"]:
+        assert c["securityContext"]["allowPrivilegeEscalation"] is False
+        assert c["securityContext"]["capabilities"]["drop"] == ["ALL"]
