@@ -8,6 +8,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A ceiling on what one user can spend.** `llm_guard` has always bounded
+  tokens per *minute*, globally — nothing bounded a single tenant across runs,
+  so one client looping a `@team` request could consume the whole organisation
+  quota while the guard kept obliging, minute after minute. `AGENT_USER_TOKEN_BUDGET`
+  (per `AGENT_USER_BUDGET_WINDOW`, default 24 h) is checked at `/chat/stream`
+  and refuses with a normal SSE message instead of calling the model. Opt-in:
+  0, the default, disables it.
+- **PII redaction on the way *out*.** `modules.pii.redact` ran in two logging
+  paths and nowhere else, so a model echoing an SSN or card number out of an
+  uploaded document sent it straight to the browser. The three `/chat/stream`
+  paths now pass tokens through `StreamRedactor`, which holds back enough text
+  that a number split across two chunks is still redacted whole — the cut is
+  made at a digit-run boundary, never a fixed offset.
+- **A token ceiling inside the tool loop.** `_MAX_TOOL_ROUNDS` bounds rounds and
+  `_MAX_IDENTICAL_CALLS` bounds repeats, but neither bounds *size*: every round
+  resends the conversation plus the tool results. `AGENT_MAX_TOOL_TOKENS`
+  (default 48 000) stops before paying for a round that would exceed it and
+  tells the model to answer from what it has.
+- **Spans for tool calls and for eval cases.** `_TOOL_SECONDS` was a histogram,
+  so a slow `web_search` was a gap in a Phoenix trace rather than an event you
+  could open. Tool calls are now spans, and each nightly eval case is a span
+  carrying its id, category and route — a failing case has a trace, not just an
+  answer string.
+- **`PROMPT_VERSION` / `prompt_fingerprint` in eval reports.** `git_sha` says
+  which commit produced a report, not which *prompt*. Reports now carry a hash
+  of the prompts actually in force, and `compare()` reports `prompt_changed` so
+  a diff across a prompt edit is labelled as such.
+- **SSRF guard in `web_tools`.** `_assert_http` validated the scheme only.
+  `http://169.254.169.254/latest/meta-data/` is a valid https URL and returns
+  the pod's cloud credentials. Private, loopback and link-local destinations are
+  now refused. Not currently reachable (URLs are fixed endpoints and input is
+  query-encoded) — this closes the hole before a refactor opens it.
+- **Tests for the citation wiring**, which shipped with unit tests for
+  `modules/citations.py` and none for `_check_doc_citations` in `api.py`.
+
+### Changed
+- **The cost ledger is now the Prometheus counter, and `CostTracker` is gone.**
+  Costs were recorded twice: an in-memory `CostTracker` dict behind
+  `/monitoring/dashboard`, and the `llama_agent_llm_cost_usd_total` counter
+  Grafana reads. The dict was per-process, so replicas disagreed and a restart
+  erased it. The pricing table moved to `modules.prometheus_metrics.PRICING`,
+  the dashboard renders from the counter, and per-user spend is a real counter
+  (`llama_agent_llm_cost_usd_by_user_total`, bucketed past 500 users) instead
+  of a dict. **124 lines deleted.**
+- **A single TracerProvider.** `modules/advanced_rag.py` built its own provider
+  and called `trace.set_tracer_provider()`, which takes effect exactly once per
+  process: whichever module initialised first won and the other's spans were
+  dropped silently. It now reuses the installed tracer.
+
+### Fixed
+- **One `@team` step timeout is now one timeout, not one per future.**
+  `f.result(timeout=150)` was called in a loop, so the Nth future got 150 s *on
+  top of* the first N-1: a two-step level could block for 300 s, past
+  `AGENT_LATENCY_BUDGET` (180 s) and past the eval's 300 s case timeout. The
+  measured 309 s `team-library-api` run is exactly two step-timeouts. The
+  deadline is now shared across the level, and the pool is shut down with
+  `wait=False` so a fired timeout actually shortens the request.
+- **`_price()` referenced `os` without importing it.** The `NameError` was
+  swallowed by `except Exception: return 0.0`, so every call would have been
+  priced at zero — spend would read 0 forever and nothing would fail.
+- **Token totals in the cost summary unpacked the label tuple in the wrong
+  order**, reporting every token as output.
+
+### Earlier
+
+### Added
 - **`modules/citations.py` — the document-answer prompt's citation rule is
   now checked.** The prompt demands "cite the source for EVERY claim ... never
   cite a file that is not in the excerpts" and nothing verified either half.

@@ -78,6 +78,64 @@ def redact(text: str) -> str:
     return out
 
 
+# ------------------------------------------------------------------ streaming
+#
+# A token stream arrives in pieces, so an SSN or card number can straddle two
+# chunks ("4111 1111 1111" then "1111"). Redacting each chunk independently
+# would miss it. StreamRedactor holds back only as much text as the longest
+# possible match could still need, redacts the rest, and flushes at the end.
+#
+# It is deliberately conservative: holding back ~24 characters means a visible
+# delay of one or two tokens, never a leaked identifier.
+
+_STREAM_HOLDBACK = 24
+
+
+class StreamRedactor:
+    """Redact PII across a token stream without splitting a match."""
+
+    def __init__(self, holdback: int = _STREAM_HOLDBACK):
+        self._buf = ""
+        self._holdback = holdback
+        self.redactions = 0
+
+    def feed(self, chunk: str) -> str:
+        """Add a chunk, return the part that is safe to emit (possibly '').
+
+        The cut is made at the start of the trailing digit run, never at a
+        fixed offset. A fixed offset can land in the middle of a card number:
+        the emitted half ("4111 1111 1111") matches no pattern and the held
+        half (" 1111") matches none either, so the number leaks in two pieces.
+        Holding the whole run back means a match is only ever redacted whole.
+        """
+        if not chunk:
+            return ""
+        self._buf += chunk
+        cut = len(self._buf)
+        # Walk back over digits and the separators a number can contain.
+        limit = max(0, cut - self._holdback)
+        while cut > limit and (self._buf[cut - 1].isdigit()
+                               or self._buf[cut - 1] in " -"):
+            cut -= 1
+        if cut <= 0:
+            return ""
+        emit, self._buf = self._buf[:cut], self._buf[cut:]
+        cleaned = redact(emit)
+        if cleaned != emit:
+            self.redactions += 1
+        return cleaned
+
+    def flush(self) -> str:
+        """Release whatever is still held back (call once, at the end)."""
+        emit, self._buf = self._buf, ""
+        if not emit:
+            return ""
+        cleaned = redact(emit)
+        if cleaned != emit:
+            self.redactions += 1
+        return cleaned
+
+
 def redact_dict(obj, _depth: int = 0) -> object:
     """Recursively redact strings inside a dict/list structure.
 

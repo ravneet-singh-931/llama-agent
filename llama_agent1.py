@@ -262,17 +262,35 @@ class GroqLLM(LLM):
         try:
             from modules.prometheus_metrics import record_llm_usage
             get = (lambda k: usage.get(k)) if isinstance(usage, dict) else (lambda k: getattr(usage, k, 0))
-            record_llm_usage(self.model, get("prompt_tokens") or 0, get("completion_tokens") or 0,
-                             component=self.component)
+            tin, tout = get("prompt_tokens") or 0, get("completion_tokens") or 0
+            record_llm_usage(self.model, tin, tout, component=self.component)
+            # Charge the same tokens to this subject's budget window, so
+            # /chat/stream can refuse the next request when it is spent.
+            from modules import llm_guard
+            llm_guard.record_spend(tin + tout)
+        except Exception:
+            pass
+
+    def _record_call_seconds(self, start: float, stream: bool = False) -> None:
+        """Time ONE model call. The agent/chat histograms mix model time with
+        tool time and trimming, so they cannot answer "is the provider slower
+        today?". Never raises."""
+        try:
+            from modules.prometheus_metrics import record_llm_call_seconds
+            record_llm_call_seconds(self.model, time.monotonic() - start,
+                                    component=getattr(self, "component", "other"),
+                                    stream=stream)
         except Exception:
             pass
 
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
+        start = time.monotonic()
         response = self._client.chat.completions.create(
             model=self.model,
             messages=self._format_messages(messages),
             **kwargs,
         )
+        self._record_call_seconds(start, stream=False)
         self._record_usage(getattr(response, "usage", None))
         return self._parse_response(response)
 
@@ -296,6 +314,7 @@ class GroqLLM(LLM):
             **kwargs,
         )
         def generate():
+            start = time.monotonic()
             for chunk in response:
                 # Groq reports token usage on the final chunk (x_groq.usage);
                 # that chunk may carry no choices at all.
@@ -310,6 +329,8 @@ class GroqLLM(LLM):
                         text=choices[0].delta.content,
                         raw=chunk,
                     )
+            # Time to consume the stream, recorded once when it drains.
+            self._record_call_seconds(start, stream=True)
         return generate()
 
     def stream_complete(self, prompt: str, formatted: bool = False, **kwargs: Any) -> CompletionResponseGen:

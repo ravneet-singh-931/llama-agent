@@ -16,6 +16,8 @@ import json
 import logging
 import os
 import re
+import ipaddress
+import socket
 import urllib.parse
 import urllib.request
 
@@ -40,16 +42,71 @@ _MAX_QUERY_CHARS = int(os.getenv("WEB_MAX_QUERY_CHARS", "400") or 400)
 _log = logging.getLogger("llama_agent.web_tools")
 
 
+# Addresses a request must never reach. Today every URL here is a fixed
+# search-API endpoint and user input is only query-encoded, so this is not
+# currently reachable -- but the guard was scheme-only, and one refactor that
+# lets a model or user supply a URL would turn it into an SSRF hole
+# (169.254.169.254 is the cloud metadata endpoint; 127.0.0.1 is this pod).
+_PRIVATE_NETWORKS = (
+    ipaddress.ip_network("0.0.0.0/8"),        # "this" network
+    ipaddress.ip_network("10.0.0.0/8"),       # RFC1918
+    ipaddress.ip_network("100.64.0.0/10"),    # carrier-grade NAT
+    ipaddress.ip_network("127.0.0.0/8"),      # loopback
+    ipaddress.ip_network("169.254.0.0/16"),   # link-local / cloud metadata
+    ipaddress.ip_network("172.16.0.0/12"),    # RFC1918
+    ipaddress.ip_network("192.168.0.0/16"),   # RFC1918
+    ipaddress.ip_network("::1/128"),          # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),         # IPv6 unique-local
+    ipaddress.ip_network("fe80::/10"),        # IPv6 link-local
+)
+
+_PRIVATE_HOSTNAMES = ("localhost", "localhost.localdomain", "metadata", "metadata.google.internal")
+
+
+def _is_private_host(host: str) -> bool:
+    """True when `host` (a name or literal IP) resolves to a non-public address."""
+    host = (host or "").strip().strip("[]").lower().rstrip(".")
+    if not host:
+        return True
+    if host in _PRIVATE_HOSTNAMES or host.endswith(".localhost"):
+        return True
+    try:
+        return any(ipaddress.ip_address(host) in n for n in _PRIVATE_NETWORKS)
+    except ValueError:
+        pass                       # not an IP literal -> resolve it
+    try:
+        for info in socket.getaddrinfo(host, None):
+            addr = info[4][0]
+            try:
+                if any(ipaddress.ip_address(addr) in n for n in _PRIVATE_NETWORKS):
+                    return True
+            except ValueError:
+                continue
+    except OSError:
+        # Unresolvable. Do not fail closed here: the caller is about to make
+        # the request anyway and will get the real DNS error, which is more
+        # useful than "blocked". Private literals above are still caught.
+        return False
+    return False
+
+
 def _assert_http(url: str) -> None:
-    """Refuse anything but plain http/https URLs.
+    """Refuse anything but a public http/https URL.
 
     Defense-in-depth for the urlopen calls below: user input never reaches
     the URL itself (it is only ever query-encoded), and this guard makes it
     impossible for a file:/ or custom scheme to be opened by mistake.
+
+    It also refuses private destinations. Scheme validation alone does not
+    stop SSRF: ``http://169.254.169.254/latest/meta-data/`` is a perfectly
+    valid https URL, and it returns the pod's cloud credentials.
     """
-    scheme = urllib.parse.urlparse(url).scheme.lower()
+    parsed = urllib.parse.urlparse(url)
+    scheme = parsed.scheme.lower()
     if scheme not in ("http", "https"):
         raise ValueError(f"Refusing to open non-http(s) URL: {scheme!r}://")
+    if _is_private_host(parsed.hostname or ""):
+        raise ValueError(f"Refusing to open a private/internal address: {parsed.hostname!r}")
 
 
 def _http_get(url: str, timeout: int = 15) -> str:

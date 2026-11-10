@@ -203,18 +203,103 @@ def execute(message: str, dsa: bool = True, timeout_s: float = 300.0) -> Dict:
     return {"route": r["route"], "answer": "".join(answer).strip(), "reasoning": reasoning}
 
 
+def _case_span(case: Dict):
+    """Context manager: one OTel span per eval case (no-op when untraced)."""
+    class _Null:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *exc):
+            return False
+
+    try:
+        from llama_agent1 import _AGENT_TRACER
+    except Exception:
+        return _Null()
+    if _AGENT_TRACER is None:
+        return _Null()
+
+    class _Span:
+        def __enter__(self):
+            try:
+                self._cm = _AGENT_TRACER.start_as_current_span(f"eval.{case.get('id', 'case')}")
+                span = self._cm.__enter__()
+                try:
+                    span.set_attribute("eval.case", case.get("id", ""))
+                    span.set_attribute("eval.category", case.get("category", ""))
+                    span.set_attribute("eval.route", case.get("route", ""))
+                except Exception:
+                    pass
+                return span
+            except Exception:
+                self._cm = None
+                return None
+
+        def __exit__(self, *exc):
+            try:
+                if getattr(self, "_cm", None) is not None:
+                    return self._cm.__exit__(*exc)
+            except Exception:
+                pass
+            return False
+
+    return _Span()
+
+
+def prompt_fingerprint() -> str:
+    """Stable id for the prompts in force during a run.
+
+    ``git_sha`` says which commit produced a report. That is not enough to
+    attribute a regression to a *prompt* change: several prompt edits can land
+    between two nightly runs, and a prompt can be overridden by env without the
+    commit changing. The hash is over the prompt text this process would
+    actually send, plus an operator-supplied PROMPT_VERSION label.
+    """
+    import hashlib
+
+    parts = [os.getenv("PROMPT_VERSION", "")]
+    try:
+        from modules.security_hardening import PROMPT_INJECTION_GUARD
+        parts.append(PROMPT_INJECTION_GUARD)
+    except Exception:
+        pass
+    try:
+        from modules.prompt_rules import agent_common_rules
+        parts.append(agent_common_rules())
+    except Exception:
+        pass
+    try:
+        from multi_agent import MultiAgentOrchestrator
+        orch = MultiAgentOrchestrator()
+        for name in sorted(orch.agents):
+            parts.append(f"{name}:{getattr(orch.agents[name], '_system', '')}")
+    except Exception:
+        pass
+    blob = "\n\x00\n".join(parts)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
 def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: bool = True,
              judge_fn: Optional[Callable] = None, dsa: bool = True,
              grounding_threshold: float = 0.7, judge_threshold: float = 3.5,
              timeout_s: float = 300.0) -> Dict:
     before = metric_totals()
     t0 = time.monotonic()
-    with ToolRecorder() as rec:
-        try:
-            out = executor(case["prompt"], dsa=dsa, timeout_s=timeout_s)
-        except Exception as e:
-            out = {"route": "error", "answer": "", "reasoning": [],
-                   "error": f"{type(e).__name__}: {e}"[:300]}
+
+    def _run():
+        with ToolRecorder() as rec:
+            try:
+                return rec, executor(case["prompt"], dsa=dsa, timeout_s=timeout_s)
+            except Exception as e:
+                return rec, {"route": "error", "answer": "", "reasoning": [],
+                             "error": f"{type(e).__name__}: {e}"[:300]}
+
+    # One span per case. A failing nightly case used to leave only its answer
+    # text and the judge's verdict in the report; the reasoning chain was
+    # captured and then flattened to a string. As a span the case is a trace
+    # you can open in Phoenix and read end to end.
+    with _case_span(case):
+        rec, out = _run()
     latency = round(time.monotonic() - t0, 2)
     usage = _delta(metric_totals(), before)
 
@@ -395,8 +480,18 @@ def compare(old: Dict, new: Dict) -> Dict:
     worse = [k for k, v in metrics.items() if v["delta"] is not None and (
         (v["delta"] < 0 and k in ("pass_rate", "judge_overall", "grounding_rate"))
         or (v["delta"] > 0 and k == "fabrication_rate"))]
+    # Which prompts were in force for each side. Without this a diff says a
+    # case flipped but not whether the prompt changed underneath it, which is
+    # the difference between "the model got worse" and "we edited the prompt".
+    prompt_changed = bool(
+        old.get("prompt_fingerprint")
+        and new.get("prompt_fingerprint")
+        and old["prompt_fingerprint"] != new["prompt_fingerprint"])
     return {"metrics": metrics, "category_pass_delta": cats, "regressed_cases": regressed,
             "fixed_cases": fixed,
+            "prompt_changed": prompt_changed,
+            "prompt_old": old.get("prompt_fingerprint", ""),
+            "prompt_new": new.get("prompt_fingerprint", ""),
             "regression": bool(regressed) or bool(worse) or any(v < 0 for v in cats.values())}
 
 
@@ -406,8 +501,13 @@ def render_compare(diff: Dict) -> str:
         lines.append(f"| {k} | {v['old']} | {v['new']} | {v['delta']} |")
     lines += ["", "Category pass-rate delta: " + json.dumps(diff["category_pass_delta"]),
               f"Fixed: {diff['fixed_cases'] or 'none'}",
-              f"Regressed: {diff['regressed_cases'] or 'none'}",
-              f"Verdict: {'REGRESSION' if diff['regression'] else 'no regression'}"]
+              f"Regressed: {diff['regressed_cases'] or 'none'}"]
+    if diff.get("prompt_changed"):
+        # Say this loudly: a diff taken across a prompt edit is comparing two
+        # different systems, so a "regression" may be the prompt, not the code.
+        lines.append(f"Prompts CHANGED between runs ({diff.get('prompt_old')} -> "
+                     f"{diff.get('prompt_new')}); attribute flips carefully.")
+    lines.append(f"Verdict: {'REGRESSION' if diff['regression'] else 'no regression'}")
     return "\n".join(lines)
 
 
@@ -463,7 +563,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     summary = summarize(results)
     report = {"created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-              "git_sha": os.getenv("GIT_SHA", ""), "args": vars(args),
+              "git_sha": os.getenv("GIT_SHA", ""),
+              # Which prompts, not just which commit -- see prompt_fingerprint.
+              "prompt_version": os.getenv("PROMPT_VERSION", ""),
+              "prompt_fingerprint": prompt_fingerprint(),
+              "args": vars(args),
               "summary": summary, "results": results}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:

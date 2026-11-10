@@ -520,19 +520,21 @@ class PhoenixTracer:
         if phoenix_enabled:
             try:
                 from opentelemetry import trace
-                from opentelemetry.sdk.trace import TracerProvider
-                from opentelemetry.sdk.trace.export import BatchSpanProcessor
-                from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-                
-                # Connect to Phoenix's OTLP endpoint
-                provider = TracerProvider()
-                exporter = OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces")
-                provider.add_span_processor(BatchSpanProcessor(exporter))
-                trace.set_tracer_provider(provider)
-                
+
+                # Do NOT install a second TracerProvider here.
+                #
+                # trace.set_tracer_provider() takes effect exactly once per
+                # process: a later call is ignored with a warning. This module
+                # used to build its own provider + OTLP exporter, so whichever
+                # of llama_agent1 / AdvancedRAG initialised first won and the
+                # other's spans were silently dropped -- two tracer providers
+                # in one process, no error, missing traces.
+                #
+                # Reuse whatever tracer is already installed. When nothing is
+                # registered yet, get_tracer() still returns a usable no-op
+                # tracer, so this module works either way.
                 self.otel_tracer = trace.get_tracer("llama-agent-rag")
-                print(f"[PHOENIX] Sending traces to {endpoint}")
-                print(f"[PHOENIX] Dashboard: {endpoint}")
+                print(f"[PHOENIX] Using the shared tracer; dashboard: {endpoint}")
             except Exception as e:
                 print(f"[PHOENIX] OTel setup failed: {e}")
                 self.enabled = False

@@ -223,6 +223,143 @@ def friendly_llm_error(error) -> str:
     return "⚠️ The AI model is unavailable right now. Please try again in a moment."
 
 
+# --------------------------------------------------------- per-tenant budget
+#
+# The ITPM window bounds tokens per MINUTE, globally. Nothing bounded a single
+# user or conversation across runs: one client looping a @team request could
+# consume the whole organisation quota and the guard would keep obliging,
+# minute after minute. This is that ceiling.
+#
+# Counted in input+output tokens rather than dollars so it keeps working with
+# no pricing table and no billing system. Redis-backed like the ITPM window so
+# every replica sees the same number; in-process when Redis is absent.
+#
+# A budget of 0 (the default) disables the check -- an existing deployment
+# that has not opted in behaves exactly as before.
+
+_BUDGET_ENV = "AGENT_USER_TOKEN_BUDGET"
+
+
+def user_budget() -> int:
+    """Tokens one user may spend per window. 0 disables the ceiling."""
+    try:
+        return max(0, int(os.getenv(_BUDGET_ENV, "0") or 0))
+    except ValueError:
+        return 0
+
+
+def budget_window_seconds() -> int:
+    try:
+        return max(60, int(os.getenv("AGENT_USER_BUDGET_WINDOW", "86400") or 86400))
+    except ValueError:
+        return 86400
+
+
+class SpendBudget:
+    """Tokens spent per subject (user or conversation) per window."""
+
+    def __init__(self, redis_client=None):
+        self._redis = redis_client
+        self._local: Dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _bucket(now: Optional[float] = None) -> int:
+        now = time.time() if now is None else now
+        return int(now // budget_window_seconds())
+
+    def _rkey(self, subject: str, bucket: int) -> str:
+        return f"llmops:budget:{subject}:{bucket}"
+
+    def used(self, subject: str) -> int:
+        if self._redis is not None:
+            try:
+                return int(self._redis.get(self._rkey(subject, self._bucket())) or 0)
+            except Exception as e:
+                _log.warning("SpendBudget Redis read failed, using local: %s", e)
+                self._redis = None
+        with self._lock:
+            return int(self._local.get(subject, 0))
+
+    def record(self, subject: str, tokens: int) -> None:
+        if tokens <= 0:
+            return
+        if self._redis is not None:
+            try:
+                key = self._rkey(subject, self._bucket())
+                pipe = self._redis.pipeline()
+                pipe.incrby(key, int(tokens))
+                pipe.expire(key, budget_window_seconds() * 2)
+                pipe.execute()
+                return
+            except Exception as e:
+                _log.warning("SpendBudget Redis write failed, using local: %s", e)
+                self._redis = None
+        with self._lock:
+            self._local[subject] = self._local.get(subject, 0) + int(tokens)
+
+
+_budget: Optional[SpendBudget] = None
+_budget_lock = threading.Lock()
+
+
+def get_budget() -> SpendBudget:
+    global _budget
+    with _budget_lock:
+        if _budget is None:
+            client = None
+            if os.getenv("REDIS_URL"):
+                try:
+                    from modules.memory import _connect_redis
+                    client = _connect_redis("LLM-GUARD")
+                except Exception:
+                    client = None
+            _budget = SpendBudget(client)
+        return _budget
+
+
+def budget_subject() -> str:
+    """Who the ceiling applies to: the authenticated/guest owner."""
+    try:
+        from modules.request_context import get_owner
+        return get_owner() or "anonymous"
+    except Exception:
+        return "anonymous"
+
+
+def over_budget(subject: Optional[str] = None) -> bool:
+    """True when `subject` (default: the bound owner) has spent its window.
+
+    The subject must be passed explicitly wherever the caller already knows
+    who the user is. /chat/stream checks the budget BEFORE it binds the
+    request owner (binding happens inside the SSE generator), so relying on
+    get_owner() there checked whichever request last bound it - measured: the
+    refusal never fired because the spend had been recorded against one
+    subject and the check read another.
+    """
+    limit = user_budget()
+    if not limit:
+        return False
+    return get_budget().used(subject or budget_subject()) >= limit
+
+
+def record_spend(tokens: int, subject: Optional[str] = None) -> None:
+    """Add tokens to `subject`'s window (default: the bound owner)."""
+    if not user_budget():
+        return
+    try:
+        get_budget().record(subject or budget_subject(), int(tokens or 0))
+    except Exception:
+        pass
+
+
+def budget_message() -> str:
+    limit = user_budget()
+    hours = budget_window_seconds() // 3600
+    return (f"You have reached this account's token budget "
+            f"({limit:,} tokens per {hours}h). Please try again later.")
+
+
 # ---------------------------------------------------------------- ITPM window
 
 class TokenWindow:

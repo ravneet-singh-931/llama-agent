@@ -253,130 +253,6 @@ class BusinessMetrics:
 # ============ COST TRACKING ============
 
 
-class CostTracker:
-    """
-    Tracks API costs and usage.
-    
-    Tracks:
-    - Groq API costs
-    - Token usage
-    - Cost per user
-    - Cost per query type
-    - Daily/monthly spending
-    """
-    
-    # Groq list prices, USD per 1M tokens (console.groq.com/docs/models,
-    # checked 2026-10). Override/extend with GROQ_PRICING='{"model": {"input":
-    # 0.1, "output": 0.2}}'; unknown models use GROQ_DEFAULT_PRICE_IN/OUT.
-    DEFAULT_PRICING = {
-        # STRONG tier default (modules/model_tiers.py). Preview model on Groq.
-        "qwen/qwen3.8-27b": {"input": 0.80, "output": 4.00},
-        "openai/gpt-oss-20b": {"input": 0.075, "output": 0.30},
-        "openai/gpt-oss-120b": {"input": 0.15, "output": 0.60},
-        "qwen/qwen3-32b": {"input": 0.29, "output": 0.59},
-        "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
-        "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
-    }
-
-    def __init__(self):
-        import threading
-        self._lock = threading.Lock()
-        self.pricing = {k: dict(v) for k, v in self.DEFAULT_PRICING.items()}
-        try:
-            extra = json.loads(os.getenv("GROQ_PRICING", "") or "{}")
-            for model, price in extra.items():
-                self.pricing[model] = {"input": float(price["input"]),
-                                       "output": float(price["output"])}
-        except Exception:
-            pass
-        self.default_price = {
-            "input": float(os.getenv("GROQ_DEFAULT_PRICE_IN", "0.15")),
-            "output": float(os.getenv("GROQ_DEFAULT_PRICE_OUT", "0.60")),
-        }
-
-        self.usage = {
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost": 0,
-            "daily_cost": defaultdict(float),
-            "cost_by_model": defaultdict(float),
-            "cost_by_user": defaultdict(float),
-            "cost_by_query_type": defaultdict(float),
-        }
-        
-        self.start_time = time.time()
-    
-    def record_usage(
-        self,
-        model: str,
-        input_tokens: int,
-        output_tokens: int,
-        user_id: str = "unknown",
-        query_type: str = "general",
-    ) -> float:
-        """Record API usage and return cost."""
-        price = self.pricing.get(model, self.default_price)
-        total_cost = ((input_tokens / 1_000_000) * price["input"]
-                      + (output_tokens / 1_000_000) * price["output"])
-        with self._lock:
-            self._apply(model, input_tokens, output_tokens, total_cost, user_id, query_type)
-        return total_cost
-
-    def _apply(self, model, input_tokens, output_tokens, total_cost, user_id, query_type):
-        # Update totals
-        self.usage["total_input_tokens"] += input_tokens
-        self.usage["total_output_tokens"] += output_tokens
-        self.usage["total_cost"] += total_cost
-        
-        # Update daily cost
-        today = datetime.now().strftime("%Y-%m-%d")
-        self.usage["daily_cost"][today] += total_cost
-        
-        # Update by model
-        self.usage["cost_by_model"][model] += total_cost
-        
-        # Update by user
-        self.usage["cost_by_user"][user_id] += total_cost
-        
-        # Update by query type
-        self.usage["cost_by_query_type"][query_type] += total_cost
-    
-    def get_cost_summary(self) -> Dict:
-        """Get cost summary."""
-        today = datetime.now().strftime("%Y-%m-%d")
-        
-        return {
-            "total_cost": round(self.usage["total_cost"], 4),
-            "today_cost": round(self.usage["daily_cost"].get(today, 0), 4),
-            "total_input_tokens": self.usage["total_input_tokens"],
-            "total_output_tokens": self.usage["total_output_tokens"],
-            "total_tokens": (
-                self.usage["total_input_tokens"] + 
-                self.usage["total_output_tokens"]
-            ),
-            "cost_by_model": dict(self.usage["cost_by_model"]),
-            "cost_by_query_type": dict(self.usage["cost_by_query_type"]),
-            "top_users_by_cost": dict(
-                sorted(
-                    self.usage["cost_by_user"].items(),
-                    key=lambda x: x[1],
-                    reverse=True,
-                )[:10]
-            ),
-        }
-    
-    def get_daily_costs(self, days: int = 30) -> Dict[str, float]:
-        """Get daily costs for the last N days."""
-        result = {}
-        for i in range(days):
-            date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-            result[date] = round(self.usage["daily_cost"].get(date, 0), 4)
-        return result
-
-
-# ============ SLA MONITORING ============
-
-
 class SLAMonitor:
     """
     Monitors Service Level Agreement (SLA) compliance.
@@ -491,7 +367,6 @@ class SLAMonitor:
 # Global instances
 alert_manager = AlertManager()
 business_metrics = BusinessMetrics()
-cost_tracker = CostTracker()
 sla_monitor = SLAMonitor()
 
 
@@ -525,12 +400,24 @@ alert_manager.add_notification_channel(webhook_notification)
 # ============ MONITORING DASHBOARD ============
 
 
+def _cost_summary() -> Dict:
+    """Costs, read from Prometheus rather than a second in-process ledger.
+
+    There used to be a CostTracker singleton here with its own dict. It was
+    per-process, so two replicas disagreed and a restart erased both, while
+    the same calls were ALSO going into the llama_agent_llm_cost_usd_total
+    counter that Grafana reads. Two numbers, one truth, no reconciliation.
+    """
+    from modules.prometheus_metrics import cost_summary
+    return cost_summary()
+
+
 def get_monitoring_dashboard() -> Dict:
     """Get all metrics for the monitoring dashboard."""
     return {
         "timestamp": datetime.now().isoformat(),
         "business": business_metrics.get_metrics(),
-        "costs": cost_tracker.get_cost_summary(),
+        "costs": _cost_summary(),
         "sla": sla_monitor.get_sla_status(),
         "alerts": alert_manager.get_recent_alerts(hours=24),
     }

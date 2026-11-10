@@ -21,6 +21,7 @@ Metrics exposed:
 
 import asyncio
 import json
+import os
 import time
 from prometheus_client import (
     Counter,
@@ -82,6 +83,33 @@ LLM_COST = Counter(
     "Estimated LLM spend in USD (Groq list prices)",
     ["model", "component"],
 )
+
+# Per-user spend. This used to be an in-memory dict in a CostTracker class, so
+# it was per-process: two replicas reported two different totals and a restart
+# erased both. A counter is shared through Prometheus with everything else, so
+# there is exactly one number.
+#
+# Cardinality: bounded by LLM_USERS_BUCKETS. A real user id is kept; anything
+# else is bucketed, because an unbounded user label is how a metrics endpoint
+# OOMs a Prometheus server.
+LLM_COST_BY_USER = Counter(
+    "llama_agent_llm_cost_usd_by_user_total",
+    "Estimated LLM spend in USD, by user (bucketed beyond LLM_USERS_BUCKETS)",
+    ["user"],
+)
+LLM_USERS_BUCKETS = 500
+
+
+def _user_label(user: str) -> str:
+    """Bound the user label so cardinality cannot grow without limit."""
+    user = (user or "").strip()
+    if not user:
+        return "anonymous"
+    if user == "anonymous" or len(LLM_COST_BY_USER._metrics) < LLM_USERS_BUCKETS:
+        return user
+    if user in LLM_COST_BY_USER._metrics:
+        return user
+    return "other"
 
 # Components and run outcomes are fixed sets (bounded label cardinality).
 LLM_COMPONENTS = ("research", "coder", "writer", "analyzer", "planner",
@@ -285,6 +313,60 @@ def record_tool_seconds(tool: str, seconds: float) -> None:
         pass
 
 
+def tool_span(name: str, seconds: float, ok: bool = True, detail: str = ""):
+    """Context manager emitting an OpenTelemetry span for one tool call.
+
+    The tool-call half of a run had only a duration histogram: in a Phoenix
+    trace a slow web_search was a gap between the LLM spans, not an event you
+    could open. This makes it a span, so a trace shows what the agent actually
+    did and which call was slow.
+
+    Yields the span (or None when tracing is not configured / not installed),
+    so a caller can attach further attributes. Never raises.
+    """
+    class _Null:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *exc):
+            return False
+
+    try:
+        from llama_agent1 import _AGENT_TRACER
+    except Exception:
+        return _Null()
+    if _AGENT_TRACER is None:
+        return _Null()
+
+    class _Span:
+        def __enter__(self):
+            try:
+                self._cm = _AGENT_TRACER.start_as_current_span(f"tool.{name}")
+                span = self._cm.__enter__()
+                try:
+                    span.set_attribute("tool.name", name)
+                    span.set_attribute("tool.seconds", round(max(0.0, seconds), 3))
+                    span.set_attribute("tool.ok", bool(ok))
+                    if detail:
+                        span.set_attribute("tool.detail", detail[:200])
+                except Exception:
+                    pass
+                return span
+            except Exception:
+                self._cm = None
+                return None
+
+        def __exit__(self, *exc):
+            try:
+                if getattr(self, "_cm", None) is not None:
+                    return self._cm.__exit__(*exc)
+            except Exception:
+                pass
+            return False
+
+    return _Span()
+
+
 # Citation checks on document answers. A non-zero invented_file rate means the
 # model is naming documents it was never shown -- the answer looks rigorously
 # sourced, which is exactly why it needs counting.
@@ -312,33 +394,169 @@ RAG_CRAG_VERDICTS = Counter(
 )
 
 
+# Groq list prices, USD per 1M tokens (console.groq.com/docs/models, checked
+# 2026-10). This table used to live on a separate CostTracker class, which
+# meant the numbers on Grafana and the numbers on /monitoring/dashboard could
+# disagree -- only one of them was computing a cost at all. One table now.
+# Override/extend with GROQ_PRICING='{"model": {"input": 0.1, "output": 0.2}}';
+# unknown models use GROQ_DEFAULT_PRICE_IN / GROQ_DEFAULT_PRICE_OUT.
+PRICING = {
+    "qwen/qwen3.8-27b": {"input": 0.80, "output": 4.00},      # strong tier
+    "openai/gpt-oss-20b": {"input": 0.075, "output": 0.30},   # fast tier
+    "openai/gpt-oss-120b": {"input": 0.15, "output": 0.60},
+    "qwen/qwen3-32b": {"input": 0.29, "output": 0.59},
+    "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
+    "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
+}
+
+
+# Latency of ONE model call. Agent/chat/tool latency already existed; the
+# model call itself did not, so "is the provider slower today?" had no answer
+# -- the agent histogram mixes model time with tool time and context trimming.
+LLM_CALL_SECONDS = Histogram(
+    "llama_agent_llm_call_seconds",
+    "Wall time of a single LLM completion call, by model, component and stream",
+    ["model", "component", "stream"],
+    # A chat call is sub-second to ~10 s; a @team step can take a minute. The
+    # buckets straddle both so p50 and p95 are usable without interpolation.
+    buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300),
+)
+
+
+def record_llm_call_seconds(model: str, seconds: float, component: str = "other",
+                            stream: bool = False) -> None:
+    """Time one completion call. Never raises."""
+    try:
+        LLM_CALL_SECONDS.labels(model=model or "unknown",
+                                component=_component(component),
+                                stream="true" if stream else "false").observe(max(0.0, seconds))
+    except Exception:
+        pass
+
+
+def _pricing_table() -> dict:
+    """PRICING plus any GROQ_PRICING override, computed once."""
+    table = dict(PRICING)
+    try:
+        for model, price in (json.loads(os.getenv("GROQ_PRICING", "") or "{}")).items():
+            table[model] = {"input": float(price["input"]), "output": float(price["output"])}
+    except Exception:
+        pass
+    return table
+
+
+def _price(model: str, input_tokens: int, output_tokens: int) -> float:
+    """USD for one call."""
+    try:
+        table = _pricing_table()
+    except Exception:  # never let pricing break a chat
+        return 0.0
+    price = table.get(model) or {
+        "input": float(os.getenv("GROQ_DEFAULT_PRICE_IN", "0.15")),
+        "output": float(os.getenv("GROQ_DEFAULT_PRICE_OUT", "0.60")),
+    }
+    return ((input_tokens / 1_000_000) * price["input"]
+            + (output_tokens / 1_000_000) * price["output"])
+
+
+def _cumulative(metric, **labels) -> float:
+    """Current value of a Prometheus counter child (0.0 when it does not exist).
+
+    Counters cannot be read with .get(), so the dashboard renderer below reads
+    the child's internal value instead of keeping a second ledger.
+    """
+    try:
+        child = metric.labels(**labels)
+        return float(getattr(child, "_value").get())
+    except Exception:
+        return 0.0
+
+
+def cost_by_model() -> dict:
+    """{model: usd} from the LLM_COST counter - the same series Grafana reads."""
+    out = {}
+    for model, comp in list(LLM_COST._metrics):
+        value = _cumulative(LLM_COST, model=model, component=comp)
+        if value:
+            out[model] = out.get(model, 0.0) + value
+    return out
+
+
+def cost_by_component() -> dict:
+    """{component: usd}; component is the per-step attribution dimension."""
+    out = {}
+    for model, comp in list(LLM_COST._metrics):
+        value = _cumulative(LLM_COST, model=model, component=comp)
+        if value:
+            out[comp] = out.get(comp, 0.0) + value
+    return out
+
+
+def cost_by_user() -> dict:
+    out = {}
+    for (user,) in list(LLM_COST_BY_USER._metrics):
+        value = _cumulative(LLM_COST_BY_USER, user=user)
+        if value:
+            out[user] = value
+    return out
+
+
+def cost_summary() -> dict:
+    """The cost block of /monitoring/dashboard, computed from Prometheus.
+
+    Replaces the old in-process CostTracker.get_cost_summary(). Same keys (so
+    the dashboard and its tests keep working), one store, correct across
+    replicas and restarts.
+    """
+    by_model = cost_by_model()
+    by_component = cost_by_component()
+    by_user = cost_by_user()
+    total_input = total_output = 0.0
+    # LLM_TOKENS labels are ordered ["model", "kind", "component"] -- unpack in
+    # that order. Getting it wrong silently reads every token as "output".
+    for model, kind, comp in list(LLM_TOKENS._metrics):
+        total = _cumulative(LLM_TOKENS, model=model, kind=kind, component=comp)
+        if kind == "input":
+            total_input += total
+        else:
+            total_output += total
+    total_cost = sum(by_model.values())
+    return {
+        "total_cost": round(total_cost, 4),
+        "total_input_tokens": int(total_input),
+        "total_output_tokens": int(total_output),
+        "total_tokens": int(total_input + total_output),
+        "cost_by_model": {k: round(v, 4) for k, v in by_model.items()},
+        "cost_by_query_type": {k: round(v, 4) for k, v in by_component.items()},
+        "top_users_by_cost": dict(sorted(by_user.items(), key=lambda x: x[1],
+                                         reverse=True)[:10]),
+    }
+
+
 def record_llm_usage(model: str, input_tokens: int, output_tokens: int,
                      component: str = "other") -> float:
-    """Record one LLM call's token usage in Prometheus + the CostTracker
-    (/monitoring/dashboard), labelled with the component that made the call.
-    Never raises - metrics must not break chat."""
+    """Record one LLM call's tokens and cost, labelled with the component.
+
+    This is the only place spend is recorded: the same counters feed Grafana
+    and the /monitoring/dashboard cost block (via cost_summary()), so the two
+    cannot disagree. Never raises - metrics must not break chat."""
     try:
         input_tokens = int(input_tokens or 0)
         output_tokens = int(output_tokens or 0)
         if not (input_tokens or output_tokens):
             return 0.0
-        from modules.advanced_monitoring import cost_tracker
+        comp = _component(component)
+        cost = _price(model, input_tokens, output_tokens)
+        LLM_TOKENS.labels(model=model or "unknown", kind="input", component=comp).inc(input_tokens)
+        LLM_TOKENS.labels(model=model or "unknown", kind="output", component=comp).inc(output_tokens)
+        LLM_COST.labels(model=model or "unknown", component=comp).inc(cost)
         try:
             from modules.request_context import get_owner
             user = get_owner() or "anonymous"
         except Exception:
             user = "anonymous"
-        # query_type=component is what makes per-step attribution real.
-        # CostTracker has bucketed by query_type since it was written, but
-        # nothing ever passed one, so cost_by_query_type was always empty in
-        # production -- you could see total spend and spend per user, but not
-        # which part of a @team run cost the money.
-        cost = cost_tracker.record_usage(model or "unknown", input_tokens, output_tokens,
-                                         user_id=user, query_type=_component(component))
-        comp = _component(component)
-        LLM_TOKENS.labels(model=model or "unknown", kind="input", component=comp).inc(input_tokens)
-        LLM_TOKENS.labels(model=model or "unknown", kind="output", component=comp).inc(output_tokens)
-        LLM_COST.labels(model=model or "unknown", component=comp).inc(cost)
+        if cost:
+            LLM_COST_BY_USER.labels(user=_user_label(user)).inc(cost)
         return cost
     except Exception:
         return 0.0
