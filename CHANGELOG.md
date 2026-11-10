@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The CD jobs no longer hang forever.** `deploy-staging` and `deploy-production` were pinned
+  to `runs-on: self-hosted`, but no self-hosted runner is registered for this repo, so the jobs
+  queued indefinitely — the workflow has no default job timeout. The previous run showed them
+  as `skipped` only because the `docker` job upstream was `skipped`, which hid it.
+
+  Both now use `ubuntu-latest` plus `timeout-minutes: 15`. Their existing
+  `✅ Check deploy is configured` gate already skips every kubectl step when
+  `KUBE_CONFIG`/`DOCKER_USERNAME` are absent, so the jobs report "cloud deploy skipped" and
+  pass in seconds instead of waiting on a runner that will never appear. Verified the gate
+  logic against all three cases (neither secret, one secret, both secrets).
+
+### Changed
+- **Extracted `modules/routing.py` from `api.py`.** The intent-routing rules (agent/team
+  prefixes, the Aho-Corasick keyword matcher, `route_multi_agent`, the name-memory helpers)
+  need no FastAPI app, database or vector store, so they now live in one 310-line module that
+  can be read and tested on its own. `api.py` re-exports every public name, so
+  `from api import route_multi_agent` and the eval imports are unchanged.
+
+  Verified by a differential test: 29 message cases through `route_multi_agent`,
+  `detect_agent_prefix`, `detect_team_prefix`, `extract_name_from_message` and
+  `is_name_question`, run on the old and new code, produced **byte-identical output**.
+
+### Removed
+- **`modules/cache.py` (504 lines).** Nothing imported it: no module, app or test referenced
+  `InMemoryCache`, `RedisCache`, `ResponseCache`, `QueryCache`, `EmbeddingCache` or the
+  `cached` decorator (0 hits outside the file itself). Caching in the live path comes from
+  `modules/rag.py`'s answer cache, `modules/rag_optimizations.SemanticCache` and
+  `api.py`'s `BoundedLRUCache`. The `integration` job's import smoke test now checks
+  `SemanticCache` instead.
+- **`TokenResponse`** (`api.py`) — a leftover from header-based auth; no route returned it and
+  cookie auth (`AuthSuccess`) replaced it.
+- **`.github/environments.yml`** — GitHub does not read environments from a committed file:
+  they live in Settings → Environments. The file protected nothing, and it named an approver
+  (`ravneet-png`) that does not own this repo.
+
+### Documentation
+- **README CI/CD status:** the old text said "GitHub Actions is currently not running for this
+  account" while pointing at a workflow that *was* running. It now states the real situation —
+  the CD jobs are parked on hosted runners and report "cloud deploy skipped" until a
+  self-hosted runner can reach the kind cluster.
+- **CONTRIBUTING:** dropped the `modules/cache.py` import example and the dead entry in the
+  project-structure tree.
+
 ### Documentation
 - **README: agent eval results** (26/30 passed, judge average 4.88 / 5), per category and agent
   with time and cost, and how the runs were done: three parts on v3.4.8, v3.5.1 and v3.5.2

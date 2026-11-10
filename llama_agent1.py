@@ -7,7 +7,6 @@ import asyncio
 import hashlib
 import os
 import datetime
-import math
 import threading
 import time
 from collections import OrderedDict
@@ -38,7 +37,7 @@ from llama_index.core.tools import FunctionTool
 # Import our custom modules
 from modules.prompt_rules import common_rules, chat_max_tokens
 from modules.memory import ConversationMemory, FactMemory
-from modules.rag import SimpleRAG, DocumentReader
+from modules.rag import SimpleRAG
 from modules.monitoring import AgentLogger, PerformanceMonitor
 from modules.secrets import get_secret
 from modules.security import safe_math_eval

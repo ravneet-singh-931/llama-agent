@@ -538,7 +538,7 @@ def display_sidebar():
         if uploaded_file:
             with st.spinner("Processing file..."):
                 # SECURITY: Validate file upload
-                from modules.security import validate_file_upload, sanitize_filename, get_upload_path
+                from modules.security import validate_file_upload, sanitize_filename
 
                 is_valid, error = validate_file_upload(
                     uploaded_file.name,

@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 class AgentLogger:
@@ -41,7 +41,10 @@ class AgentLogger:
             try:
                 with open(self.metrics_file, 'r') as f:
                     return json.load(f)
-            except:
+            except (OSError, ValueError):
+                # Missing/corrupt metrics file: fall through to the empty
+                # defaults below. OSError covers IO failures, ValueError
+                # covers json.JSONDecodeError.
                 pass
         
         return {
@@ -81,7 +84,9 @@ class AgentLogger:
                 try:
                     with open(self.interactions_file, 'r') as f:
                         interactions = json.load(f)
-                except:
+                except (OSError, ValueError):
+                    # Corrupt/unreadable history: start from an empty list
+                    # rather than lose this interaction.
                     interactions = []
             
             interactions.append(interaction)
@@ -132,7 +137,8 @@ class AgentLogger:
                 try:
                     with open(self.errors_file, 'r') as f:
                         errors = json.load(f)
-                except:
+                except (OSError, ValueError):
+                    # Corrupt/unreadable error log: start from an empty list.
                     errors = []
             
             errors.append(error_info)
@@ -173,7 +179,7 @@ class AgentLogger:
                 with open(self.interactions_file, 'r') as f:
                     interactions = json.load(f)
                 return interactions[-n:]
-            except:
+            except (OSError, ValueError):
                 return []
         return []
     
@@ -198,7 +204,10 @@ class AgentLogger:
                     "error_types": error_types,
                     "recent_errors": errors[-5:]
                 }
-            except:
+            except (OSError, ValueError, KeyError, TypeError):
+                # Unreadable file (OSError), bad JSON (ValueError), or an
+                # entry missing "error_type" (KeyError/TypeError): report the
+                # empty summary instead of breaking the stats endpoint.
                 pass
         return {"total_errors": 0, "error_types": {}, "recent_errors": []}
 

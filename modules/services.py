@@ -7,7 +7,7 @@ It uses dependency injection pattern for testability.
 
 from typing import Optional
 from modules.config import get_config, AppConfig
-from modules.database import get_db_manager, DatabaseManager
+from modules.database import DatabaseManager
 from modules.auth import jwt_manager, user_manager, JWTManager, UserManager
 from modules.websocket import get_ws_handler, WebSocketHandler
 

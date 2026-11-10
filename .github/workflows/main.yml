@@ -251,7 +251,7 @@ jobs:
           python -c "from modules.monitoring import AgentLogger, PerformanceMonitor; print('Monitoring OK')"
           python -c "from modules.vector_store import get_vector_store; print('Vector Store OK')"
           python -c "from modules.advanced_rag import ReRanker, SubQuestionEngine, RouterQueryEngine, AdvancedRAG; print('Advanced RAG OK')"
-          python -c "from modules.cache import InMemoryCache; print('Cache OK')"
+          python -c "from modules.rag_optimizations import SemanticCache; print('Semantic Cache OK')"
 
       - name: "\U0001F517 Test integration"
         env:
@@ -370,7 +370,16 @@ jobs:
   deploy-staging:
     name: "\U0001F3AA Deploy to Staging"
     needs: docker
-    runs-on: self-hosted
+    # Hosted runner, not self-hosted: no self-hosted runner is registered for
+    # this repo, and a job whose `runs-on` matches nothing sits in the queue
+    # forever (there is no default job timeout). The kind cluster lives on a
+    # developer PC that GitHub cannot reach, so the steps that would touch it
+    # are gated on the "Check deploy is configured" step below and skip
+    # cleanly when KUBE_CONFIG / DOCKER_USERNAME are absent. To deploy for
+    # real, register a self-hosted runner on the machine with the cluster,
+    # switch this back to `self-hosted`, and set those secrets.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash
@@ -494,7 +503,10 @@ jobs:
   deploy-production:
     name: "\U0001F3ED Deploy to Production"
     needs: deploy-staging
-    runs-on: self-hosted
+    # See the note on deploy-staging: hosted runner + the same gate, so this
+    # job reports "skipped" instead of queueing forever with no runner.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash

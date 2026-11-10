@@ -16,7 +16,7 @@ Usage:
 import os
 import sys
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(__file__))
 

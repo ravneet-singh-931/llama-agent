@@ -22,7 +22,6 @@ Tables (created by the app's SQL bootstrap):
 """
 
 import logging
-import os
 import uuid
 from typing import Any, Dict, List, Optional
 
