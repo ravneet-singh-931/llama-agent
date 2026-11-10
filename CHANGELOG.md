@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (easy 17 / medium 19 / hard 16 / adversarial 8) and `expected_tools` on cases
   that must search. Every asserted route was checked against the live router
   before being written down.
+- **Nightly eval workflow with a baseline diff** (`.github/workflows/nightly-evals.yml`).
+  The goldens need `GROQ_API_KEY` and a judge call per case, so they still
+  cannot gate a PR — but they ran *nowhere at all* before, which meant the
+  compare machinery in `evals/run.py` (built weeks earlier) had never produced
+  a diff. Runs at 03:17 UTC: executes the suite, downloads the previous run's
+  artifact, and calls `--compare --fail-on-regression`. Absolute pass rate is
+  not the signal — a one-case regression on Tuesday is noise in one report and
+  obvious in a diff. Missing baseline or missing key degrades to a notice, not
+  a red job.
 - **`min_words` check.** "Write an essay" graded on keywords alone passes a
   twelve-word answer that name-drops the right vocabulary. `checks.py` only had
   a ceiling. The offline gate now covers it in both directions.

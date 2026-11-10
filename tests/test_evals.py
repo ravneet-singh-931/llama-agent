@@ -246,3 +246,51 @@ def test_compare_ignores_cases_that_were_not_graded():
     diff = run.compare({"summary": run.summarize(old), "results": old},
                        {"summary": run.summarize(new), "results": new})
     assert diff["regressed_cases"] == []
+
+
+# ----------------------------------------------------- nightly delta semantics
+# The nightly workflow is only as good as compare(). These pin the four
+# behaviours the workflow's pass/fail decision depends on.
+
+def _report(sha, pass_map, latency=10.0, fab=0.0):
+    results = [{"id": k, "category": "coding", "passed": v, "graded": True,
+                "latency_s": latency} for k, v in pass_map.items()]
+    rate = 100 * sum(pass_map.values()) / len(pass_map)
+    return {"git_sha": sha, "created": sha, "results": results, "summary": {
+        "cases": len(results), "pass_rate": rate, "judge_overall": 4.0,
+        "grounding_rate": 0.9, "fabrication_rate": fab,
+        "latency_p50_s": latency, "latency_p95_s": latency,
+        "by_category": {"coding": {"cases": len(results), "pass_rate": rate}}}}
+
+
+BASE = {"a": True, "b": True, "c": False, "d": True}
+
+
+def test_compare_identical_runs_is_not_a_regression():
+    d = run.compare(_report("y", BASE), _report("t", BASE))
+    assert d["regression"] is False
+    assert d["regressed_cases"] == []
+
+
+def test_compare_flags_a_flipped_case_by_name():
+    d = run.compare(_report("y", BASE), _report("t", {**BASE, "a": False}))
+    assert d["regression"] is True
+    assert d["regressed_cases"] == ["a"]
+
+
+def test_compare_fixes_are_not_regressions():
+    """A run that improved must never fail the nightly job."""
+    d = run.compare(_report("y", BASE), _report("t", {**BASE, "c": True}))
+    assert d["regression"] is False
+    assert d["fixed_cases"] == ["c"]
+
+
+def test_compare_treats_slower_and_fabricated_more_as_worse():
+    slower = run.compare(_report("y", BASE, latency=10), _report("t", BASE, latency=15))
+    # Latency is reported as a delta but is NOT a regression on its own:
+    # a nightly run is allowed to be slower without failing CI.
+    assert slower["regression"] is False
+    assert slower["metrics"]["latency_p50_s"]["delta"] == 5
+    # More fabrication IS a regression.
+    fab = run.compare(_report("y", BASE, fab=0.0), _report("t", BASE, fab=8.0))
+    assert fab["regression"] is True
