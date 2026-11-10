@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`evals/gate.py` — the eval gate CI can actually afford.** Every prior PR ran
+  only `evals.rag_eval retrieval`, so prompt and routing regressions shipped
+  green: reorder a keyword group in `modules/routing.py` and "write me a blog
+  post" routes to `general` with all ten jobs passing. The agent goldens need
+  `GROQ_API_KEY` and a judge call per case, so they cannot gate a PR — but the
+  two layers beneath them are pure functions. The gate replays all 28 routed
+  dataset cases and 16 hand-built check fixtures with no key and no network, in
+  well under a second, and is wired into the `test` job. Verified both ways: a
+  sabotaged `route_multi_agent` fails 20 cases with exit 1, and a checker that
+  stops failing bad answers is caught too.
+- **`modules/pii.py` — SSN and card-number redaction on log writes.**
+  `monitoring.log_interaction` stored the user's message and the agent's reply
+  verbatim, and `AuditLogger._write_log` persisted user-supplied text to a file
+  and mirrored it to Redis. Anything a user pasted therefore outlived the
+  request in a log anyone with access could read. US SSNs and Luhn-valid card
+  numbers are now replaced with `[REDACTED]` on the way out; the agent still
+  reasons over the original text. The Luhn check is what keeps a 16-digit order
+  number intact — deliberately not a general PII classifier, because names and
+  emails cannot be told from ordinary words without destroying the log.
+- **Trajectory metrics in the eval report.** `avg_steps`, `total_redundant_steps`
+  (repeat `(tool, arguments)` calls) and `tool_recall` (cases whose declared
+  `expected_tools` were actually called). A run that succeeds in 3 tool calls
+  beats one that succeeds in 15, and nothing measured the difference before.
+
+### Changed
+- **The critic now reviews on a different model tier than the one that wrote
+  the answer.** A model checking its own output with the same weights agrees
+  with itself — it confidently passes exactly the errors it made. Falls back to
+  the agent's own tier if the alternate is rate-limited.
+- **The eval judge defaults to the strong tier.** On `@team` runs the agents
+  themselves run fast-tier, so a fast judge was the same model grading its own
+  reasoning. `EVAL_JUDGE_MODEL` still overrides, which is the better answer (a
+  different provider has no shared blind spots at all).
+- **`evals/run.py` imports routing from `modules.routing`, not `api`.** Same
+  functions, but `api` pulls in FastAPI and the whole app; the eval runner does
+  not need the web stack, and the offline gate must not depend on it.
+
 ### Fixed
+- **`web_search` can no longer be used to exfiltrate.** It is the app's only
+  outbound channel, which makes it the one realistic path for an indirect
+  prompt injection to ship data out. Queries over `WEB_MAX_QUERY_CHARS`
+  (default 400) are refused — a real query is well under 100 characters — and
+  content flagged `[INJECTION_SUSPECTED]` on a hand-off is refused rather than
+  forwarded verbatim.
+
 - **One hung agent can no longer hang an entire `@team` request.** `collaborate()`
   called `f.result()` with no timeout, so a wedged step blocked forever — and the
   budget guard only runs *between* DAG levels, so it could never catch it. Each

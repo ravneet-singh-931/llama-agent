@@ -120,7 +120,12 @@ def judge(case: Dict, answer: str, sources: List[str], client=None,
         if client is None:
             from multi_agent import InstrumentedGroqClient
             client = InstrumentedGroqClient(api_key=os.environ["GROQ_API_KEY"], component="judge")
-        model = model or os.getenv("EVAL_JUDGE_MODEL") or resolve_model("fast")
+        # Judge on the STRONG tier by default, not the fast one. On @team runs
+        # the agents themselves run fast-tier, so a fast judge is the same
+        # model checking its own reasoning -- it agrees with its own mistakes.
+        # Better still is a different provider (EVAL_JUDGE_MODEL), which the
+        # provider registry already supports.
+        model = model or os.getenv("EVAL_JUDGE_MODEL") or resolve_model("strong")
         messages = build_messages(case, answer, sources, today_str())
         for _ in range(2):  # one retry on unparsable output
             resp = client.chat.completions.create(

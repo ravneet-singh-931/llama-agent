@@ -73,6 +73,16 @@ jobs:
           path: rag-retrieval.json
           if-no-files-found: ignore
 
+      # The cheap tier of the eval suite. The agent goldens (evals/run.py) need
+      # GROQ_API_KEY and a judge call per case, so they cannot gate a PR -- but
+      # two layers underneath them are pure functions with no model in them:
+      # routing (modules/routing.py) and the answer checks (evals/checks.py).
+      # Both are where a silent regression hides: reorder a keyword group and
+      # "write me a blog post" routes to general, with every other job green.
+      # No key, no network, under a second.
+      - name: "\U0001F3AF Eval gate (offline: routing + answer checks)"
+        run: python -m evals.gate -v
+
       - name: "\U0001F4CA Upload coverage"
         if: matrix.python-version == '3.11'
         uses: codecov/codecov-action@v4

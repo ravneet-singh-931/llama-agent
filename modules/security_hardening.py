@@ -407,7 +407,18 @@ class AuditLogger:
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
     def _write_log(self, event: Dict) -> None:
-        """Write event to the local log file, in-memory mirror, and Redis."""
+        """Write event to the local log file, in-memory mirror, and Redis.
+
+        ``details`` can carry user-supplied text (a suspicious-input sample),
+        so it is redacted before being persisted or mirrored: an SSN in an
+        audit line would outlive the request and be visible to anyone with
+        log access. The in-memory mirror keeps the redacted form too, so the
+        three views never disagree.
+        """
+        from modules.pii import redact
+        event = dict(event)
+        if isinstance(event.get("details"), str):
+            event["details"] = redact(event["details"])
         self.events.append(event)
         # Bound the in-memory mirror so a long-running pod can't OOM.
         if len(self.events) > AUDIT_MAX_EVENTS:
