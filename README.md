@@ -35,9 +35,10 @@ captions in [Screenshots](#-screenshots).</sub>
 </table>
 
 > **Scope, honestly:** a portfolio project on a single-node local Kubernetes cluster (kind, on
-> one PC) and the **Groq free tier**. **GitHub Actions is currently not running for this
-> account**, so v3.4.8 – v3.5.2 were built, gated and deployed by hand with the pipeline's steps
-> ([CI/CD status](#cicd-status)). See [Known limits](#-known-limits).
+> one PC) and the **Groq free tier**. Actions is running again, but the CD jobs are parked on
+> hosted runners and report "cloud deploy skipped" until a self-hosted runner is registered
+> against the cluster; v3.4.8 – v3.5.2 were built, gated and deployed by hand with the pipeline's
+> steps ([CI/CD status](#cicd-status)). See [Known limits](#-known-limits).
 
 > 🔒 **Secure by default, observable by design.** App-layer auth (JWT, rate limiting, brute-force lockout, CSRF, CSP/HSTS headers, audit logging) and full LLM observability (Phoenix traces, Prometheus metrics, Grafana dashboards, Loki logs) — with all infrastructure locked down and **never exposed publicly**.
 
@@ -914,9 +915,13 @@ docker compose logs postgres
 ## CI/CD status
 
 `.github/workflows/main.yml` runs: tests, lint, security scans, frontend build → RAG retrieval
-gate (`--min-hit6 0.89`, 0 leaks) → build and push 3 images (`:<git sha>`) → deploy to staging → production on the self-hosted
-runner. It deployed the earlier versions. **GitHub Actions is currently not running for this
-account**, so v3.4.8 – v3.5.2 were deployed by hand with the same steps:
+gate (`--min-hit6 0.89`, 0 leaks) → build and push 3 images (`:<git sha>`) → deploy to staging →
+production. **Actions is running again, but the deploy jobs are parked:** they are pinned to
+`runs-on: ubuntu-latest` and their `✅ Check deploy is configured` gate reports
+"cloud deploy skipped" whenever `KUBE_CONFIG` / `DOCKER_USERNAME` are absent, so the CD jobs
+finish green without touching a cluster. Earlier versions (v3.4.8 – v3.5.2) were deployed by
+hand because Actions was not running for this account at the time; the same steps are still
+valid on a machine with the kind cluster up:
 
 ```bash
 git checkout main && git pull && TAG=$(git rev-parse HEAD)
@@ -965,8 +970,9 @@ kubectl -n llama-agent exec deploy/prometheus -- wget -qO- 'http://localhost:909
 ## 🧭 Known limits
 
 - **One machine.** Staging and production are namespaces on a single-node kind cluster on my
-  PC; there is no cloud HA. GitHub Actions is currently not running for this account, so recent
-  versions were deployed by hand ([CI/CD status](#cicd-status)).
+  PC; there is no cloud HA. The CD jobs run on hosted runners and skip the kubectl steps unless
+  `KUBE_CONFIG` is set (it needs a self-hosted runner able to reach the kind API), so deploys are
+  still done by hand ([CI/CD status](#cicd-status)).
 - **Groq free tier.** Rate limits (7,000 input tokens/min on the strong model) are handled by
   a token budget, model fallback and retries, but `@team` mode (several agents in a row) can
   still hit the limit and return a partial answer.

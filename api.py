@@ -434,13 +434,6 @@ class LoginRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=128)
 
 
-class TokenResponse(BaseModel):
-    """Token response (legacy; cookie auth is preferred for browsers)"""
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
-
-
 class AuthSuccess(BaseModel):
     """Cookie-based auth success (tokens are set as HttpOnly cookies)"""
     status: str = "ok"

@@ -251,7 +251,7 @@ jobs:
           python -c "from modules.monitoring import AgentLogger, PerformanceMonitor; print('Monitoring OK')"
           python -c "from modules.vector_store import get_vector_store; print('Vector Store OK')"
           python -c "from modules.advanced_rag import ReRanker, SubQuestionEngine, RouterQueryEngine, AdvancedRAG; print('Advanced RAG OK')"
-          python -c "from modules.cache import InMemoryCache; print('Cache OK')"
+          python -c "from modules.rag_optimizations import SemanticCache; print('Semantic Cache OK')"
 
       - name: "\U0001F517 Test integration"
         env:

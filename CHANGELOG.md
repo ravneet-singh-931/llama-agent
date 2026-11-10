@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **`modules/cache.py` (504 lines).** Nothing imported it: no module, app or test referenced
+  `InMemoryCache`, `RedisCache`, `ResponseCache`, `QueryCache`, `EmbeddingCache` or the
+  `cached` decorator (0 hits outside the file itself). Caching in the live path comes from
+  `modules/rag.py`'s answer cache, `modules/rag_optimizations.SemanticCache` and
+  `api.py`'s `BoundedLRUCache`. The `integration` job's import smoke test now checks
+  `SemanticCache` instead.
+- **`TokenResponse`** (`api.py`) — a leftover from header-based auth; no route returned it and
+  cookie auth (`AuthSuccess`) replaced it.
+- **`.github/environments.yml`** — GitHub does not read environments from a committed file:
+  they live in Settings → Environments. The file protected nothing, and it named an approver
+  (`ravneet-png`) that does not own this repo.
+
+### Documentation
+- **README CI/CD status:** the old text said "GitHub Actions is currently not running for this
+  account" while pointing at a workflow that *was* running. It now states the real situation —
+  the CD jobs are parked on hosted runners and report "cloud deploy skipped" until a
+  self-hosted runner can reach the kind cluster.
+- **CONTRIBUTING:** dropped the `modules/cache.py` import example and the dead entry in the
+  project-structure tree.
+
 ### Documentation
 - **README: agent eval results** (26/30 passed, judge average 4.88 / 5), per category and agent
   with time and cost, and how the runs were done: three parts on v3.4.8, v3.5.1 and v3.5.2

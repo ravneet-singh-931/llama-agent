@@ -286,7 +286,7 @@ from pydantic import BaseModel
 
 # 3. Local modules
 from modules.auth import hash_password
-from modules.cache import ResponseCache
+from modules.rag_optimizations import SemanticCache
 ```
 
 ## Project Structure
@@ -310,7 +310,6 @@ llama-agent/
 │   ├── auth.py               # Authentication (JWT, API keys)
 │   ├── advanced_monitoring.py # Business metrics, alerts, cost/SLA tracking
 │   ├── advanced_rag.py       # RAG pipeline (advanced)
-│   ├── cache.py              # Caching layer
 │   ├── cicd_improvements.py  # Feature flags, A/B testing
 │   ├── config.py             # Configuration
 │   ├── database.py           # Database models
