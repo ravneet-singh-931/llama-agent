@@ -36,7 +36,15 @@ class HashEmbedding(EmbeddingFunction):
         for text in input:
             v = np.zeros(512, dtype=np.float32)
             for w in text.lower().split():
-                v[int(hashlib.md5(w.strip('.,?!:;()"').encode()).hexdigest(), 16) % 512] += 1
+                v[
+                    int(
+                        hashlib.md5(
+                            w.strip('.,?!:;()"').encode(), usedforsecurity=False
+                        ).hexdigest(),
+                        16,
+                    )
+                    % 512
+                ] += 1
             n = np.linalg.norm(v)
             out.append((v / n if n else v).tolist())
         return out
