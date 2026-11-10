@@ -53,14 +53,29 @@ def _get_redis():
 # ============ INPUT SANITIZATION ============
 
 
-def sanitize_input(text: str) -> str:
-    """
-    Sanitize user input to prevent injection attacks.
-    
-    Protects against:
-    - SQL injection
-    - XSS (Cross-Site Scripting)
-    - Command injection
+def strip_html_vectors(text: str) -> str:
+    """Strip HTML/JS injection vectors from a string.
+
+    This is a **web-safety scrubber for the browser boundary**, NOT a defence
+    against prompt injection. It removes ``<script>``, ``on*`` handlers,
+    ``javascript:`` / ``data:`` / ``vbscript:`` schemes, and HTML-escapes the
+    remaining markup. It does nothing to a sentence like "ignore all previous
+    instructions", because that contains no HTML.
+
+    Prompt injection is defended elsewhere, by design: untrusted text is
+    wrapped in ``<<UNTRUSTED_DATA>>`` delimiters, and
+    :func:`detect_prompt_injection` flags (and audits) attempts without
+    blocking them. See ``PROMPT_INJECTION_GUARD``.
+
+    WARNING: this is destructive. It HTML-escapes quotes and angle brackets
+    and strips SQL keywords and ``{...}`` groups, so an ordinary coding
+    question comes back mangled. Callers must treat the result as a
+    *detection signal* and keep the original text - which is what api.py
+    does.
+
+    (Renamed from ``sanitize_input``: the old name promised injection
+    protection this function never provided, and its docstring claimed SQL
+    injection protection that only parameterized queries can give.)
     """
     if not text:
         return text
@@ -119,6 +134,12 @@ def sanitize_input(text: str) -> str:
         text = re.sub(pattern, '', text)
     
     return text.strip()
+
+
+# Deprecated alias. Kept so external callers and the existing tests keep
+# working, but new code should call strip_html_vectors() - the old name
+# claimed a protection this function does not provide.
+sanitize_input = strip_html_vectors
 
 
 # ============ PROMPT-INJECTION DEFENSE ============

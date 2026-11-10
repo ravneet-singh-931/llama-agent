@@ -260,6 +260,32 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## Why the context limits are what they are
+
+Attention is O(n²) in sequence length: doubling the tokens in a request roughly
+quadruples the attention work, and every extra token is billed input on the way
+in and re-billed as growing context on every subsequent turn. **Context is the
+scarcest and most expensive resource in the system.** That single fact explains
+constants that otherwise look arbitrary:
+
+| Limit | Value | What it protects |
+|---|---|---|
+| `llm_guard.input_budget()` | 6000 tokens | Admission control at the API boundary (`LLM_INPUT_BUDGET`) |
+| `AGENT_HANDOFF_CHARS` | 12000 chars | How much one agent may hand to the next in a DAG step |
+| `_MAX_READ_CHARS` | 6000 chars | One window of a document read (paged, not truncated) |
+| `AGENT_TOOL_RESULT_CHARS` | 4000 chars | A single tool result fed back to the model |
+| `_with_context` history clip | 200 chars/msg | **Known too aggressive** - see Section 10 finding |
+| `_trim_middle()` | head 60 / tail 40 | Keeps the instruction head and the recent tail (lost-in-the-middle) |
+
+Two consequences worth stating explicitly:
+
+- **RAG exists because of this cost.** Retrieving 4 relevant chunks beats
+  pasting the corpus, and the retrieval budget (`_MAX_RESULTS`, top-k) is the
+  same trade at a smaller scale.
+- **Long documents are paged, not amputated.** `read_uploaded_document` takes
+  a `start_char` offset and reports the total, so an agent can walk a 40-page
+  PDF instead of silently answering from its first three pages.
+
 ## Scalability
 
 ### Current (Single Server)
@@ -298,3 +324,19 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
                                │
                         Load Balancer
 ```
+
+---
+
+## Deliberate limits (decisions, not oversights)
+
+These are things this system does **not** do, with the reason. Each was
+considered and rejected for a documented constraint - "we don't have X" is an
+oversight, "we chose not to have X because Y" is engineering.
+
+| Not implemented | Why not | Revisit when |
+|---|---|---|
+| **Mid-run replanning** (`_plan_dag` is fixed once planned) | A replan round is an extra strong-tier call. On the free tier `@team` already runs 84-247 s against a 7,000 input-tokens/min cap, so a replan per failed step could exceed the budget entirely. Instead a failed step degrades to a placeholder and the DAG completes. | We move to a paid tier, or a step failing becomes common enough to measure. |
+| **Graph checkpointing** (a crashed `@team` run restarts) | Conversation history is persisted (Postgres + Redis), but in-flight DAG state is not. Adopting LangGraph to get `PostgresSaver` would rewrite ~250 working lines and break the OpenInference/Phoenix spans that `InstrumentedGroqClient` exists to preserve. | The 40-line Redis variant (persist `{level, results}` per level) is worth doing before adopting a framework. |
+| **SSE, not streamable-http, for the MCP server** | Agent tools (notably `collaborate`) can run for minutes. A streamable-http POST through nginx and the k8s ingress would hit proxy read timeouts and needs resumption support. SSE is the defensible choice for long-running tools. | The MCP SDK drops SSE, or agent tools get fast enough for a request/response model. |
+| **No async task queue / webhooks** (`STREAM_MAX_DURATION=300`, `AGENT_LATENCY_BUDGET=180`) | Work is capped at 180 s by design, which fits inside the 300 s stream ceiling. A Redis task store + poll + webhook is ~400 lines and a worker process solving a problem the budget already prevents. | A single task legitimately needs more than ~4 minutes of agent work. |
+| **No per-tenant budget enforcement** | `CostTracker` reports spend per user/component but never blocks. On a free tier there is no invoice to protect. | The deployment bills someone, or a shared key is exposed. |

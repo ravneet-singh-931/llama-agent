@@ -8,6 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **One hung agent can no longer hang an entire `@team` request.** `collaborate()`
+  called `f.result()` with no timeout, so a wedged step blocked forever — and the
+  budget guard only runs *between* DAG levels, so it could never catch it. Each
+  future now has `AGENT_STEP_TIMEOUT` (default 150 s, below the 180 s latency
+  budget) and degrades to the same placeholder a failed step produces.
+- **`read_uploaded_document` can now read a whole document.** It returned the
+  first 6,000 characters and appended "[...truncated, document is large...]", so a
+  40-page PDF silently became its first three pages and the agent answered
+  confidently from the head. It now reports the total length and takes a
+  `start_char` offset, so the model can page through. The 6,000 cap was also dead
+  code: `dispatch_tool` re-capped every result at 4,000 chars afterwards.
+- **Tool error strings now say what to do next.** `Tool 'x' failed: 429` was the
+  model's only feedback; it now suggests retrying with a different query, and an
+  unknown tool lists the valid names. The document tool already did this
+  ("Available documents: ...") — the dispatch layer did not.
+- **Dead `temperature` config removed.** `LLMConfig.temperature` read
+  `LLM_TEMPERATURE` and no code ever consumed it, so setting the variable did
+  nothing. Sampling is set per call site instead (the eval judge pins 0 for
+  reproducible grading), which a single global value could not serve.
+- **`sanitize_input` renamed to `strip_html_vectors`.** The old name promised
+  prompt-injection protection; the function strips `<script>`/`on*` handlers and
+  HTML-escapes markup, which an injection attempt contains none of. Its docstring
+  also claimed SQL-injection protection, which only parameterized queries give.
+  `sanitize_input` remains as a deprecated alias.
+
+### Added
+- **Per-tool latency histogram** `llama_agent_tool_seconds{tool}`, recorded in
+  `dispatch_tool`. Every other metric is labelled by agent or component; this is
+  the first one that can blame a single tool.
+- **Repeat-call guard in the tool loop.** The same `(tool, arguments)` pair is
+  executed at most `AGENT_MAX_IDENTICAL_CALLS` (default 2) times per loop; after
+  that the model is told the result will not change. `_MAX_TOOL_ROUNDS` bounded
+  the total damage, not the waste.
+- **Span identity attributes.** `_span_cm` now sets `user.id`,
+  `conversation.id` and `config.commit` (`GIT_SHA`), so stream spans — the path
+  `/chat/stream` actually uses — are no longer anonymous.
+- **`ARCHITECTURE.md`: why the context limits are what they are**, and a
+  "deliberate limits" table recording five things this system chooses not to do
+  and why (no mid-run replanning, no graph checkpointing, SSE over
+  streamable-http, no async task queue, no tenant budget enforcement).
+
+### CI
 - **The CD jobs no longer hang forever.** `deploy-staging` and `deploy-production` were pinned
   to `runs-on: self-hosted`, but no self-hosted runner is registered for this repo, so the jobs
   queued indefinitely — the workflow has no default job timeout. The previous run showed them

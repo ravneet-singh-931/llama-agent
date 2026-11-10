@@ -255,6 +255,36 @@ GROUNDING_CLAIMS = Counter(
 )
 
 
+# Per-tool execution time. Everything else here is labelled by agent or
+# component; this is the only place a single TOOL can be blamed for a slow
+# run. `web_search` fans out to three providers (200 ms - 8 s) and
+# read_uploaded_document scales with PDF size, so a mixed p95 hides the one
+# tool worth optimising.
+_TOOL_SECONDS = Histogram(
+    "llama_agent_tool_seconds",
+    "Tool execution time by tool name",
+    ["tool"],
+    buckets=[0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30],
+)
+
+_TOOL_NAMES = (
+    "web_search",
+    "list_uploaded_documents",
+    "read_uploaded_document",
+    "other",
+)
+
+
+def record_tool_seconds(tool: str, seconds: float) -> None:
+    """Record one tool execution. Never raises - metrics must not break chat."""
+    try:
+        _TOOL_SECONDS.labels(
+            tool=tool if tool in _TOOL_NAMES else "other"
+        ).observe(max(0.0, float(seconds)))
+    except Exception:  # nosec B110 - telemetry must never fail a tool call
+        pass
+
+
 RAG_CRAG_VERDICTS = Counter(
     "llama_agent_rag_crag_verdicts_total",
     "Corrective-RAG checks of document answers against their excerpts",

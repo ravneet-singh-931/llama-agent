@@ -85,7 +85,10 @@ class LLMConfig:
     provider: str = "groq"
     model: str = "qwen/qwen3.8-27b"
     api_key: str = ""
-    temperature: float = 0.7
+    # NOTE: there is deliberately no global `temperature`. Sampling is set per
+    # call site, because the right value depends on the job: the eval judge
+    # pins 0 (grading must be reproducible) while creative agents want the
+    # provider default. A single global value cannot serve both.
     max_tokens: int = 1024
     timeout: int = 60
     # Point 9: ordered providers to try (e.g. "groq,openai,anthropic").
@@ -103,7 +106,6 @@ class LLMConfig:
         return cls(
             api_key=api_key,
             model=os.getenv("LLM_MODEL", cls.model),
-            temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1024")),
             provider_chain=chain,
         )
