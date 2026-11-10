@@ -135,8 +135,15 @@ def _delta(after: Dict[str, float], before: Dict[str, float]) -> Dict[str, float
 # ------------------------------------------------------------------ execution
 
 def route(message: str) -> Dict:
-    """Same routing decision as /chat/stream (api.py)."""
-    from api import detect_agent_prefix, detect_team_prefix, route_multi_agent
+    """Same routing decision as /chat/stream (api.py).
+
+    Imports modules.routing directly rather than api: the functions are
+    identical (api re-exports them), but api pulls in FastAPI and the whole
+    app, which the eval runner does not otherwise need -- and which would make
+    the offline gate depend on the web stack.
+    """
+    from modules.routing import (detect_agent_prefix, detect_team_prefix,
+                                 route_multi_agent)
     team, team_task = detect_team_prefix(message)
     if team:
         return {"route": "team", "task": team_task}
@@ -228,6 +235,15 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
     passed = all(r["pass"] for r in results.values())
     if verdict and "overall" in verdict:
         passed = passed and verdict["overall"] >= judge_threshold
+    # Tool recall (16.3): when a case declares which tools it needs, calling
+    # them is part of being correct. Optional field, so existing cases are
+    # unaffected.
+    expected_tools = case.get("expected_tools") or []
+    tools_ok = None
+    if expected_tools:
+        called = {c["name"] for c in rec.calls}
+        tools_ok = set(expected_tools) <= called
+        passed = passed and tools_ok
     passed = passed and graded
     return {
         "id": case["id"], "category": case["category"], "prompt": case["prompt"],
@@ -235,6 +251,9 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
         "checks": results, "judge": verdict, "judge_sources": judge_src, "usage": usage,
         "tools": [{"name": c["name"], "arguments": c["arguments"],
                    "result_chars": len(c["result"] or "")} for c in rec.calls],
+        "tool_recall": tools_ok,
+        "steps": len(rec.calls),
+        "redundant_steps": _redundant(rec.calls),
         "reasoning": out["reasoning"], "answer": out["answer"],
         **({"error": out["error"]} if out.get("error") else {}),
     }
@@ -244,6 +263,37 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
 
 def _pct(n: int, d: int) -> float:
     return round(100.0 * n / d, 1) if d else 0.0
+
+
+def _mean(values: List) -> Optional[float]:
+    """Mean of the non-None values, or None if there are none.
+
+    Older result records (and hand-built ones in tests) predate the trajectory
+    fields, so a missing value must not turn a report into a crash.
+    """
+    present = [v for v in values if v is not None]
+    return round(statistics.mean(present), 2) if present else None
+
+
+def _redundant(calls: List[Dict]) -> int:
+    """Calls beyond the first with the same (tool, arguments) pair.
+
+    Trajectory efficiency (16.2): a run that succeeds in 3 tool calls beats one
+    that succeeds in 15. Counting repeats separately from total steps is what
+    makes the difference visible in the report.
+    """
+    seen = set()
+    extra = 0
+    for c in calls:
+        # default=str stringifies anything json cannot handle, so this cannot
+        # raise on the shapes the tool dispatcher produces.
+        key = (c.get("name"),
+               json.dumps(c.get("arguments"), sort_keys=True, default=str))
+        if key in seen:
+            extra += 1
+        else:
+            seen.add(key)
+    return extra
 
 
 def summarize(results: List[Dict]) -> Dict:
@@ -279,6 +329,16 @@ def summarize(results: List[Dict]) -> Dict:
         "latency_p50_s": round(statistics.median(lat), 1) if lat else None,
         "latency_p95_s": round(lat[min(len(lat) - 1, int(0.95 * len(lat)))], 1) if lat else None,
         "usage": {k: round(v, 4) for k, v in sorted(usage.items())},
+        # Trajectory efficiency (16.2). Steps are tool calls; LLM calls are
+        # not individually visible to the runner, so this is the tool half.
+        # Read with .get so a baseline file written before these fields
+        # existed still summarizes instead of raising KeyError.
+        "avg_steps": _mean([r.get("steps") for r in results]),
+        "total_redundant_steps": sum(r.get("redundant_steps", 0) for r in results),
+        "tool_recall": (
+            _pct(sum(1 for r in results if r.get("tool_recall")),
+                 sum(1 for r in results if r.get("tool_recall") is not None))
+            if any(r.get("tool_recall") is not None for r in results) else None),
     }
 
 
@@ -292,6 +352,9 @@ def render_markdown(summary: Dict, results: List[Dict]) -> str:
         f"- Judge overall (1-5): **{s['judge_overall']}** - fabrication flagged: {s['fabrication_rate']}%",
         f"- Grounding rate (figures found in sources): **{s['grounding_rate']}**",
         f"- Latency p50 / p95: {s['latency_p50_s']}s / {s['latency_p95_s']}s",
+        f"- Trajectory: {s.get('avg_steps')} tool calls/case on average, "
+        f"{s.get('total_redundant_steps')} redundant"
+        + (f" - tool recall {s['tool_recall']}%" if s.get("tool_recall") is not None else ""),
         f"- Usage: {json.dumps(s['usage'])}", "",
         "| Category | Cases | Pass % |", "|---|---|---|",
     ]

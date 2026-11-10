@@ -650,14 +650,31 @@ class BaseAgent:
                 + _evidence_block(sources)
             )},
         ]
-        try:
-            resp = self._chat(messages, max_tokens=400)
-            text = (resp.choices[0].message.content or "").strip()
+        # Critique with the OTHER tier than the one that wrote the answer.
+        # A model checking its own output with the same weights tends to
+        # agree with itself: it confidently passes exactly the errors it made.
+        # A reviewer on a different model shares fewer blind spots, and that
+        # matters more here than raw capability. Falls back to this agent's
+        # own model if the alternate tier is rate-limited.
+        critic_model = (resolve_model("fast") if self.model == resolve_model("strong")
+                        else resolve_model("strong"))
+
+        def _verdict(text: str) -> str:
+            text = (text or "").strip()
             if text.upper().startswith("OK") and len(text) < 40:
                 return ""
             return text
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=critic_model, messages=messages, max_tokens=400)
+            return _verdict(resp.choices[0].message.content)
         except Exception:
-            return ""
+            try:
+                return _verdict(self._chat(messages, max_tokens=400)
+                                .choices[0].message.content)
+            except Exception:
+                return ""
 
     @staticmethod
     def _scan_handoff(text: str) -> str:

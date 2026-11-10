@@ -65,11 +65,19 @@ class AgentLogger:
     
     def log_interaction(self, user_input: str, agent_response: str, 
                        tools_used: List[str], response_time: float):
-        """Log a user-agent interaction"""
+        """Log a user-agent interaction.
+
+        High-risk identifiers (SSNs, payment card numbers) are redacted before
+        the record is written: whatever a user pastes would otherwise be
+        persisted verbatim in a log file that outlives the request. Redaction
+        happens here, on the way out only - the agent still reasons over the
+        original text.
+        """
+        from modules.pii import redact
         interaction = {
             "timestamp": datetime.now().isoformat(),
-            "user_input": user_input,
-            "agent_response": agent_response[:500],  # Truncate long responses
+            "user_input": redact(user_input),
+            "agent_response": redact(agent_response[:500]),  # Truncate long responses
             "tools_used": tools_used,
             "response_time": response_time
         }
