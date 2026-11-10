@@ -132,6 +132,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not need the web stack, and the offline gate must not depend on it.
 
 ### Fixed
+- **The eval suite was failing correct answers, not the app.** The first real
+  nightly run scored **75%**, yet the judge averaged **4.43/5** — two graders
+  disagreeing about the same answers, which means one of them was wrong. It
+  was the deterministic tier, three times over:
+
+  1. **Grounding ran on cases that never asked for sources.** `evaluate()`
+     applied the numeric-grounding check to *every* case that happened to have
+     tool output, so a migration plan was graded against a web search it never
+     relied on. A plan's figures come from the request and its own arithmetic —
+     "0/13 figures found in sources" is not a defect, it is the nature of a
+     budget. It failed 7 cases the judge scored 4-5 and drove the reported
+     grounding rate (0.28) to meaninglessness. Grounding now applies only to
+     cases declaring `needs_sources`, which is what the check means.
+  2. **A correct inline snippet was a failure.** `code-debug` and
+     `code-regex-pin` both scored **5.0** from the judge and failed on
+     `no python code block` because the snippet was written inline
+     ("use ``len(items) == 0``") rather than fenced. That graded formatting,
+     not correctness. An inline span is now accepted when it parses as Python.
+  3. **`no_meta` flagged ordinary words.** The bare nouns `hand-?offs?` and
+     `team members?` failed legitimate content ("the handoff between phases
+     takes one week"). What must never reach a user is an agent narrating the
+     pipeline it belongs to, so the patterns now carry that context and fire on
+     "I'll pass this to the other agents" while staying quiet on "the handoff
+     between phases".
+
+  Each fix is covered by a regression test that fails with the bug restored.
+
+### Added
+- **`evals.checks.inline_code_spans()`** and **`_parses_as_python()`** — the
+  inline-snippet half of the code check.
+
+### Earlier
+
 - **Corrective RAG was inverting its own check.** `CRAGRetriever._is_supported`
   required every answer sentence to appear as a **substring** of the retrieved
   context. That asks the opposite of the question it claims to ask: a correct
