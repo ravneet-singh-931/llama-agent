@@ -24,24 +24,52 @@ how a specific answer should look.
 
 ## Dataset
 
-`dataset.jsonl` has 30 cases in 9 categories:
-- research (news and facts)
-- coding
-- writing
-- planning
-- analysis
-- general chat
-- agent team (5 different domains)
-- safety (prompt injection, language rule)
+`dataset.jsonl` has **60 cases in 9 categories** (it started at 30 and doubled —
+see the README's [Agent eval section](../README.md#agent-eval-30-60-cases) for what
+changed and why the pass rate moved):
 
-The fact cases include one about a prize that doesn't exist. 9 cases are tagged
-`smoke` for a quick, cheap run that still covers 7 categories.
+| Category | Cases |
+|---|---|
+| coding | 12 |
+| safety (prompt injection, jailbreak, exfil, PII, language rule) | 8 |
+| general | 7 |
+| agent team (`@team`, 7 domains) | 7 |
+| research: news | 6 |
+| writing | 6 |
+| research: facts | 5 |
+| planning | 5 |
+| analysis | 4 |
+
+The fact cases include one about a prize that doesn't exist. 11 cases are tagged
+`smoke` for a quick, cheap run that still covers most categories.
+
+A case may declare `needs_sources` — only those are checked for figure grounding,
+because a plan's budget and timeline come from the request, not from a search
+result. A case may also declare `expected_tools`; calling them is then part of
+passing (`tool_recall`).
 
 Every case goes through the same routing as `/chat/stream`: `@team` goes to the
 agent team, keyword or `@Agent` routing goes to a specialist, and everything
 else goes to the general agent.
 
-## Running it (on demand)
+## Tiers: what runs when
+
+The suite is split by what a check *costs*, because that decides where it can run.
+
+| Tier | What | Needs | Runs |
+|---|---|---|---|
+| **Offline gate** (`evals/gate.py`) | 53 routing decisions + 18 check fixtures | nothing (stdlib) | every PR, in the `test` job, under 1 s |
+| **RAG retrieval** (`evals/rag_eval.py`) | hit@6 on the committed corpus, cross-user leaks | embedding model, no LLM | every PR |
+| **Agent goldens** (`evals/run.py`) | 60 cases: real answers, real judge, tool recall, trajectory | `GROQ_API_KEY` + a judge call per case | nightly (`.github/workflows/nightly-evals.yml`) |
+
+The nightly job is not a leaderboard. It runs on one commit, fetches the previous run's
+report from its artifacts, and diffs: `compare()` reports which cases flipped, which
+category moved, whether latency or fabrication got worse, and whether the **prompts
+changed** between the two runs (`prompt_changed`, from a hash of the prompts in force). It
+exits non-zero only on a real regression — a missing baseline or a missing key produces a
+notice, not a red build, because a job must not go red for reasons unrelated to the product.
+
+## Running it
 
 Run it inside the API pod. That's where the keys and the deployed code are.
 
@@ -53,7 +81,7 @@ kubectl -n llama-agent exec deploy/llama-agent-api -- \
 # Copy the report out
 kubectl -n llama-agent exec deploy/llama-agent-api -- cat /tmp/eval-smoke.json > eval-smoke.json
 
-# Full run (30 cases) - cheaper variants: --no-judge, --no-dsa, --category team coding
+# Full run (60 cases) - cheaper variants: --no-judge, --no-dsa, --category team coding
 kubectl -n llama-agent exec deploy/llama-agent-api -- \
   python -m evals.run --out /tmp/eval-full.json
 
