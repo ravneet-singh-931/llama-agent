@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Extracted `modules/routing.py` from `api.py`.** The intent-routing rules (agent/team
+  prefixes, the Aho-Corasick keyword matcher, `route_multi_agent`, the name-memory helpers)
+  need no FastAPI app, database or vector store, so they now live in one 310-line module that
+  can be read and tested on its own. `api.py` re-exports every public name, so
+  `from api import route_multi_agent` and the eval imports are unchanged.
+
+  Verified by a differential test: 29 message cases through `route_multi_agent`,
+  `detect_agent_prefix`, `detect_team_prefix`, `extract_name_from_message` and
+  `is_name_question`, run on the old and new code, produced **byte-identical output**.
+
 ### Removed
 - **`modules/cache.py` (504 lines).** Nothing imported it: no module, app or test referenced
   `InMemoryCache`, `RedisCache`, `ResponseCache`, `QueryCache`, `EmbeddingCache` or the
