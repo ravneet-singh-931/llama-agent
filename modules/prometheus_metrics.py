@@ -84,8 +84,8 @@ LLM_COST = Counter(
     ["model", "component"],
 )
 
-# Per-user spend. This existed only as an in-memory dict in CostTracker, so it
-# was per-process: two replicas reported two different totals and a restart
+# Per-user spend. This used to be an in-memory dict in a CostTracker class, so
+# it was per-process: two replicas reported two different totals and a restart
 # erased both. A counter is shared through Prometheus with everything else, so
 # there is exactly one number.
 #
@@ -395,9 +395,9 @@ RAG_CRAG_VERDICTS = Counter(
 
 
 # Groq list prices, USD per 1M tokens (console.groq.com/docs/models, checked
-# 2026-10). This table lived in CostTracker.DEFAULT_PRICING, which meant the
-# numbers on Grafana and the numbers on /monitoring/dashboard could disagree --
-# only one of them was computing a cost at all. There is one table now.
+# 2026-10). This table used to live on a separate CostTracker class, which
+# meant the numbers on Grafana and the numbers on /monitoring/dashboard could
+# disagree -- only one of them was computing a cost at all. One table now.
 # Override/extend with GROQ_PRICING='{"model": {"input": 0.1, "output": 0.2}}';
 # unknown models use GROQ_DEFAULT_PRICE_IN / GROQ_DEFAULT_PRICE_OUT.
 PRICING = {
@@ -504,8 +504,9 @@ def cost_by_user() -> dict:
 def cost_summary() -> dict:
     """The cost block of /monitoring/dashboard, computed from Prometheus.
 
-    Replaces CostTracker.get_cost_summary(). Same keys (so the dashboard and
-    its tests keep working), one store, correct across replicas and restarts.
+    Replaces the old in-process CostTracker.get_cost_summary(). Same keys (so
+    the dashboard and its tests keep working), one store, correct across
+    replicas and restarts.
     """
     by_model = cost_by_model()
     by_component = cost_by_component()
@@ -534,9 +535,11 @@ def cost_summary() -> dict:
 
 def record_llm_usage(model: str, input_tokens: int, output_tokens: int,
                      component: str = "other") -> float:
-    """Record one LLM call's token usage in Prometheus + the CostTracker
-    (/monitoring/dashboard), labelled with the component that made the call.
-    Never raises - metrics must not break chat."""
+    """Record one LLM call's tokens and cost, labelled with the component.
+
+    This is the only place spend is recorded: the same counters feed Grafana
+    and the /monitoring/dashboard cost block (via cost_summary()), so the two
+    cannot disagree. Never raises - metrics must not break chat."""
     try:
         input_tokens = int(input_tokens or 0)
         output_tokens = int(output_tokens or 0)
