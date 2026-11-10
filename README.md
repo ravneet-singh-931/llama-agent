@@ -916,12 +916,16 @@ docker compose logs postgres
 
 `.github/workflows/main.yml` runs: tests, lint, security scans, frontend build → RAG retrieval
 gate (`--min-hit6 0.89`, 0 leaks) → build and push 3 images (`:<git sha>`) → deploy to staging →
-production. **Actions is running again, but the deploy jobs are parked:** they are pinned to
-`runs-on: ubuntu-latest` and their `✅ Check deploy is configured` gate reports
-"cloud deploy skipped" whenever `KUBE_CONFIG` / `DOCKER_USERNAME` are absent, so the CD jobs
-finish green without touching a cluster. Earlier versions (v3.4.8 – v3.5.2) were deployed by
-hand because Actions was not running for this account at the time; the same steps are still
-valid on a machine with the kind cluster up:
+production. **The deploy jobs are parked on purpose.** They run on `ubuntu-latest` — no
+self-hosted runner is registered, and a job whose `runs-on` matches nothing waits in the queue
+forever — with a 15-minute timeout so that can never happen silently again. Their
+`✅ Check deploy is configured` gate reports "cloud deploy skipped" and skips every kubectl step
+unless `KUBE_CONFIG` **and** `DOCKER_USERNAME` are both set, so the CD jobs finish green without
+touching a cluster. To deploy for real: register a self-hosted runner on the machine with the
+kind cluster, flip `runs-on` back to `self-hosted`, and set those secrets.
+
+Earlier versions (v3.4.8 – v3.5.2) were deployed by hand because Actions was not running for
+this account at the time; the same steps are still valid on a machine with the kind cluster up:
 
 ```bash
 git checkout main && git pull && TAG=$(git rev-parse HEAD)

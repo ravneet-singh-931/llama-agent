@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The CD jobs no longer hang forever.** `deploy-staging` and `deploy-production` were pinned
+  to `runs-on: self-hosted`, but no self-hosted runner is registered for this repo, so the jobs
+  queued indefinitely — the workflow has no default job timeout. The previous run showed them
+  as `skipped` only because the `docker` job upstream was `skipped`, which hid it.
+
+  Both now use `ubuntu-latest` plus `timeout-minutes: 15`. Their existing
+  `✅ Check deploy is configured` gate already skips every kubectl step when
+  `KUBE_CONFIG`/`DOCKER_USERNAME` are absent, so the jobs report "cloud deploy skipped" and
+  pass in seconds instead of waiting on a runner that will never appear. Verified the gate
+  logic against all three cases (neither secret, one secret, both secrets).
+
 ### Changed
 - **Extracted `modules/routing.py` from `api.py`.** The intent-routing rules (agent/team
   prefixes, the Aho-Corasick keyword matcher, `route_multi_agent`, the name-memory helpers)
