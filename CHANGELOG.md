@@ -5,6 +5,13 @@ All notable changes to Llama Agent will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-11-10
+
+First tagged release. Ten CI jobs green (`42812360498`); PR #3 merged as
+`adac1fd`. Batch A + C from the 18-section LLMOps review — every item below
+fixes something that was built but never wired, or that lied about what it
+does. See the entries in [Unreleased] for the detail.
+
 ## [Unreleased]
 
 ### Fixed
