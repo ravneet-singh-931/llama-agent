@@ -54,6 +54,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   beats one that succeeds in 15, and nothing measured the difference before.
 
 ### Changed
+- **Conversation history is rendered from one shared budget, not three copies
+  of `content[:200]`.** The same line was pasted in `api._with_context`,
+  `memory.get_context_string` and `llama_agent1._budget_context_string`, each
+  with different surrounding code. Measured on six ordinary turns: 281 tokens
+  admitted by `_window_messages`, 181 sent — 36% lost, and a steady 54% on
+  longer conversations because assistant answers run ~500 characters. The cap
+  also cut mid-word ("...the sorti" / "ng is O(n log n)"), so a reply that
+  said "O(n) if already sorted" looked like it had not. The third copy was
+  worse: it cut to 200 chars *before* estimating token cost, so it budgeted
+  against text a fifth the size of what it was deciding about. All three now
+  call `modules/context_budget.render_history`, which spends one budget
+  newest-first and keeps short conversations verbatim.
 - **The critic now reviews on a different model tier than the one that wrote
   the answer.** A model checking its own output with the same weights agrees
   with itself — it confidently passes exactly the errors it made. Falls back to

@@ -318,11 +318,10 @@ class ConversationMemory:
         if not recent:
             return "No conversation history yet."
 
-        context = "Recent conversation history:\n"
-        for msg in recent:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            context += f"{role}: {msg['content'][:200]}\n"
-        return context
+        # Same renderer as api._with_context so the Redis path and this JSON
+        # fallback cannot disagree about how much history the model sees.
+        from modules.context_budget import render_history
+        return "Recent conversation history:\n" + render_history(recent)
 
     def clear(self, user_id: Optional[str] = None):
         """Clear all memory (or just one user's conversations)."""

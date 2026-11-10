@@ -1346,10 +1346,12 @@ async def _with_context(message: str, memory, user_id: str, conversation_id: str
         if not recent:
             context = "No conversation history yet."
         else:
-            context = "Recent conversation history:\n" + "\n".join(
-                f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:200]}"
-                for m in recent
-            )
+            # One shared budget across messages, not 200 chars each: the
+            # per-message cap contradicted _window_messages' 1500-token
+            # admission and cut every answer off mid-word. See
+            # modules/context_budget.py for the measurement.
+            from modules.context_budget import render_history
+            context = "Recent conversation history:\n" + render_history(recent)
     if not context or "No conversation history yet." in context:
         return message
     return f"Recent conversation context:\n{context}\n\nUser's new message: {message}"
