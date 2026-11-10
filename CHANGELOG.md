@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`modules/provider_client.py` — the provider registry is now actually
+  called.** `GroqLLM.__init__` hardcoded `Groq(api_key, base_url)`, so every
+  model in `PROVIDER_MODELS` other than Groq's own was POSTed to
+  api.groq.com and 404'd. The registry, `resolve_provider_chain`,
+  `should_fallback_to_next_provider` and their tests had existed for weeks and
+  production called none of it. One factory now picks the SDK that matches the
+  model. The default deployment still resolves both tiers to Groq, so nothing
+  changes unless a model name or `provider=` says otherwise.
+- **Anthropic is refused at construction, not at call time.** Its SDK has a
+  different shape (`messages.create`, `system` lifted out of the message list,
+  a different response object), so pretending it matches would surface as an
+  AttributeError in the middle of a tool loop. `build_client("anthropic")`
+  raises `ProviderConfigError` naming the reason.
 - **`evals/gate.py` — the eval gate CI can actually afford.** Every prior PR ran
   only `evals.rag_eval retrieval`, so prompt and routing regressions shipped
   green: reorder a keyword group in `modules/routing.py` and "write me a blog
@@ -54,6 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   beats one that succeeds in 15, and nothing measured the difference before.
 
 ### Changed
+- **The "a provider swap breaks Phoenix spans" risk did not exist.** This work
+  was deferred for a half-day because of it. `InstrumentedGroqClient` routes
+  through llama-index's `GroqLLM` precisely so the OpenInference instrumentor
+  emits a `GroqLLM.*` span, and swapping the vendor SDK underneath was assumed
+  to lose that. Measured with an in-memory exporter: the span comes from
+  llama-index's `@dispatcher.span` on `LLM.chat`, which wraps a subclass's
+  override at class-creation time — the vendor SDK is invisible to it. Both
+  providers produce the identical span. Pinned by a test that fails if a future
+  change routes around llama-index.
 - **Conversation history is rendered from one shared budget, not three copies
   of `content[:200]`.** The same line was pasted in `api._with_context`,
   `memory.get_context_string` and `llama_agent1._budget_context_string`, each

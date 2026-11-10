@@ -284,7 +284,15 @@ class InstrumentedGroqClient:
             with self._client._llms_lock:
                 llm = self._client._llms.get(model)
                 if llm is None:
-                    llm = self._GroqLLM(model=model, api_key=self._client._api_key)
+                    llm_kwargs = {"model": model,
+                                  "api_key": self._client._api_key}
+                    # Only pass `provider` when one was pinned: a GroqLLM
+                    # stand-in (tests, subclasses) that predates the field
+                    # must keep working, and None means "infer from model".
+                    pinned = getattr(self._client, "_provider", None)
+                    if pinned:
+                        llm_kwargs["provider"] = pinned
+                    llm = self._GroqLLM(**llm_kwargs)
                     try:  # metrics label: which agent / component made the call
                         llm.component = self._client._component
                     except Exception:  # nosec B110 - a label must never break a call
@@ -340,10 +348,14 @@ class InstrumentedGroqClient:
         def __init__(self, client: "InstrumentedGroqClient"):
             self.completions = InstrumentedGroqClient._Completions(client)
 
-    def __init__(self, api_key: str, component: str = "other"):
+    def __init__(self, api_key: str, component: str = "other",
+                 provider: Optional[str] = None):
         self._api_key = api_key
         # Metrics label for every call made through this client.
         self._component = component
+        # Which vendor SDK serves the models this client is asked for. None
+        # keeps the original single-provider behaviour (infer per model).
+        self._provider = provider
         self._llms = {}
         # Guards _llms creation when multiple agents run concurrently
         # (parallel collaboration) on shared worker threads.

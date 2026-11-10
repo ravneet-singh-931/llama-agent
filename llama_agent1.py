@@ -193,13 +193,33 @@ class GroqLLM(LLM):
     model: str
     api_key: str
     base_url: Optional[str] = None
+    # Vendor that serves `model`. None = infer from the model name.
+    provider: Optional[str] = None
     # Part of the app making the calls (metrics label): an agent, chat, rag...
     component: str = "other"
     _client: Groq = PrivateAttr()
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._client = Groq(api_key=self.api_key, base_url=self.base_url, timeout=GROQ_TIMEOUT, max_retries=GROQ_MAX_RETRIES)
+        # Which vendor actually serves this model. Hardcoding Groq(...) here
+        # meant every non-Groq model in modules.model_tiers.PROVIDER_MODELS
+        # was POSTed to api.groq.com and 404'd -- the provider registry
+        # existed, was tested, and was called by nothing.
+        #
+        # Tracing is unaffected: the OpenInference llama-index instrumentor
+        # spans LLM.chat through llama-index's dispatcher, not through the
+        # vendor SDK, so swapping the client keeps the same span. Verified in
+        # tests/test_provider_client.py with an in-memory exporter.
+        from modules.provider_client import build_client, provider_for_model
+        provider = getattr(self, "provider", None) or provider_for_model(self.model)
+        if self.base_url and provider != "openai":
+            # An explicit base_url only makes sense for the SDK it was written
+            # for; pass it through for Groq (used by tests/local proxies).
+            self._client = Groq(api_key=self.api_key, base_url=self.base_url,
+                                timeout=GROQ_TIMEOUT, max_retries=GROQ_MAX_RETRIES)
+        else:
+            self._client = build_client(provider, self.api_key,
+                                        timeout=GROQ_TIMEOUT, max_retries=GROQ_MAX_RETRIES)
 
     @property
     def metadata(self) -> LLMMetadata:
