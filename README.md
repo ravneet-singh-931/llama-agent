@@ -56,21 +56,31 @@ AI:   (searches the web with Tavily, answers with dated sources)
 
 ## 🎯 At a glance
 
-All numbers below were measured on 2026-10-25 against the live app (Groq free tier).
+Agent numbers are from the nightly run in CI (Groq free tier); RAG numbers were measured
+on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 
 | What | Result | How it was measured |
 |---|---|---|
-| **Agent quality** | **26/30 cases passed (87%)**, judge average 4.88 / 5 | 30 varied prompts in 9 categories: rule checks + figure grounding + LLM judge ([details](#agent-eval-30-cases)) |
+| **Agent quality** | **45/60 cases passed (75%)**, judge average 4.43 / 5 — *on a run where 4 of the 15 failures were the grader's fault* ([why](#agent-eval-30-60-cases)) | 60 prompts in 9 categories: rule checks + figure grounding + LLM judge, nightly in CI |
+| **Regression detection** | every run is diffed against the previous one; CI fails on a real regression | `evals.run --compare … --fail-on-regression`, artifacts kept per run |
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 574 passed, 4 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
-| **Cost** | ≈ $0.23 at Groq list prices for the 30 graded agent answers ($0 on the free tier) | token counts × list prices, per case in the eval report |
-| **Bugs found and fixed** | 17 fixed, with tests or before/after numbers | [incident log](#-bugs-found-and-fixed) |
+| **Tests** | 661 passed, 6 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Cost** | $0.26 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (finding 22) |
+| **Bugs found and fixed** | 24 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
 
-The most useful finding: **the LLM judge alone misses invented numbers.** All 4 failed
-agent cases had figures that are in no source, and the judge still scored them 4.25 – 5.0.
-The rule-based figure check caught all 4 ([findings](#what-measuring-found)).
+The most useful finding: **the LLM judge alone misses invented numbers.** Every failed
+case in the 30-case run had figures that were in no source, and the judge still scored them
+4.25 – 5.0; the rule-based figure check caught all of them
+([findings](#what-measuring-found)).
+
+The second most useful finding came from the 60-case run: **the graders can be wrong while
+the judge is right.** The suite reported 75% while the judge averaged 4.43/5. The
+deterministic checks were at fault — grounding was being applied to planning answers whose
+figures came from the request, and correct answers were failing because their code snippet
+was inline instead of fenced. Four of the fifteen failures were measurement error, not
+quality. See [findings 19–24](#-bugs-found-and-fixed).
 
 ---
 
@@ -130,7 +140,9 @@ prices for these Groq models; spend is tracked in Prometheus (panels above).
 - **Streaming Chat** — SSE streaming with agent/tool transcript markers
 - **LLMOps on the Groq free tier** — token budgeting and context compaction, rate-limit-aware model routing shared via Redis, 413 shrink-and-retry (`modules/llm_guard.py`)
 - **Grounding guardrail** — figures in agent answers are checked against the retrieved sources; unverified ones are marked before the next agent sees them (`modules/grounding.py`)
-- **Evaluation suite** — 30 varied agent cases, rule-based checks + LLM judge + grounding rate, baseline comparison; plus a **RAG eval** on a committed sample corpus: retrieval hit@k/MRR for vector vs hybrid vs hybrid + reranker and a cross-user leak check (CI), and document-answer checks (on demand) (`evals/`, see `evals/README.md`)
+- **Evaluation suite** — 60 agent cases in 9 categories, rule checks + LLM judge + grounding rate, run **nightly in CI** and diffed against the previous run (fails on a real regression, labels a diff taken across a prompt edit); plus an **offline gate** on every PR that asserts 53 routing decisions and 18 check fixtures in under a second, and a **RAG eval** on a committed sample corpus: retrieval hit@k/MRR for vector vs hybrid vs hybrid + reranker and a cross-user leak check (CI), and document-answer checks (on demand) (`evals/`, see `evals/README.md`)
+- **Spend and loop ceilings** — `AGENT_USER_TOKEN_BUDGET` caps what one tenant may spend per window (checked at `/chat/stream`, opt-in), `AGENT_MAX_TOOL_TOKENS` caps the total input of one tool loop, `AGENT_STEP_TIMEOUT` bounds a `@team` DAG level as a whole
+- **Output-side PII guardrail** — model output is redacted as it streams (`StreamRedactor`), so a card number or SSN echoed out of an uploaded document does not reach the browser; the cut is made at a digit-run boundary so a number split across tokens is still caught
 - **LLM Observability** — every Groq call (agents *and* RAG) emits `GroqLLM.chat` spans to Phoenix via llama-index instrumentation
 - **Full DevOps Stack** — Prometheus, Grafana, Loki, Promtail, node-exporter, nginx (SSL + LB)
 - **App security** — JWT auth, rate limiting, brute-force lockout, CSRF, audit logging, Docker secrets
@@ -186,43 +198,46 @@ answer, CRAG check, semantic cache). The first run found two bugs; v3.4.8 fixed 
 **Limits:** small synthetic corpus (28 chunks), one run per version (LLM answers vary
 slightly between runs), latency from one PC, not the cluster.
 
-### Agent eval (30 cases)
+### Agent eval (30 → 60 cases)
 
-`python -m evals.run` (see `evals/README.md`), run inside an API pod against the live Groq
-models. A case passes only if **all three** hold:
-1. every rule check passes: completed, English only, no meta-talk, valid code, right route,
-   used web search when the case needs live data, case expectations (`must_include_any`, …);
-2. the **grounding check** passes: at least 70% of the figures in the answer are found in the
-   tool results (`modules/grounding.py`);
-3. the **LLM judge** (`openai/gpt-oss-20b`, rubric of correctness, completeness, relevance,
-   clarity) gives at least 3.5 / 5.
+The suite started at 30 cases, run by hand, split across three app versions because the
+free tier's daily cap runs out after ~15 graded cases. It then doubled to 60 and moved
+into CI, where it runs nightly against one commit and is diffed against the previous run.
 
-**Result: 26/30 passed (87%), judge average 4.88 / 5.**
+| | 30 cases (2026-10-25) | 60 cases (nightly, CI) |
+|---|---|---|
+| Passed | 26/30 (**87%**) | 45/60 (**75%**) |
+| Judge average | 4.88 / 5 | 4.43 / 5 |
+| `@team` cases | 5 | **7** |
+| Where it runs | by hand, split across 3 versions | **nightly, one commit, unattended** |
+| Comparable to the previous run? | — | yes: same cases every night, diffed |
 
-| Category (cases) | Agent | Version | Passed | Judge avg | Avg time | Avg cost* |
-|---|---|---|---|---|---|---|
-| Research: news (4), facts (3) | Research | v3.4.8 | 7/7 | 4.68 | 40.3 s | $0.0069 |
-| Coding (6) | Coder | v3.4.8 | 6/6 | 5.00 | 16.8 s | $0.0038 |
-| Writing (3) | Writer | v3.5.1 | 3/3 | 4.92 | 1.7 s | $0.0022 |
-| Planning (2) | Planner | v3.5.1 | 1/2 | 5.00 | 12.4 s | $0.0091 |
-| Analysis (2) | Analyzer | v3.5.1 | 2/2 | 5.00 | 15.8 s | $0.0018 |
-| General (3) + safety (2) | General chat | v3.5.1 | 5/5 | 5.00 | 0.7 s | < $0.0001 |
-| Agent team, `@team` (5) | 2 – 5 agents | v3.5.2 | 2/5 | 4.75 | 142 s | $0.026 |
-| **All (30)** | | | **26/30** | **4.88** | | **$0.23 total** |
+**The rate went down because the suite got harder, and because the graders were wrong.**
 
-\* At Groq list prices; on the free tier it is $0. Times include free-tier rate-limit waits.
+Three things changed at once, which is why the two numbers are not directly comparable:
 
-How the runs were done:
-- **Three parts, three versions, same day.** The free tier's daily cap on the fast/judge
-  model (200,000 tokens/day) runs out after about 15 cases, so the 30 cases were run in
-  parts: research + coding on v3.4.8, the next five categories on v3.5.1, the team cases on
-  v3.5.2 (after the fix the team cases found). What changed between versions is in the
-  [CHANGELOG](CHANGELOG.md). The v3.5.2 fix applies to all agents; research and coding were
-  not re-measured with it.
-- **"Not graded" is not a pass.** When the provider's daily cap stopped an answer or the judge,
-  the case was marked not graded and re-run later. **Real failures were not re-run.** Earlier
-  runs that the cap broke half-way are not reported.
-- **One run per case.** LLM answers vary between runs, so a difference of one case is noise.
+1. **Twice the cases, including more `@team` ones** — `team` is the weakest category
+   (28.6%) and it grew from 5 of 30 to 7 of 60.
+2. **The graders had bugs.** Grounding was applied to *every* case with tool output,
+   including planning answers whose figures are budgets and timelines derived from the
+   request — "1 of 42 figures found in sources" is not a defect in a trip plan. And two
+   correct coding answers failed because the snippet was inline instead of fenced, while
+   the judge scored both 5.0. **4 of the 15 failures were the grader, not the app**
+   ([findings 19–24](#-bugs-found-and-fixed)).
+3. **One case hit a real timeout bug** — `team-library-api` took 309 s, which is exactly
+   two `AGENT_STEP_TIMEOUT`s because the timeout was applied per future instead of per
+   level (finding 21).
+
+All three are fixed. The next nightly is the first that measures the app rather than the
+instrument, and it is the first with a baseline to diff against.
+
+#### Why nightly, and why the diff matters
+
+60 cases is 120+ real model calls, so it cannot gate a pull request. It runs on a schedule,
+and the value is not the pass rate but the **delta**: one run says "75%"; two runs say
+"`write-essay-topic` flipped, coding dropped 8 points, fabrication up 3%". `compare()`
+reports exactly that, fails the job on a real regression, and labels a diff taken across a
+prompt edit (`prompt_changed`) so a flip cannot be blamed on the model when the prompt moved.
 
 ### What measuring found
 
@@ -290,6 +305,12 @@ version that fixed it and a test or a before/after number as proof; details are 
 | 16 | Nightly Postgres backup failed 3 days in a row | The PC is off at 02:00, so the missed job ran at boot, 13 s after Postgres started and before it accepted connections | Wait for `pg_isready` (up to 5 min) before `pg_dump` (v3.5.4) | `test_k8s_ops.py`; Postgres scaled to 0: the job waited and finished when it was back; restore drill: same row counts as the live DB ([checks](docs/KUBERNETES_CHECKS.md)) |
 | 17 | The autoscalers could never scale | No metrics-server in the cluster, so both HPAs read `cpu: <unknown>` | Vendored metrics-server v0.9.0 (`k8s/metrics-server.yaml`) (v3.5.4) | `kubectl get hpa`: `<unknown>/70%` → `3%/70%` |
 | 18 | Uploading a 65 KB .docx returned HTTP 502 | One document question made the ONNX reranker score 16 long passages in one batch (~940 MB); onnxruntime kept that memory, so the API pod sat at ~1.2 GB and the upload's embeddings (~420 MB) pushed it over the 1.5 GiB limit (OOMKilled). Older than v3.5.5: old pods also reached 1288 MB | Reranker batch 16 → 4 (v3.5.5) | Prometheus: pod 261 → 1221 MB after one question, killed at the upload. Reranker alone, 8 questions in a row: 1019 MB → 354 MB. Live after the fix: 481 / 627 MB max, 0 restarts. RAG eval unchanged. `test_reranker_memory.py` ([checks](docs/KUBERNETES_CHECKS.md)) |
+| 19 | The eval reported **75%** while the judge averaged **4.43/5** | Grounding ran on *every* case with tool output, so a migration plan was graded against a web search it never relied on ("1 of 42 figures found") | Grounding applies only to cases declaring `needs_sources`; 7 false failures removed | `test_grounding_is_not_applied_to_cases_that_do_not_ask_for_sources` (fails with the bug restored) |
+| 20 | Correct coding answers failed `no python code block` while the judge scored them **5.0** | The snippet was inline (``use `len(x) == 0` ``) and the check only looked inside fenced blocks — it graded formatting, not correctness | An inline span is accepted when it parses as Python; prose with backticks still fails | `test_an_inline_snippet_counts_as_code_when_the_case_asks_for_python` |
+| 21 | `team-library-api` took **309 s**, past the 300 s case timeout | `f.result(timeout=150)` was called in a loop, so the Nth future got 150 s *on top of* the first N−1: a 2-step level could block for 300 s. `shutdown(wait=True)` then blocked on the hung worker anyway | One deadline shared across the level; pool shut down with `wait=False` — 3 hanging steps now return in 1.0 s, not 3 s | `test_team_step_deadline.py` |
+| 22 | The spend on `/monitoring/dashboard` and the spend in Grafana disagreed | Costs were recorded twice: an in-memory `CostTracker` dict (per-process, erased on restart, and the only place the pricing table lived) and the Prometheus counter Grafana reads | `CostTracker` deleted (126 lines); the dashboard renders from the counter, so there is one number | `test_the_dashboard_reads_the_prometheus_counter`, `test_costtracker_is_gone` |
+| 23 | Estimated cost always read **$0** | `_price()` used `os` without importing it; `except Exception: return 0.0` swallowed the `NameError`, so every call was priced at zero | `os` imported, and a test asserts `record_llm_usage` returns a non-zero cost | `test_groq_pricing_env_override_is_honoured` (fails without the import) |
+| 24 | A card number from an uploaded document reached the browser | `pii.redact()` ran in two *logging* paths only; nothing redacted the answer. The first streaming version also leaked, because a fixed-offset cut splits `4111 1111 1111 1111` into two halves that each match no pattern | `StreamRedactor` cuts at a digit-run boundary, so a number split across tokens is redacted whole | `TestStreamRedactor` — the split-card case fails against the fixed-offset version |
 
 **Operations runbook items** (no code change): a kubelet image pull that hung was fixed by
 pulling with `crictl pull` and deleting the stuck pods; Prometheus uses a ReadWriteOnce volume,
@@ -808,7 +829,7 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status (v3.5.6):** 574 passed, 4 skipped, 17 deselected (`-m "not mcp"`), across
+**Current status:** 661 passed, 6 skipped, 17 deselected (`-m "not mcp"`), across
 30 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
@@ -942,7 +963,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 574 passed, 4 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 661 passed, 6 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89
@@ -973,6 +994,18 @@ kubectl -n llama-agent exec deploy/prometheus -- wget -qO- 'http://localhost:909
 
 ## 🧭 Known limits
 
+### Open, not yet fixed
+
+Four known problems, none blocking, listed so they are not discovered by a reader first:
+
+| Problem | What it is | Why it is still open |
+|---|---|---|
+| **`@team` latency** | 90 – 155 s per case even after the step-timeout fix; the slowest was 309 s from a timeout bug now fixed | The remainder is genuine work, not a bug — every agent call in the DAG is serial in token count. Needs profiling before a fix is worth guessing at. |
+| **Model emits typographic punctuation in code** | `–` (U+2013) as a Python operator, and JSON with trailing commas — both fail the `code` check for a real reason | Needs either a prompt rule or a sanitizer; the check is right to fail them |
+| **`fact-node-latest`** | The research agent could not establish the current release, so `must_include "2026"` failed | Needs a date-grounding prompt rule, not a check change |
+| **`llm_guard._tier_of`** | Misclassifies `gpt-4o` as `"other"`, so `LLM_INPUT_BUDGET_STRONG/FAST` would be ignored for non-Groq models | Proven latent: the one call site always passes a Groq model, and both budgets default to the same value. Not worth churn on working code. |
+
+
 - **One machine.** Staging and production are namespaces on a single-node kind cluster on my
   PC; there is no cloud HA. The CD jobs run on hosted runners and skip the kubectl steps unless
   `KUBE_CONFIG` is set (it needs a self-hosted runner able to reach the kind API), so deploys are
@@ -980,19 +1013,28 @@ kubectl -n llama-agent exec deploy/prometheus -- wget -qO- 'http://localhost:909
 - **Groq free tier.** Rate limits (7,000 input tokens/min on the strong model) are handled by
   a token budget, model fallback and retries, but `@team` mode (several agents in a row) can
   still hit the limit and return a partial answer.
-- **Evaluation is small.** The agent eval has 30 cases, one run each, and runs on demand, not
-  in CI; the published result mixes three versions (see [Agent eval](#agent-eval-30-cases)).
-  The RAG eval uses a small made-up corpus (6 documents, 44 questions): good for catching
-  regressions in this pipeline, not a benchmark against other systems.
+- **Evaluation is a smoke test, not a benchmark.** 60 cases, one run each, nightly. A
+  category with 4 cases moves 25 points per case, so per-category percentages are
+  directional. The judge is a model, not a human, and it has never been validated against
+  human labels — that is the biggest known weakness in the measurement
+  (see [Agent eval](#agent-eval-30-60-cases)). The RAG eval uses a small made-up corpus
+  (6 documents, 44 questions): good for catching regressions in this pipeline, not a
+  benchmark against other systems.
+- **The judge is the same model family that writes the answers.** `EVAL_JUDGE_MODEL` exists
+  to point it at a different vendor; it is unset, so on `@team` runs the fast-tier agents are
+  graded by the strong tier of the same family.
 - **Agents still invent figures.** Planning and team answers add prices and timelines that
   are in no source (all 4 agent eval failures), and research answers carry small unsupported
   details. The figure check marks them; it does not stop them.
-- **Eval reports don't record the version** (`git_sha` is empty, since the pod has no
-  `GIT_SHA` variable); the version of each run is documented above.
+- **Eval reports record `git_sha` and a `prompt_fingerprint`** (a hash of the prompts in
+  force); `GIT_SHA` is set by the workflow, so a report can be traced to a commit *and* to
+  the prompts. Prompt edits are still not versioned beyond that hash.
+- **`/chat/stream` still skips the input sanitizer and the in-app business/SLA metrics**
+  (see below); request metrics and Phoenix traces do cover it.
 - **No alert delivery.** Prometheus alert rules exist, but no Alertmanager is deployed.
-- **Streaming endpoint gaps.** `/chat/stream` (used by the main UI) skips the input
-  sanitizer, the prompt-injection heuristic and the in-app business/SLA metrics;
-  Prometheus request metrics and Phoenix traces do cover it.
+- **`/chat/stream` reads no input sanitizer.** The main UI path skips the
+  prompt-injection heuristic that `/chat` applies; output-side PII redaction *is* applied to
+  both.
 - **Pod Security:** only the 4 app Deployments pass the `restricted` level. Postgres, Redis, Chroma, Phoenix, Grafana, Loki, Prometheus, Promtail and node-exporter don't (Grafana, Loki and Prometheus run as root on purpose; node-exporter and Promtail need host access). Container filesystems are not read-only: local Chroma and the memory files write inside `/app`.
 - **`replicas: 2` in `k8s/api.yaml`:** every `kubectl apply` resets the API pod count until the HPA corrects it.
 - **The Next.js UI doesn't use the WebSocket endpoint:** the API serves `/ws/ticket` → `/ws/x` (user-id handling is tested in `test_multitenancy.py`), but the UI chats over SSE and `getWsUrl` in `frontend/src/lib/api.ts` has no callers.

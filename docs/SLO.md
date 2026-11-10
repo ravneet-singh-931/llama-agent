@@ -23,7 +23,7 @@ no SLO.
 
 | SLO | Target | SLI | Why this number |
 |---|---|---|---|
-| Availability | 95% | `outcome="ok"` / all chats except `cancelled` | In the final agent eval all 30 cases ended with an answer (the 4 failed cases were unsupported figures, not failure notices); runs hit by free-tier rate-limit notices were re-run. 95% leaves a budget for those provider limits |
+| Availability | 95% | `outcome="ok"` / all chats except `cancelled` | In the 30-case agent eval every case ended with an answer (the 4 failures were unsupported figures, not failure notices); runs hit by free-tier rate-limit notices were re-run. In the 60-case nightly, 1 case was not graded because the *judge* call hit `429 Request too large` — an instrument failure, which is exactly the provider flakiness this budget exists for. 95% leaves room for it |
 | Quick latency | 95% within 10 s | `command`, `document`, `general` with `outcome="ok"` | Measured: general chat 0.7 s average, RAG answers p95 3.0 s |
 | Agent latency | 95% within 90 s | `agent` with `outcome="ok"` | Measured: research average 40 s, slowest case 72 s; coding 17 s |
 | `@team` latency | none | | 84 – 247 s on the free tier, limited by the 7,000 input tokens/min cap, not by the app. `@team` still counts in availability |
