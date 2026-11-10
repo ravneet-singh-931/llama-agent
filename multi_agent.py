@@ -15,6 +15,7 @@ import time
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import List, Dict, Optional, Iterator, Tuple
 from datetime import datetime
 
@@ -58,6 +59,15 @@ def _evidence_block(sources: Optional[List[str]]) -> str:
         text = text[:limit] + "\n[...]"
     return ("\n\nSources the agent retrieved (tool results):\n"
             f"<<UNTRUSTED_DATA>>\n{text}\n<</UNTRUSTED_DATA>>")
+
+# Hard ceiling on one DAG step inside collaborate(). The budget guard only
+# runs between levels, so without this a single wedged agent call (a stalled
+# HTTP read, a model that never returns) hangs the whole @team request.
+# Default sits below AGENT_LATENCY_BUDGET so the timeout fires first and the
+# step degrades to a placeholder instead of the run reporting "over budget".
+# Read at call time (not import time) so tests and operators can override it.
+def _step_timeout_seconds() -> float:
+    return float(os.getenv("AGENT_STEP_TIMEOUT", "150"))
 
 load_dotenv()
 
@@ -1437,7 +1447,11 @@ class MultiAgentOrchestrator:
 
     def _budget_exceeded(self, start_time: float, est_tokens: float) -> bool:
         """Cost/latency guard (item 7). Stops spawning new steps when the
-        wall-clock latency or the rough token estimate exceeds its budget."""
+        wall-clock latency or the rough token estimate exceeds its budget.
+
+        This runs BEFORE each level, so it cannot stop a step that is already
+        stuck; _step_timeout_seconds() covers that case at the future.
+        """
         latency_budget = float(os.getenv("AGENT_LATENCY_BUDGET", "180"))
         token_budget = float(os.getenv("AGENT_TOKEN_BUDGET", "20000"))
         if time.time() - start_time > latency_budget:
@@ -1578,7 +1592,22 @@ class MultiAgentOrchestrator:
                 # Carry the request context (owner) into worker threads so
                 # tools and caches stay tenant-scoped.
                 futures = [submit_with_context(pool, _run_step, st) for st in step_objs]
-                outs = [f.result() for f in futures]
+                # result() with no timeout blocks forever: one wedged agent
+                # would hang the whole @team request past every budget guard
+                # (those only check BEFORE each level). On timeout we degrade
+                # to the same placeholder a failed step produces, so the rest
+                # of the DAG still completes.
+                step_timeout = _step_timeout_seconds()
+                outs = []
+                for sid, f in zip(level, futures):
+                    try:
+                        outs.append(f.result(timeout=step_timeout))
+                    except FuturesTimeout:
+                        logger.error("team step %s timed out after %ss",
+                                     sid, step_timeout)
+                        f.cancel()
+                        outs.append(f"[The {by_id[sid]['agent']} agent did not "
+                                    f"finish within {int(step_timeout)}s.]")
                 for sid, out in zip(level, outs):
                     results[sid] = out
 

@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Dict, List, Optional, Tuple
 
 from modules.web_tools import web_search, WEB_SEARCH_TOOL
@@ -34,6 +35,12 @@ _MAX_TOOL_ROUNDS = 4
 _MAX_READ_CHARS = 6000
 # Hard cap on any single tool result fed back to the model (token budget).
 _TOOL_RESULT_CHARS = int(os.getenv("AGENT_TOOL_RESULT_CHARS", "4000") or 4000)
+
+# How many times the same (tool, args) pair may be called in one loop before
+# we stop executing it. The round cap alone bounds the damage but still pays
+# for the wasted call; this catches the "model keeps asking the same thing"
+# failure mode at the second attempt.
+_MAX_IDENTICAL_CALLS = int(os.getenv("AGENT_MAX_IDENTICAL_CALLS", "2") or 2)
 
 # The RAG store the document tools read from (bound at app startup).
 _document_store = None
@@ -74,8 +81,15 @@ def list_uploaded_documents() -> str:
     return "Uploaded documents:\n" + "\n".join(f"- {d}" for d in docs)
 
 
-def read_uploaded_document(filename: str) -> str:
-    """Read the full text of one uploaded document (by its file name)."""
+def read_uploaded_document(filename: str, start_char: int = 0) -> str:
+    """Read one uploaded document (by file name), one window at a time.
+
+    A long document is returned in ``_MAX_READ_CHARS`` windows rather than
+    being silently amputated: the header reports the total size and the
+    offset to ask for next, so the model can page through a 40-page PDF
+    instead of answering from its first three pages and never knowing there
+    was more.
+    """
     store = _current_store()
     filename = (filename or "").strip()
 
@@ -100,8 +114,18 @@ def read_uploaded_document(filename: str) -> str:
     text = "\n".join(d.get("content", "") for d in chunks)
     if not text:
         return f"Document '{target}' is empty."
-    if len(text) > _MAX_READ_CHARS:
-        text = text[:_MAX_READ_CHARS] + "\n\n[...truncated, document is large...]"
+    total = len(text)
+    if total > _MAX_READ_CHARS:
+        start = max(0, min(int(start_char or 0), total - 1))
+        end = min(start + _MAX_READ_CHARS, total)
+        header = (f"[Document '{target}': {total} characters total. "
+                  f"Showing {start}-{end}.")
+        if end < total:
+            header += (f" Call again with start_char={end} to read the next "
+                       f"{_MAX_READ_CHARS} characters.]")
+        else:
+            header += " This is the end of the document.]"
+        return header + "\n\n" + text[start:end]
     return text
 
 
@@ -126,8 +150,12 @@ DOCUMENT_TOOLS = [
         "function": {
             "name": "read_uploaded_document",
             "description": (
-                "Read the full text of an uploaded document by file name. "
-                "Use the exact file name from list_uploaded_documents."
+                "Read the text of an uploaded document by file name. "
+                "Use the exact file name from list_uploaded_documents. "
+                "Long documents are returned in windows: the reply states the "
+                "total length and tells you which start_char to pass next. "
+                "Do NOT use this for general knowledge - only for the user's "
+                "own uploaded files."
             ),
             "parameters": {
                 "type": "object",
@@ -135,7 +163,15 @@ DOCUMENT_TOOLS = [
                     "filename": {
                         "type": "string",
                         "description": "File name of the uploaded document.",
-                    }
+                    },
+                    "start_char": {
+                        "type": "integer",
+                        "description": (
+                            "Character offset to start from (default 0). Use "
+                            "the value the previous reply told you to pass to "
+                            "continue reading a long document."
+                        ),
+                    },
                 },
                 "required": ["filename"],
             },
@@ -148,16 +184,42 @@ AGENT_TOOL_SCHEMAS: List[Dict] = [WEB_SEARCH_TOOL, *DOCUMENT_TOOLS]
 
 
 def dispatch_tool(name: str, arguments: dict) -> str:
-    """Execute a tool by name (result capped to AGENT_TOOL_RESULT_CHARS)."""
-    result = _dispatch(name, arguments)
+    """Execute a tool by name (result capped to AGENT_TOOL_RESULT_CHARS).
+
+    Times the call for the per-tool latency histogram. The histogram lives
+    here rather than in _dispatch so a truncated-but-successful call is still
+    measured.
+    """
+    t0 = time.monotonic()
+    try:
+        return _cap(_dispatch(name, arguments))
+    finally:
+        try:
+            from modules.prometheus_metrics import record_tool_seconds
+            record_tool_seconds(name, time.monotonic() - t0)
+        except Exception:  # nosec B110 - telemetry must never fail a tool call
+            pass
+
+
+def _cap(result: str) -> str:
+    """Cap one tool result at _TOOL_RESULT_CHARS, saying so in the text."""
     if len(result) > _TOOL_RESULT_CHARS:
-        result = (result[:_TOOL_RESULT_CHARS]
-                  + f"\n[... tool output truncated at {_TOOL_RESULT_CHARS} characters ...]")
+        return (result[:_TOOL_RESULT_CHARS]
+                + f"\n[... tool output truncated at {_TOOL_RESULT_CHARS} characters ...]")
     return result
 
 
+_KNOWN_TOOLS = ("web_search", "list_uploaded_documents", "read_uploaded_document")
+
+
 def _dispatch(name: str, arguments: dict) -> str:
-    """Execute a tool by name. Never raises for unknown tools."""
+    """Execute a tool by name. Never raises for unknown tools.
+
+    Error strings are the model's ONLY feedback channel, so they say what it
+    can do next instead of just what went wrong. The document tool already
+    did this ("Document 'x' not found. Available documents: ..."); this
+    applies the same rule to the dispatch layer.
+    """
     try:
         if name == "web_search":
             return web_search(str(arguments.get("query", "")),
@@ -166,10 +228,16 @@ def _dispatch(name: str, arguments: dict) -> str:
         if name == "list_uploaded_documents":
             return list_uploaded_documents()
         if name == "read_uploaded_document":
-            return read_uploaded_document(str(arguments.get("filename", "")))
+            return read_uploaded_document(
+                str(arguments.get("filename", "")),
+                start_char=int(arguments.get("start_char") or 0),
+            )
     except Exception as e:
-        return f"Tool '{name}' failed: {e}"
-    return f"Unknown tool: {name}"
+        return (f"Tool '{name}' failed: {e}. "
+                f"If this was a network or rate-limit error, retry with a "
+                f"different query or use another tool.")
+    return (f"Unknown tool: {name}. Valid tools are: "
+            f"{', '.join(_KNOWN_TOOLS)}.")
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +391,30 @@ def run_tool_rounds(client, model: str, messages: List[dict],
     if not tools:
         return messages, [], None
     events: List[str] = []
+    seen: Dict[tuple, int] = {}
+
+    def _guarded_dispatch(name: str, args: dict) -> str:
+        """Dispatch, but refuse to re-run the same (tool, args) repeatedly.
+
+        _MAX_TOOL_ROUNDS bounds the total damage; this bounds the waste. A
+        model stuck on "search the same query again" would otherwise pay for
+        that identical call every round. Keyed on the arguments so a genuine
+        second search with a NEW query is unaffected.
+        """
+        try:
+            key = (name, json.dumps(args, sort_keys=True, default=str))
+        except Exception:  # unserialisable args - just run it
+            return dispatch_tool(name, args)
+        seen[key] = seen.get(key, 0) + 1
+        # The default of 2 permits ONE retry: a transient error is worth
+        # repeating, an unchanged success is not. The 3rd call is refused.
+        if seen[key] > _MAX_IDENTICAL_CALLS:
+            return (f"You have already called {name} with exactly these "
+                    f"arguments {seen[key] - 1} times and the result will not "
+                    f"change. Use a DIFFERENT query, a different tool, or "
+                    f"answer with what you already have.")
+        return dispatch_tool(name, args)
+
     for _ in range(max_rounds):
         try:
             response = client.chat.completions.create(
@@ -370,7 +462,7 @@ def run_tool_rounds(client, model: str, messages: List[dict],
                     ],
                 })
                 for i, (name, args) in enumerate(transcript_calls):
-                    result = dispatch_tool(name, args)
+                    result = _guarded_dispatch(name, args)
                     events.append(f"⚙️ **{name}**")
                     messages.append({
                         "role": "tool",
@@ -421,7 +513,7 @@ def run_tool_rounds(client, model: str, messages: List[dict],
                 args = json.loads(tc.function.arguments or "{}")
             except Exception:
                 args = {}
-            result = dispatch_tool(tc.function.name, args)
+            result = _guarded_dispatch(tc.function.name, args)
             events.append(f"⚙️ **{tc.function.name}**")
             messages.append({
                 "role": "tool",

@@ -195,7 +195,11 @@ def test_agent_tool_schemas_include_search_and_docs():
 # ============ DISPATCH ============
 
 def test_dispatch_unknown_tool():
-    assert dispatch_tool("teleport", {"query": "x"}) == "Unknown tool: teleport"
+    # The error is the model's only feedback channel, so it must say what it
+    # CAN call - "Unknown tool: teleport" left it nowhere to go.
+    out = dispatch_tool("teleport", {"query": "x"})
+    assert out.startswith("Unknown tool: teleport.")
+    assert "web_search" in out and "read_uploaded_document" in out
 
 
 def test_dispatch_web_search_empty_query():
@@ -241,12 +245,25 @@ def test_read_document_not_found_lists_available():
     assert "CRM-3.docx" in out  # hints the available documents
 
 
-def test_read_document_truncates_large_files():
+def test_read_document_pages_large_files():
+    """A long document is PAGED, not amputated: the reply states the total
+    length and the offset to ask for next. Truncating silently meant a
+    40-page PDF became its first three pages with no signal."""
     rag = SimpleRAG()
     rag.add_text(("lorem ipsum dolor sit amet " * 400), source="uploads/big.txt")
     set_document_store(rag)
     out = read_uploaded_document("big.txt")
-    assert "[...truncated" in out
+    # The store re-joins chunks, so take the total from the header itself
+    # rather than recomputing it.
+    assert "characters total" in out
+    assert "start_char=" in out          # tells the model how to continue
+    total = int(out.split(": ")[1].split(" characters total")[0])
+    assert total > 6000, "the test document must exceed one window"
+    first = read_uploaded_document("big.txt", 0)
+    second = read_uploaded_document("big.txt", 6000)
+    assert first != second               # different window
+    tail = read_uploaded_document("big.txt", total - 10)
+    assert "end of the document" in tail
 
 
 # ============ TOOL ROUND LOOP ============
@@ -879,3 +896,54 @@ def test_duckduckgo_normal_page_still_formats_results():
         assert "https://example.com/1" in out
     finally:
         wt._http_get = orig
+
+
+# ============ REPEAT-CALL GUARD (tool-loop loop detection) ============
+
+def test_repeated_identical_call_is_refused_then_recovers(monkeypatch):
+    """The same (tool, args) pair runs at most _MAX_IDENTICAL_CALLS times.
+
+    The default of 2 allows ONE retry (a transient error is worth retrying);
+    the third identical call is refused and the model is told to change
+    approach. A NEW query is never affected.
+    """
+    import modules.agent_tools as at
+
+    seen = []
+    monkeypatch.setattr(at, "dispatch_tool",
+                        lambda name, args: seen.append(dict(args)) or "SAME RESULT")
+
+    same = _FakeToolCall("web_search", '{"query": "same query"}')
+    other = _FakeToolCall("web_search", '{"query": "different query"}')
+    # Rounds: same, same (retry ok), same (REFUSED), new query, then answer.
+    client = _FakeClient([
+        ("", [same]), ("", [same]), ("", [same]), ("", [other]), ("done", None),
+    ])
+    msgs = [{"role": "user", "content": "hi"}]
+    out_msgs, _events, final = run_tool_rounds(
+        client, "m", msgs, tools=AGENT_TOOL_SCHEMAS, max_rounds=5)
+
+    tool_contents = [m["content"] for m in out_msgs if m.get("role") == "tool"]
+    assert len(tool_contents) == 4
+    assert "SAME RESULT" in tool_contents[0]          # 1st: executed
+    assert "SAME RESULT" in tool_contents[1]          # 2nd: retry allowed
+    assert "already called web_search" in tool_contents[2]   # 3rd: refused
+    assert "SAME RESULT" not in tool_contents[2]
+    assert "SAME RESULT" in tool_contents[3]          # different query: fine
+    assert len(seen) == 3, "dispatch runs 3x (2 same + 1 new), not 4"
+    assert final == "done"
+
+
+def test_repeat_guard_does_not_fire_on_different_args(monkeypatch):
+    """Two DIFFERENT queries are never treated as repeats."""
+    import modules.agent_tools as at
+    monkeypatch.setattr(at, "dispatch_tool", lambda name, args: "OK")
+    calls = [_FakeToolCall("web_search", '{"query": "a"}'),
+             _FakeToolCall("web_search", '{"query": "b"}'),
+             _FakeToolCall("web_search", '{"query": "c"}')]
+    client = _FakeClient([("", [c]) for c in calls] + [("done", None)])
+    msgs = [{"role": "user", "content": "hi"}]
+    out_msgs, _e, _f = run_tool_rounds(
+        client, "m", msgs, tools=AGENT_TOOL_SCHEMAS, max_rounds=4)
+    tool_contents = [m["content"] for m in out_msgs if m.get("role") == "tool"]
+    assert all("already called" not in c for c in tool_contents)

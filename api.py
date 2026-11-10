@@ -78,7 +78,7 @@ from modules.security_hardening import (
     audit_logger,
     get_security_headers,
     get_client_ip,
-    sanitize_input,
+    strip_html_vectors,
     detect_prompt_injection,
 )
 
@@ -2087,11 +2087,12 @@ async def chat(
     # Name introduced in plain chat? ("my name is X" / "call me X" / "i am X")
     detected_name = extract_name_from_message(request.message)
     
-    # Enterprise security: detect dangerous input patterns (sanitize + audit).
-    # The sanitizer is used as a detection layer - if it alters the message,
-    # we flag it for the audit log and continue with the original so the
-    # agent's capabilities are not degraded.
-    sanitized_message = sanitize_input(request.message)
+    # Web-safety detection layer (XSS/script vectors), audit only.
+    # strip_html_vectors() is destructive - it HTML-escapes quotes and braces -
+    # so it is used purely as a signal: if it alters the message we flag it,
+    # then continue with the ORIGINAL text so the agent is not degraded.
+    # This is NOT prompt-injection defence; see detect_prompt_injection below.
+    sanitized_message = strip_html_vectors(request.message)
     if sanitized_message != request.message:
         audit_logger.log_suspicious_activity(
             "unsanitized_input",

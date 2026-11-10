@@ -10,7 +10,7 @@ import datetime
 import threading
 import time
 from collections import OrderedDict
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, List, Optional, Sequence
 
 try:
@@ -138,10 +138,31 @@ def _budget_context_string(mem, user_id, conversation_id, max_tokens: int = 2000
 
 
 def _span_cm(name: str, user_id: str, conversation_id: str):
-    """Context manager yielding an OTel span (or a null context)."""
+    """Context manager yielding an OTel span (or a null context).
+
+    The identity attributes are set HERE rather than at each call site: the
+    streaming path is the one /chat/stream actually uses, and it previously
+    passed ``user_id``/``conversation_id`` in and then dropped them, so every
+    stream span was anonymous. A span tree you cannot attribute to a user is
+    a timing diagram, not a trace.
+    """
     if _AGENT_TRACER is None:
         return nullcontext()
-    return _AGENT_TRACER.start_as_current_span(name)
+    cm = _AGENT_TRACER.start_as_current_span(name)
+
+    @contextmanager
+    def _with_attrs():
+        with cm as span:
+            if span is not None and hasattr(span, "set_attribute"):
+                span.set_attribute("user.id", str(user_id or "guest"))
+                span.set_attribute("conversation.id", str(conversation_id or ""))
+                # Which build served this run - the only way to answer
+                # "was this the old prompt or the new one?" from a trace.
+                span.set_attribute("config.commit",
+                                   os.getenv("GIT_SHA", "unknown"))
+            yield span
+
+    return _with_attrs()
 
 # ===================== SETUP =====================
 load_dotenv()
@@ -571,10 +592,9 @@ async def run_agent(user_input: str, memory: Optional[Any] = None,
         logger.log_interaction(user_input, cached, [], elapsed)
         return cached
 
-    with _span_cm("run_agent", user_id, conversation_id) as span:
-        if span is not None and hasattr(span, "set_attribute"):
-            span.set_attribute("user.id", user_id)
-            span.set_attribute("conversation.id", conversation_id)
+    with _span_cm("run_agent", user_id, conversation_id):
+        # user.id / conversation.id / config.commit are set inside _span_cm so
+        # the streaming path gets them too (it used to drop them).
         result = await _run_agent_compute(prompt, cache_key, start_time, user_input)
     return result
 
