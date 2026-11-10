@@ -388,11 +388,21 @@ class FactMemory:
     """
 
     REDIS_KEY = "llama:facts"
+    # Append-only history of fact changes. The current fact is a single value,
+    # so "why does the agent think my name is X?" had no answer once it was
+    # overwritten -- remember() silently replaced the old value. Keeping the
+    # superseded value makes a wrong fact traceable to the turn that set it.
+    HISTORY_KEY = "llama:fact_history"
+
+    # Bounded history: enough to answer "what did it say before?" for recent
+    # turns, small enough that a long-lived pod cannot leak memory.
+    HISTORY_MAX = 500
 
     def __init__(self, facts_file: str = "memory/fact_memory.json"):
         self.facts_file = facts_file
         self.facts = self._load()
         self.redis = self._init_redis()
+        self._history: List[Dict] = []
 
     def _init_redis(self):
         """Connect to Redis if configured; return None (use JSON) otherwise."""
@@ -463,9 +473,15 @@ class FactMemory:
         """Remember a fact under a per-user namespaced key (multi-tenant isolation)."""
         fk = self._fkey(key, user_id)
         uid = self._norm_user(user_id)
+        previous = self._current_value(fk)
         entry = {"value": value, "user_id": uid, "timestamp": datetime.now().isoformat()}
         self.facts[fk] = entry
         self._save()
+        if previous is not None and previous != value:
+            try:
+                self._record_change(key, uid, previous, value, "update")
+            except Exception as e:      # history is diagnostic, the fact is not
+                print(f"[FACTS] history write failed (fact still saved): {e}")
         if self.redis is not None:
             try:
                 self.redis.hset(self.REDIS_KEY, fk, json.dumps(entry))
@@ -523,12 +539,77 @@ class FactMemory:
             context += f"- {key}: {value}\n"
         return context
 
+    def _current_value(self, fk: str):
+        """Current stored value for a namespaced key, or None."""
+        data = self.facts.get(fk)
+        if data is None:
+            return None
+        return data.get("value") if isinstance(data, dict) else data
+
+    def _record_change(self, key: str, uid: str, old, new, action: str) -> None:
+        """Append one change to the history. Never raises.
+
+        History is a bounded Redis list (or an in-memory list when Redis is
+        absent) so it cannot grow without limit on a long-lived pod. It is
+        diagnostic, not durable storage: losing it costs nothing operationally.
+        """
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "user_id": uid,
+            "key": key,
+            "action": action,
+            "old": old,
+            "new": new,
+        }
+        try:
+            if self.redis is not None:
+                self.redis.lpush(self.HISTORY_KEY, json.dumps(record))
+                self.redis.ltrim(self.HISTORY_KEY, 0, self.HISTORY_MAX - 1)
+            else:
+                self._history.append(record)
+                del self._history[:-self.HISTORY_MAX]
+        except Exception as e:
+            print(f"[FACTS] history write failed (fact still saved): {e}")
+
+    def history(self, key: str = None, user_id: str = None, limit: int = 50):
+        """Recent fact changes, newest first, optionally filtered.
+
+        ``key``/``user_id`` filter in Python rather than in Redis: the list is
+        bounded (HISTORY_MAX) so a scan is cheap, and Redis lists cannot be
+        filtered server-side anyway.
+        """
+        try:
+            if self.redis is not None:
+                raws = self.redis.lrange(self.HISTORY_KEY, 0, -1) or []
+                records = []
+                for raw in raws:
+                    try:
+                        records.append(json.loads(raw))
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+            else:
+                records = list(reversed(self._history))
+        except Exception:
+            records = list(reversed(self._history))
+        if key is not None:
+            records = [r for r in records if r.get("key") == key]
+        if user_id is not None:
+            uid = self._norm_user(user_id)
+            records = [r for r in records if r.get("user_id") == uid]
+        return records[:max(0, limit)]
+
     def forget(self, key: str, user_id: str = "default"):
         """Forget a specific fact for a user (defaults to the 'default' tenant)."""
         fk = self._fkey(key, user_id)
         if fk in self.facts:
+            previous = self._current_value(fk)
             del self.facts[fk]
             self._save()
+            if previous is not None:
+                try:
+                    self._record_change(key, self._norm_user(user_id), previous, None, "forget")
+                except Exception as e:
+                    print(f"[FACTS] history write failed (fact still forgotten): {e}")
         if self.redis is not None:
             try:
                 self.redis.hdel(self.REDIS_KEY, fk)

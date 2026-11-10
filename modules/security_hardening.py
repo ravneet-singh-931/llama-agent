@@ -520,6 +520,36 @@ class AuditLogger:
         }
         self._write_log(event)
 
+    def log_tool_call(
+        self,
+        tool: str,
+        user_id: str,
+        success: bool,
+        duration_ms: float = 0.0,
+        detail: str = "",
+    ) -> None:
+        """Log one agent tool invocation.
+
+        Tool calls are the only thing this app does that reaches outside its
+        own process: web_search sends a query to a third party and the
+        document tools read user files. Every other security-relevant event
+        was already audited (login, upload, rate limit, suspicious input) but
+        this one was not, so "who searched for what, and when" had no trail.
+
+        ``detail`` should be a short, already-redacted summary -- never a full
+        query or a document body. ``_write_log`` applies SSN/card redaction to
+        it regardless, because a query the model built can contain whichever
+        identifiers the user pasted.
+        """
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_type": "TOOL_CALL_SUCCESS" if success else "TOOL_CALL_FAILURE",
+            "identifier": user_id,
+            "details": f"tool={tool}, duration_ms={round(duration_ms, 1)}"
+                       + (f", detail={detail}" if detail else ""),
+        }
+        self._write_log(event)
+
     def get_recent_events(self, hours: int = 24) -> List[Dict]:
         """Get events from the last N hours (reads the shared Redis trail)."""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)

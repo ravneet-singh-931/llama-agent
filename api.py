@@ -1681,6 +1681,12 @@ _DOC_CUT_NOTE = "_(The answer was cut off at the length limit. Ask a narrower qu
 
 # Marks an answer Corrective RAG could not verify against the excerpts
 # (shown so the user knows, never cached so asking again retries).
+_DOC_BAD_CITATION_NOTE = (
+    "_(Citation check: this answer cites {bad}, which is not among the "
+    "excerpts it was given. Treat that citation as unverified.)_")
+_DOC_UNSOURCED_NOTE = (
+    "_(Citation check: this answer makes claims without citing a document. "
+    "Treat it as unverified.)_")
 _DOC_UNVERIFIED_NOTE = ("_(Some statements in this answer could not be verified "
                         "against the document excerpts - please double-check them.)_")
 
@@ -1723,6 +1729,39 @@ def _doc_completion_text(resp) -> str:
             return ""
         text += "\n\n" + _DOC_CUT_NOTE
     return text
+
+
+def _check_doc_citations(answer: str, context: str) -> str:
+    """Validate the answer's citations against the excerpts it was given.
+
+    Detector, not blocker: an invented citation is appended to the answer as a
+    visible note and counted in a metric. Silently stripping or rewording the
+    citation would hide the model's mistake; showing it lets the reader judge
+    and makes the failure countable.
+
+    Returns ``answer`` unchanged when the citations hold up.
+    """
+    try:
+        from modules.citations import check_citations
+        report = check_citations(answer, context)
+    except Exception:
+        return answer                      # never break an answer over this
+    if report["ok"]:
+        return answer
+    try:
+        from modules.prometheus_metrics import record_citation_failure
+        if report["invented_files"]:
+            record_citation_failure("invented_file")
+        elif report["invalid"]:
+            record_citation_failure("wrong_chunk")
+        elif report["unsourced"]:
+            record_citation_failure("unsourced")
+    except Exception:
+        pass
+    if report["unsourced"]:
+        return answer + "\n\n" + _DOC_UNSOURCED_NOTE
+    bad = ", ".join(f"{f} chunk {c}" for f, c in (report["invented_files"] or report["invalid"]))
+    return answer + "\n\n" + _DOC_BAD_CITATION_NOTE.format(bad=bad)
 
 
 def _ask_doc_question(client, query: str, context: str) -> str:
@@ -2051,8 +2090,9 @@ def answer_from_documents(query: str, rag) -> str:
                     answer = ""
                     retry_error = str(e)
                 if answer and unsupported and not verify(answer, combined):
-                    return answer + "\n\n" + _DOC_UNVERIFIED_NOTE  # shown, not cached
+                    return _check_doc_citations(answer, combined) + "\n\n" + _DOC_UNVERIFIED_NOTE
                 if answer:
+                    answer = _check_doc_citations(answer, combined)
                     _remember(answer)
                     return answer
 
@@ -2061,7 +2101,8 @@ def answer_from_documents(query: str, rag) -> str:
             "⚠️ The answer couldn't be completed (the model ran out of room). "
             "Please ask again, or ask a narrower question.")
     if unsupported:
-        return first + "\n\n" + _DOC_UNVERIFIED_NOTE  # shown, not cached
+        return _check_doc_citations(first, context) + "\n\n" + _DOC_UNVERIFIED_NOTE
+    first = _check_doc_citations(first, context)
     _remember(first)
     return first
 

@@ -8,7 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **`modules/provider_client.py` — the provider registry is now actually
+- **`modules/citations.py` — the document-answer prompt's citation rule is
+  now checked.** The prompt demands "cite the source for EVERY claim ... never
+  cite a file that is not in the excerpts" and nothing verified either half.
+  A model that names a document it was never shown produces an answer that
+  *looks* rigorously sourced — correct format, plausible file — which is
+  exactly why it needs catching. The answer's `(file, chunk N)` citations are
+  matched against the `--- Source: ... ---` labels it actually received; an
+  invented file, a chunk that was not shown, or claims with no citation at all
+  are appended as a visible note and counted in
+  `llama_agent_citation_failures_total{kind}`. Detector, not blocker: silently
+  rewriting a citation would hide the mistake instead of surfacing it.
+- **`AuditLogger.log_tool_call`.** Every other security-relevant event was
+  audited (login, upload, rate limit, suspicious input) but tool calls were
+  not — and they are the only thing this app does that leaves its own process.
+  "Who searched for what, and when" now has a trail, with the same SSN/card
+  redaction as the rest of the audit log.
+- **FactMemory history.** `remember()` silently replaced the previous value, so
+  once the agent had the wrong fact there was no way to see what it used to
+  say or which turn overwrote it. Updates and deletions are now appended to a
+  bounded history (500 entries, Redis or in-memory), tenant-scoped and
+  queryable via `history(key=..., user_id=...)`.
+
+### Changed
+- **`record_llm_usage` now passes `query_type` to the CostTracker.** The
+  tracker has bucketed by query type since it was written, but nothing ever
+  supplied one, so `cost_by_query_type` was **always empty in production** —
+  you could see total spend and spend per user, but not which part of a `@team`
+  run cost the money. Now populated from the existing per-agent `component`
+  label.
+
+- **The critic now reviews on a different model tier than the one that wrote
+  the answer.**- **`modules/provider_client.py` — the provider registry is now actually
   called.** `GroqLLM.__init__` hardcoded `Groq(api_key, base_url)`, so every
   model in `PROVIDER_MODELS` other than Groq's own was POSTed to
   api.groq.com and 404'd. The registry, `resolve_provider_chain`,
@@ -101,6 +132,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not need the web stack, and the offline gate must not depend on it.
 
 ### Fixed
+- **Corrective RAG was inverting its own check.** `CRAGRetriever._is_supported`
+  required every answer sentence to appear as a **substring** of the retrieved
+  context. That asks the opposite of the question it claims to ask: a correct
+  paraphrase necessarily fails ("Postgres offers strong transactional
+  guarantees" is not in a chunk saying "PostgreSQL ... ACID guarantees") while
+  a verbatim copy trivially passes. Measured: paraphrase → `False`, copy →
+  `True`.
+
+  The consequences compounded. A `False` on a good answer sent the request down
+  a retry path costing two more LLM calls, and that path then returned
+  `{"supported": True}` **hardcoded** — so the caller's unsupported branch
+  could never fire on it. The caller, `_retrieve_context`, preferred the CRAG
+  answer only when `supported` was true and otherwise fell back to
+  `results[0]["content"]`: the first **raw retrieved chunk**, unprocessed and
+  never shown to any model. Net effect: a well-phrased answer could be thrown
+  away in favour of a document fragment, after paying for three extra calls.
+
+  Fixed by (a) delegating to the same LLM verdict judge `verify_answer`
+  already used, so the file has one definition of "supported"; (b) reporting
+  the measured verdict instead of assuming the retry worked; (c) keeping the
+  CRAG answer rather than substituting a raw chunk; and (d) giving the answer
+  step the **question** — the old prompt was the context plus `"Your answer: "`
+  with nothing to answer.
+- **`CRAGRetriever` no longer crashes on a single-prompt LLM client.** Both the
+  answer and rewrite steps passed `system_prompt=`/`user_prompt=`/`max_tokens=`
+  unconditionally, so a client accepting one argument raised `TypeError`
+  instead of degrading.
+- **`summarize()` tolerates report records without trajectory fields.** A
+  baseline JSON written before `steps`/`redundant_steps` existed raised
+  `KeyError`.
 - **`web_search` can no longer be used to exfiltrate.** It is the app's only
   outbound channel, which makes it the one realistic path for an indirect
   prompt injection to ship data out. Queries over `WEB_MAX_QUERY_CHARS`

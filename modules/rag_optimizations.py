@@ -736,6 +736,11 @@ class HyDERetriever:
     def __init__(self, vector_store, llm_client: Optional[LLMClient] = None):
         self._store = vector_store
         self._llm = llm_client or GroqLLMClient()
+        # Shared with OptimizedRAG.verify_answer so "supported" means one
+        # thing in this file. None when the client cannot serve the judge
+        # prompt (e.g. a two-argument stub), in which case _is_supported falls
+        # back to the deterministic substring check.
+        self._verify = _llm_verdict_judge(self._llm)
 
     def search(self, query: str, top_k: int = 5) -> List[Dict]:
         """Search using a hypothetical answer as the query embedding."""
@@ -897,6 +902,68 @@ class QueryDecomposer:
 # =============================================================================
 
 
+def _llm_verdict_judge(llm):
+    """Return a callable (answer, context) -> bool backed by the LLM, or None.
+
+    Kept separate from OptimizedRAG so CRAGRetriever -- which is constructed
+    with its own client -- can share the same verdict logic without inheriting
+    the whole optimizer.
+    """
+    if llm is None:
+        return None
+    try:
+        import inspect
+        params = inspect.signature(llm.complete).parameters
+        accepts_prompts = all(n in params for n in ("system_prompt", "user_prompt"))
+    except (TypeError, ValueError):
+        return None
+    if not accepts_prompts:
+        return None
+
+    verdict_re = re.compile(r"\b(UNSUPPORTED|NOT\s+SUPPORTED|SUPPORTED)\b")
+
+    def judge(answer: str, context: str) -> bool:
+        if not answer or not context:
+            return True
+        try:
+            budget = max(256, int(os.getenv("RAG_CRAG_MAX_TOKENS", "1024")))
+            ctx_chars = int(os.getenv("RAG_CRAG_CONTEXT_CHARS", "12000"))
+        except ValueError:
+            budget, ctx_chars = 1024, 12000
+        try:
+            reply = llm.complete(
+                "You are a strict fact checker. Decide whether every factual claim "
+                "in the ANSWER is stated in, or directly follows from, the CONTEXT. "
+                "Saying that the context does not cover something is not a claim. "
+                "Reply with one word: SUPPORTED or UNSUPPORTED.",
+                f"CONTEXT:\n{context[:ctx_chars]}\n\nANSWER:\n{answer[:4000]}",
+                max_tokens=budget,
+            )
+        except Exception:
+            return True          # never fail an answer because the judge broke
+        found = verdict_re.findall((reply or "").upper())
+        if not found:
+            return True          # "unsure" counts as supported, as in verify_answer
+        return found[-1] == "SUPPORTED"
+
+    return judge
+
+
+def _sentence_subset_of(answer: str, context: str) -> bool:
+    """Deterministic fallback: does every answer sentence appear verbatim?
+
+    Only used when no LLM judge is available (offline tests, a stub client).
+    It is deliberately conservative-adjacent: it under-reports support, which
+    is why it is the FALLBACK and not the primary check.
+    """
+    ctx = (context or "").strip()
+    for sentence in re.split(r"(?<=[.!?])\s+", (answer or "").strip()):
+        sentence = sentence.strip()
+        if sentence and sentence not in ctx:
+            return False
+    return True
+
+
 class CRAGRetriever:
     """Corrective RAG: self-correction loop that detects unsupported answers.
 
@@ -913,6 +980,23 @@ class CRAGRetriever:
     def __init__(self, vector_store, llm_client: Optional[LLMClient] = None):
         self._store = vector_store
         self._llm = llm_client or GroqLLMClient()
+        # Shared with OptimizedRAG.verify_answer's logic so "supported" means
+        # one thing in this file. None when the client cannot serve the judge
+        # prompt (e.g. a two-argument stub), in which case _is_supported falls
+        # back to the deterministic substring check.
+        self._verify = _llm_verdict_judge(self._llm)
+
+    # Prompt for the ANSWER step. The previous version asked the model to
+    # "verify that your answer is supported by the retrieved context" over a
+    # prompt that contained only the context and no question, so the model had
+    # nothing to answer and nothing to verify. It then judged the result with
+    # _is_supported, which required every sentence to appear verbatim in the
+    # context -- so any paraphrase failed, and a literal copy passed.
+    _ANSWER_SYSTEM = (
+        "Answer the user's question using only the CONTEXT. "
+        "If the context does not contain the answer, say so plainly. "
+        "Be concise."
+    )
 
     def retrieve_and_answer(
         self,
@@ -920,7 +1004,7 @@ class CRAGRetriever:
         top_k: int = 5,
         max_retries: int = 2,
     ) -> Dict:
-        """Retrieve and answer, with self-correction.
+        """Retrieve, answer, and self-correct once if the answer is unsupported.
 
         Args:
             query: The user's query
@@ -928,56 +1012,73 @@ class CRAGRetriever:
             max_retries: Maximum number of re-retrieval attempts
 
         Returns:
-            Answer with trace of retries
+            {"answer", "retries", "supported"}. ``supported`` is a MEASURED
+            verdict: True only when the answer actually passed the check.
+            It used to be hardcoded True on the final return, so the caller's
+            ``if crag_result["supported"]`` branch could never take its
+            "unsupported" path on that route -- it reported success for
+            answers it had just decided were bad.
         """
-        # Step 1: Retrieve and answer
-        results = self._store.search(query, top_k=top_k)
+        # Step 1: retrieve, then ANSWER from the retrieved context.
         context = self._store.get_context(query, top_k)
+        answer = self._answer(query, context)
 
-        # Ask LLM to verify the answer
-        answer = self._llm.complete(
-            system_prompt="You are a helpful assistant. Verify that your answer is supported by the retrieved context. "
-                          "If any sentence in your answer is not supported, say so.",
-            user_prompt=f"Answer: {context}\n\nYour answer: ",
-            max_tokens=500,
-        )
-
-        # Check if the answer is supported
         if self._is_supported(answer, context):
             return {"answer": answer, "retries": 0, "supported": True}
 
-        # Step 2: Re-retrieve with rewritten query
+        # Step 2: re-retrieve with a rewritten query and answer again.
         rewritten_query = self._rewrite_query(query, answer)
         if rewritten_query == query:
-            # No rewrite possible — return the original answer
             return {"answer": answer, "retries": 1, "supported": False}
 
-        # Step 3: Re-retrieve with rewritten query
-        results = self._store.search(rewritten_query, top_k=top_k)
         context2 = self._store.get_context(rewritten_query, top_k)
+        answer2 = self._answer(query, context2)
 
-        # Ask LLM again
-        answer2 = self._llm.complete(
-            system_prompt="You are a helpful assistant. Verify that your answer is supported by the retrieved context. "
-                          "If any sentence in your answer is not supported, say so.",
-            user_prompt=f"Answer: {context2}\n\nYour answer: ",
-            max_tokens=500,
-        )
+        # Step 3: judge the SECOND answer, not the first, and report the
+        # verdict honestly instead of assuming the retry worked.
+        return {"answer": answer2, "retries": 2,
+                "supported": self._is_supported(answer2, context2)}
 
-        return {"answer": answer2, "retries": 2, "supported": True}
+    def _answer(self, query: str, context: str) -> str:
+        """Ask the LLM to answer ``query`` from ``context``.
+
+        Tolerates a client whose ``complete`` takes a single prompt (older
+        stubs, and the shape some callers pass in); the previous version
+        always passed ``system_prompt=``/``user_prompt=``, so such a client
+        raised TypeError instead of degrading.
+        """
+        prompt = f"CONTEXT:\n{context}\n\nQUESTION: {query}"
+        try:
+            return self._llm.complete(
+                system_prompt=self._ANSWER_SYSTEM, user_prompt=prompt,
+                max_tokens=500)
+        except TypeError:
+            return self._llm.complete(prompt)
 
     def _is_supported(self, answer: str, context: str) -> bool:
-        """Check if every sentence in the answer is supported by context.
+        """Is ``answer`` grounded in ``context``? Delegates to the LLM judge.
 
-        Uses substring matching: each answer sentence must appear as a
-        substring of the context (not exact sentence-to-sentence match),
-        which is more robust to whitespace/formatting differences.
+        This used to require every answer sentence to appear as a SUBSTRING of
+        the context, which inverts the question it claims to answer: a correct
+        paraphrase necessarily fails ("Postgres offers strong transactional
+        guarantees" is not in a chunk that says "PostgreSQL ... ACID
+        guarantees"), while a verbatim copy trivially passes. Measured: the
+        paraphrase returned False, the copy returned True.
+
+        Worse, that False drove a retry path that spent two more LLM calls and
+        then reported ``supported: True`` regardless of the result, so the
+        caller's unsupported branch could never fire.
+
+        ``OptimizedRAG.verify_answer`` already solved this (an LLM verdict with
+        a token budget and metrics). Reusing it keeps one definition of
+        "supported" in the file instead of two that disagreed. Falls back to
+        the substring check only if the judge cannot be consulted, so a
+        no-LLM test client still gets a deterministic answer.
         """
-        answer_sentences = self._split_sentences(answer)
-        for sentence in answer_sentences:
-            if sentence and sentence.strip() not in context:
-                return False
-        return True
+        verify = getattr(self, "_verify", None)
+        if verify is not None:
+            return verify(answer, context)
+        return _sentence_subset_of(answer, context)
 
     def _rewrite_query(self, query: str, answer: str) -> str:
         """Rewrite the query to find evidence for the answer."""
@@ -988,7 +1089,14 @@ class CRAGRetriever:
             "evidence."
         )
         user_prompt = f"Answer: {answer}\n\nRewrite the query to find evidence: {query}"
-        return self._llm.complete(system_prompt, user_prompt, max_tokens=200)
+        try:
+            return self._llm.complete(system_prompt, user_prompt, max_tokens=200)
+        except TypeError:
+            # Client without a max_tokens kwarg: the rewrite is best-effort.
+            # Returning `query` unchanged makes the caller take its
+            # "no rewrite possible" path, which reports supported=False
+            # rather than crashing the request.
+            return self._llm.complete(system_prompt, user_prompt)
 
     def _split_sentences(self, text: str) -> List[str]:
         """Split text into sentences."""
@@ -1542,10 +1650,14 @@ class OptimizedRAG:
         crag_result = {"answer": "", "retries": 0, "supported": False}
         if use_crag:
             crag_result = self._crag.retrieve_and_answer(query, top_k=top_k)
-            if crag_result["supported"]:
-                answer = crag_result["answer"]
-            else:
-                answer = results[0].get("content", "") if results else ""
+            # Prefer the CRAG answer whenever it produced one. An
+            # "unsupported" verdict means the answer could not be grounded in
+            # the context, but a raw retrieved chunk is not a better answer --
+            # it is an unprocessed fragment that was never shown to any model.
+            # Falling back to it turned "I could not verify this" into
+            # "return the first paragraph of a document".
+            answer = crag_result.get("answer") or (
+                results[0].get("content", "") if results else "")
         else:
             answer = results[0].get("content", "") if results else ""
 

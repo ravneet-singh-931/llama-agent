@@ -285,6 +285,26 @@ def record_tool_seconds(tool: str, seconds: float) -> None:
         pass
 
 
+# Citation checks on document answers. A non-zero invented_file rate means the
+# model is naming documents it was never shown -- the answer looks rigorously
+# sourced, which is exactly why it needs counting.
+_CITATION_FAILURES = Counter(
+    "llama_agent_citation_failures_total",
+    "Document answers whose citations did not match the retrieved excerpts",
+    ["kind"],  # invented_file | wrong_chunk | unsourced
+)
+_CITATION_KINDS = ("invented_file", "wrong_chunk", "unsourced")
+
+
+def record_citation_failure(kind: str) -> None:
+    """Record one failed citation check. Never raises."""
+    try:
+        _CITATION_FAILURES.labels(
+            kind=kind if kind in _CITATION_KINDS else "unsourced").inc()
+    except Exception:  # nosec B110 - telemetry must never fail an answer
+        pass
+
+
 RAG_CRAG_VERDICTS = Counter(
     "llama_agent_rag_crag_verdicts_total",
     "Corrective-RAG checks of document answers against their excerpts",
@@ -308,8 +328,13 @@ def record_llm_usage(model: str, input_tokens: int, output_tokens: int,
             user = get_owner() or "anonymous"
         except Exception:
             user = "anonymous"
+        # query_type=component is what makes per-step attribution real.
+        # CostTracker has bucketed by query_type since it was written, but
+        # nothing ever passed one, so cost_by_query_type was always empty in
+        # production -- you could see total spend and spend per user, but not
+        # which part of a @team run cost the money.
         cost = cost_tracker.record_usage(model or "unknown", input_tokens, output_tokens,
-                                         user_id=user)
+                                         user_id=user, query_type=_component(component))
         comp = _component(component)
         LLM_TOKENS.labels(model=model or "unknown", kind="input", component=comp).inc(input_tokens)
         LLM_TOKENS.labels(model=model or "unknown", kind="output", component=comp).inc(output_tokens)
