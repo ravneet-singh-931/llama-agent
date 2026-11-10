@@ -183,6 +183,29 @@ DOCUMENT_TOOLS = [
 AGENT_TOOL_SCHEMAS: List[Dict] = [WEB_SEARCH_TOOL, *DOCUMENT_TOOLS]
 
 
+# Prefixes _dispatch uses for a tool that did not run. Kept next to the
+# audit call so the two cannot drift.
+#
+# "No documents have been uploaded yet" is deliberately NOT here: the tool ran
+# correctly and the user simply has no uploads. Recording that as a failure
+# would make a healthy tenant look broken in the audit trail.
+_ERROR_PREFIXES = ("Unknown tool:", "Tool '", "Document '")
+
+
+def _audit_user() -> str:
+    """Best-effort owner id for the audit trail.
+
+    The tool dispatcher has no request context of its own; api.py binds one
+    via modules.request_context for the duration of a request. Falls back to
+    "unknown" rather than inventing an identity.
+    """
+    try:
+        from modules.request_context import get_owner
+        return get_owner() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def dispatch_tool(name: str, arguments: dict) -> str:
     """Execute a tool by name (result capped to AGENT_TOOL_RESULT_CHARS).
 
@@ -191,13 +214,36 @@ def dispatch_tool(name: str, arguments: dict) -> str:
     measured.
     """
     t0 = time.monotonic()
+    ok, detail = True, ""
     try:
-        return _cap(_dispatch(name, arguments))
+        result = _cap(_dispatch(name, arguments))
+        # _dispatch never raises for tools: failures come back as strings
+        # ("Tool 'x' failed: ...", "Unknown tool: x"). An audit line that
+        # reported SUCCESS for an unknown tool would be worse than none.
+        if result.startswith(_ERROR_PREFIXES):
+            ok = False
+            detail = f"error={result.split('.')[0][:60]}"
+        return result
+    except Exception as e:
+        ok, detail = False, f"error={type(e).__name__}"
+        raise
     finally:
+        elapsed = time.monotonic() - t0
         try:
             from modules.prometheus_metrics import record_tool_seconds
-            record_tool_seconds(name, time.monotonic() - t0)
+            record_tool_seconds(name, elapsed)
         except Exception:  # nosec B110 - telemetry must never fail a tool call
+            pass
+        # Audit trail. Tool calls are the only outbound surface (web_search
+        # leaves the process, the document tools read user files) and were the
+        # one security-relevant event with no record. Logged AFTER the call so
+        # a failure is recorded as a failure rather than a request.
+        try:
+            from modules.security_hardening import AuditLogger
+            AuditLogger().log_tool_call(
+                tool=name, user_id=_audit_user(), success=ok,
+                duration_ms=elapsed * 1000, detail=detail)
+        except Exception:  # nosec B110 - auditing must never fail a tool call
             pass
 
 

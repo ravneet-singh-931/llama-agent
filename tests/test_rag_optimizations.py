@@ -46,11 +46,15 @@ class FakeLLMClient:
         elif "hypothetical answer" in sp:
             self.hyde_calls.append({"system": system_prompt, "user": user_prompt})
             return self._hypothetical
-        elif "verify" in sp:
+        elif "fact checker" in sp:
+            # CRAG verdict judge. Default SUPPORTED; tests flip this to
+            # exercise the retry path.
             self.verify_calls.append({"system": system_prompt, "user": user_prompt})
-            # Return a sentence that IS in the FakeVectorStore context
-            # so _is_supported returns True (no retry needed)
-            return "Result for: test query"
+            return getattr(self, "verdict", "SUPPORTED")
+        elif "answer the user's question" in sp:
+            self.answer_calls = getattr(self, "answer_calls", [])
+            self.answer_calls.append({"system": system_prompt, "user": user_prompt})
+            return getattr(self, "answer", "Result for: test query")
         elif "rewrite" in sp:
             self.rewrite_calls.append({"system": system_prompt, "user": user_prompt})
             return "Rewrite the query to find evidence for the missing evidence."
@@ -630,28 +634,66 @@ class TestCRAGRetriever:
         assert result["retries"] == 0
 
     def test_crag_unsupported_answer(self):
-        """CRAG should retry when answer is not supported."""
+        """An unsupported verdict must actually drive the retry, and the final
+        verdict must be REPORTED rather than assumed.
+
+        The old version of this test asserted ``supported is True`` after a
+        retry -- which passed only because ``retrieve_and_answer`` hardcoded
+        ``"supported": True`` on its final return. It was asserting the bug.
+        """
         from modules.rag_optimizations import CRAGRetriever
 
         store = FakeVectorStore()
-        # Use a FakeLLMClient that returns an unsupported answer for verify
         llm = FakeLLMClient()
-        # Override verify response to be unsupported
-        original_complete = llm.complete
+        llm.verdict = "UNSUPPORTED"      # the judge rejects every answer
 
-        def patched_complete(system_prompt, user_prompt, max_tokens=500):
-            sp = system_prompt.lower()
-            if "verify" in sp:
-                # Return an answer that is NOT in the context
-                return "The answer is 42 and the moon is made of cheese."
-            return original_complete(system_prompt, user_prompt, max_tokens)
+        result = CRAGRetriever(store, llm_client=llm).retrieve_and_answer(
+            "test query", top_k=5, max_retries=2)
 
-        llm.complete = patched_complete
-        crag = CRAGRetriever(store, llm_client=llm)
+        assert result["retries"] == 2, "an unsupported verdict must trigger a retry"
+        assert result["supported"] is False, \
+            "the verdict must be reported, not hardcoded True"
+        assert len(llm.verify_calls) == 2, "both answers should be judged"
 
-        result = crag.retrieve_and_answer("test query", top_k=5, max_retries=2)
-        assert result["supported"] is True  # Will be supported after retry
-        assert result["retries"] >= 1
+    def test_crag_reports_supported_when_the_retry_works(self):
+        """The retry succeeding is a real outcome and must report True."""
+        from modules.rag_optimizations import CRAGRetriever
+
+        store = FakeVectorStore()
+        llm = FakeLLMClient()
+        verdicts = iter(["UNSUPPORTED", "SUPPORTED"])
+
+        original = llm.complete
+
+        def scripted(system_prompt, user_prompt, max_tokens=500):
+            if "fact checker" in system_prompt.lower():
+                llm.verify_calls.append({"system": system_prompt, "user": user_prompt})
+                return next(verdicts)
+            return original(system_prompt, user_prompt, max_tokens)
+
+        llm.complete = scripted
+        result = CRAGRetriever(store, llm_client=llm).retrieve_and_answer(
+            "test query", top_k=5, max_retries=2)
+
+        assert result["retries"] == 2
+        assert result["supported"] is True
+
+    def test_crag_answer_is_grounded_in_the_question(self):
+        """The answer prompt must carry the QUESTION.
+
+        The previous prompt contained only the context plus the words "Your
+        answer: ", so the model had no question to answer -- it was being
+        asked to verify an answer that did not exist.
+        """
+        from modules.rag_optimizations import CRAGRetriever
+
+        llm = FakeLLMClient()
+        CRAGRetriever(FakeVectorStore(), llm_client=llm).retrieve_and_answer(
+            "what does the pro plan cost", top_k=5)
+
+        assert llm.answer_calls, "no answer call was made"
+        assert "what does the pro plan cost" in llm.answer_calls[0]["user"]
+        assert "CONTEXT" in llm.answer_calls[0]["user"]
 
     def test_crag_rewrite_query(self):
         """CRAG should rewrite the query when answer is unsupported."""
