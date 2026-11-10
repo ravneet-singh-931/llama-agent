@@ -74,7 +74,7 @@ notice, not a red build, because a job must not go red for reasons unrelated to 
 Run it inside the API pod. That's where the keys and the deployed code are.
 
 ```bash
-# Quick smoke run (9 cases, about 10-15 min on the Groq free tier)
+# Quick smoke run (11 cases, 8 of 9 categories, about 10-15 min on the free tier)
 kubectl -n llama-agent exec deploy/llama-agent-api -- \
   python -m evals.run --tags smoke --out /tmp/eval-smoke.json
 

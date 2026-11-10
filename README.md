@@ -241,9 +241,12 @@ prompt edit (`prompt_changed`) so a flip cannot be blamed on the model when the 
 
 ### What measuring found
 
-1. **The judge misses invented numbers; the rule check catches them.** All 4 failures are
-   grounding failures: figures that appear in no source. The judge scored them high and
-   flagged fabrication on only one:
+Items 1–8 are from the **30-case run** (2026-10-25); items 9–10 are from the 60-case
+nightly. Provenance is stated per item, because the two suites are not interchangeable.
+
+1. **The judge misses invented numbers; the rule check catches them.** In the 30-case run
+   all 4 failures were grounding failures: figures that appear in no source. The judge
+   scored them high and flagged fabrication on only one:
 
    | Failed case | Judge | Figures found in the sources |
    |---|---|---|
@@ -252,8 +255,12 @@ prompt edit (`prompt_changed`) so a flip cannot be blamed on the model when the 
    | `team-jaipur` (trip budget in INR) | 4.5, fabrication flagged | 33/55 |
    | `team-ev-india` (market analysis) | 5.0 | 10/18 |
 
-   Plans and budgets invite made-up prices and timelines. These count as failures and were
-   not hidden with a prompt patch for these prompts.
+   Plans and budgets invite made-up prices and timelines. They were not hidden with a
+   prompt patch. Note what happened next: the grounding check was *too* eager here —
+   `plan-mvp`, `team-library-api` and `team-jaipur` are exactly the three cases the
+   `needs_sources` fix (finding 19) stopped failing, and `team-ev-india` is the one that
+   still is. So this table is the before-picture of a measurement bug, and the honest
+   reading of it is the one below.
 2. **The rule check misses things too.** `news-f1` named the right winner but the wrong date
    (18 Oct instead of 11 Oct), copied from an Instagram reel in the search results. Grounding
    passed 4/4, because the number *was* in a source; being in a source doesn't make it true.
@@ -276,6 +283,14 @@ prompt edit (`prompt_changed`) so a flip cannot be blamed on the model when the 
    (fixed in v3.5.2). Both now show as **not graded**.
 8. **Team mode is expensive on the free tier:** 18k – 49k input tokens and 84 – 247 s per
    case, because each tool round resends the earlier tool results.
+9. **The two graders disagreeing is itself the finding.** In the 60-case nightly, 12 of the
+   15 failures failed a *deterministic check only* while the judge scored the suite 4.43/5.
+   Instead of picking a favourite, the disagreement was audited: **4 were the grader's
+   fault** (findings 19–20), 8 were real. A single pass-rate number hides this, which is why
+   the report keeps the tiers separate and why "not graded" is a distinct outcome.
+10. **The tail, not the average.** p50 was 3.0 s; p95 was 99.3 s. One case took 309 s because
+    of a per-future timeout (finding 21). Reporting the mean would have described this suite
+    as "about 3 s per answer" and been wrong by two orders of magnitude at the tail.
 
 ---
 
@@ -305,7 +320,7 @@ version that fixed it and a test or a before/after number as proof; details are 
 | 16 | Nightly Postgres backup failed 3 days in a row | The PC is off at 02:00, so the missed job ran at boot, 13 s after Postgres started and before it accepted connections | Wait for `pg_isready` (up to 5 min) before `pg_dump` (v3.5.4) | `test_k8s_ops.py`; Postgres scaled to 0: the job waited and finished when it was back; restore drill: same row counts as the live DB ([checks](docs/KUBERNETES_CHECKS.md)) |
 | 17 | The autoscalers could never scale | No metrics-server in the cluster, so both HPAs read `cpu: <unknown>` | Vendored metrics-server v0.9.0 (`k8s/metrics-server.yaml`) (v3.5.4) | `kubectl get hpa`: `<unknown>/70%` → `3%/70%` |
 | 18 | Uploading a 65 KB .docx returned HTTP 502 | One document question made the ONNX reranker score 16 long passages in one batch (~940 MB); onnxruntime kept that memory, so the API pod sat at ~1.2 GB and the upload's embeddings (~420 MB) pushed it over the 1.5 GiB limit (OOMKilled). Older than v3.5.5: old pods also reached 1288 MB | Reranker batch 16 → 4 (v3.5.5) | Prometheus: pod 261 → 1221 MB after one question, killed at the upload. Reranker alone, 8 questions in a row: 1019 MB → 354 MB. Live after the fix: 481 / 627 MB max, 0 restarts. RAG eval unchanged. `test_reranker_memory.py` ([checks](docs/KUBERNETES_CHECKS.md)) |
-| 19 | The eval reported **75%** while the judge averaged **4.43/5** | Grounding ran on *every* case with tool output, so a migration plan was graded against a web search it never relied on ("1 of 42 figures found") | Grounding applies only to cases declaring `needs_sources`; 7 false failures removed | `test_grounding_is_not_applied_to_cases_that_do_not_ask_for_sources` (fails with the bug restored) |
+| 19 | The eval reported **75%** while the judge averaged **4.43/5** | Grounding ran on *every* case with tool output, so a migration plan was graded against a web search it never relied on ("1 of 42 figures found") | Grounding applies only to cases declaring `needs_sources`. 3 of the 4 cases in the 30-case failure table (`plan-mvp`, `team-library-api`, `team-jaipur`) were being failed by the check rather than the app; `team-ev-india` still fails | `test_grounding_is_not_applied_to_cases_that_do_not_ask_for_sources` (fails with the bug restored) |
 | 20 | Correct coding answers failed `no python code block` while the judge scored them **5.0** | The snippet was inline (``use `len(x) == 0` ``) and the check only looked inside fenced blocks — it graded formatting, not correctness | An inline span is accepted when it parses as Python; prose with backticks still fails | `test_an_inline_snippet_counts_as_code_when_the_case_asks_for_python` |
 | 21 | `team-library-api` took **309 s**, past the 300 s case timeout | `f.result(timeout=150)` was called in a loop, so the Nth future got 150 s *on top of* the first N−1: a 2-step level could block for 300 s. `shutdown(wait=True)` then blocked on the hung worker anyway | One deadline shared across the level; pool shut down with `wait=False` — 3 hanging steps now return in 1.0 s, not 3 s | `test_team_step_deadline.py` |
 | 22 | The spend on `/monitoring/dashboard` and the spend in Grafana disagreed | Costs were recorded twice: an in-memory `CostTracker` dict (per-process, erased on restart, and the only place the pricing table lived) and the Prometheus counter Grafana reads | `CostTracker` deleted (126 lines); the dashboard renders from the counter, so there is one number | `test_the_dashboard_reads_the_prometheus_counter`, `test_costtracker_is_gone` |
