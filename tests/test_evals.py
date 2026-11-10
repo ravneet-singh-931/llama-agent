@@ -89,6 +89,77 @@ def test_evaluate_includes_grounding_only_with_sources():
     assert "grounding" not in checks.evaluate({"id": "y", "prompt": "q"}, "55%", [])
 
 
+def test_grounding_is_not_applied_to_cases_that_do_not_ask_for_sources():
+    """A budget/timeline answer is not a factual claim to verify.
+
+    This was the difference between a 75% and a meaningful pass rate. Every
+    case that happened to produce tool output got a grounding check -- so a
+    migration plan was graded against a web search it never relied on, and
+    "0/13 figures found in sources" failed it. The planner's figures come from
+    the request and its own arithmetic; there is no source they could match.
+    """
+    answer = ("Phase 1 costs 240,000 and takes 6 weeks. Phase 2 needs 4 engineers "
+              "for 12 weeks. Total budget 350,000 across 2026.")
+    tools = [{"name": "web_search", "result": "unrelated search result. " * 40}]
+
+    planning = {"id": "plan", "prompt": "Plan the migration", "checks": {}}
+    res = checks.evaluate(planning, answer, tools)
+    assert "grounding" not in res, "a planning answer must not be graded against search results"
+
+    # A case that *does* ask for sources is still checked, and can still fail.
+    research = {"id": "news", "prompt": "What is the market size?", "checks": {"needs_sources": True}}
+    res = checks.evaluate(research, answer, tools)
+    assert "grounding" in res and not res["grounding"]["pass"]
+
+
+def test_an_inline_snippet_counts_as_code_when_the_case_asks_for_python():
+    """Formatting is not correctness.
+
+    code-debug and code-regex-pin both scored 5.0 from the judge -- the
+    request was answered -- and failed only because the snippet was written
+    inline (`len(items) == 0`) rather than in a fenced block. A correct answer
+    should not fail on where it put the backticks.
+    """
+    inline = "Use `len(items) == 0` to check for an empty list."
+    assert checks.check_code(inline, "python")["pass"]
+
+    # Prose with backticks but no code must still fail.
+    assert not checks.check_code("Use `the empty check` instead.", "python")["pass"]
+    # And a fenced block keeps working.
+    assert checks.check_code("```python\nx = 1\n```", "python")["pass"]
+
+
+def test_meta_check_flags_pipeline_talk_but_not_ordinary_words():
+    """`handoff` is a normal word in a plan; it is not evidence of a leak.
+
+    Broad noun patterns ("handoff", "team members") failed legitimate answers.
+    What must never reach a user is an agent narrating the pipeline it is in.
+    """
+    for leak in (
+        "I'll pass this to the other agents to continue.",
+        "My step is complete; another agent will handle the rest.",
+        "As the research agent, I found these results.",
+        "I'll hand this off to the next stage.",
+    ):
+        assert not checks.check_no_meta(leak)["pass"], leak
+
+    for fine in (
+        "Step 2 takes the handoff from step 1.",
+        "The handoff between phases takes one week.",
+        "Our team members will get access on day 3.",
+    ):
+        assert checks.check_no_meta(fine)["pass"], fine
+
+
+def test_grounding_still_catches_an_invented_figure_in_a_researched_answer():
+    """The narrowing must not weaken fabrication detection where it applies."""
+    case = {"id": "news", "prompt": "What is the market size?", "checks": {"needs_sources": True}}
+    src = [{"name": "web_search", "result": "The market is worth 1.27 billion dollars. " * 10}]
+    res = checks.evaluate(case, "It is 1.27 billion, growing 55% a year.", src)
+    g = res["grounding"]
+    assert g["unsupported"] == ["55%"] and g["rate"] == 0.5 and not g["pass"]
+
+
 # ============ JUDGE ============
 
 def test_parse_verdict():

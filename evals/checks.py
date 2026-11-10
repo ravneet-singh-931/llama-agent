@@ -21,13 +21,23 @@ _TEAM_HEADER_RE = re.compile(r"^### .+ Agent\s*$", re.M)
 
 # Self-referential process talk that should never reach a user. Generic -
 # it describes the failure mode, not a particular answer.
+# Self-referential process talk that should never reach a user. Generic -
+# it describes the failure mode, not a particular answer.
+#
+# The bare nouns ("handoff", "team members") are deliberately NOT listed on
+# their own. They are ordinary words in real content -- "the handoff between
+# phases", "team members get access on day 3" -- and matching them flagged
+# correct answers as leaks. What must never appear is an agent describing the
+# *pipeline it is part of*: the patterns below all carry that context, so they
+# fire on "pass this to the other agents" and stay quiet on "the handoff
+# between phases".
 META_PATTERNS = [
     r"\bmy (?:step|part|role|assignment)\b",
     r"\b(?:other|another|the other|remaining) agents?\b",
-    r"\b(?:agent team|team members?|my team)\b",
+    r"\b(?:(?:the|this|my|our) agent team|my team)\b",
     r"\bprevious (?:step|agent)\b",
     r"\bsource material \d\b",
-    r"\bhand-?offs?\b",
+    r"\b(?:pass(?:ing)? (?:this|it|these) (?:to|on to)|hand(?:ing)? (?:this|it) off to)\b",
     r"\b(?:as|being) (?:the|a|an) (?:\w+ )?agent\b",
     r"\bnot (?:my|part of my) (?:job|task|step|responsibility)\b",
     r"\b(?:outside|beyond) (?:the scope of )?my (?:step|task)\b",
@@ -78,6 +88,26 @@ _STRUCTURAL_TAGS = {"html", "head", "body", "script", "style", "table", "thead",
 def prose(text: str) -> str:
     """Answer text without code blocks and without the UI's team headers."""
     return _TEAM_HEADER_RE.sub(" ", _FENCE_BLOCK_RE.sub(" ", text or ""))
+
+
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+
+
+def inline_code_spans(text: str) -> List[str]:
+    """Single-backtick snippets, e.g. ``use `len(x) == 0` to test it``."""
+    return [m.group(1) for m in _INLINE_CODE_RE.finditer(text or "")]
+
+
+def _parses_as_python(snippet: str) -> bool:
+    """True when `snippet` is a real Python expression/statement."""
+    snippet = (snippet or "").strip()
+    if not snippet:
+        return False
+    try:
+        ast.parse(snippet)
+    except SyntaxError:
+        return False
+    return True
 
 
 def code_blocks(text: str) -> List[Dict[str, str]]:
@@ -162,6 +192,13 @@ def check_code(answer: str, expected_lang: Optional[str]) -> Dict:
     if expected_lang:
         aliases = _LANG_ALIASES.get(expected_lang, {expected_lang})
         if not any(b["lang"] in aliases or not b["lang"] for b in blocks):
+            # A short answer may put the snippet inline ("use `len(x) == 0`")
+            # instead of fenced. The judge scores those answers 5.0 -- the
+            # request WAS answered -- so calling it a failure grades formatting,
+            # not correctness. Judge an inline span as code when it parses.
+            inline = inline_code_spans(answer)
+            if expected_lang == "python" and any(_parses_as_python(i) for i in inline):
+                return {"pass": True, "detail": ""}
             return {"pass": False, "detail": f"no {expected_lang} code block"}
     return {"pass": not errors, "detail": "; ".join(errors)}
 
@@ -250,7 +287,15 @@ def evaluate(case: Dict, answer: str, tool_calls: List[Dict],
         results["route"] = check_route(route, case["route"])
     if spec.get("needs_sources"):
         results["used_search"] = check_sources(tool_calls)
-    g = check_grounding(answer, case.get("prompt", ""), tool_calls, grounding_threshold)
-    if g is not None:
-        results["grounding"] = g
+    # Grounding only means something for a case that is *about* facts from
+    # retrieved sources. It was applied to every case that happened to have
+    # tool output, which quietly graded planning answers against a web search
+    # they were never supposed to rely on: a migration plan's budget figures,
+    # headcount and timelines are derived from the request, so "0/13 figures
+    # found in sources" is not a defect in the answer. It failed 7 cases that
+    # the judge scored 4-5, and made the grounding rate (0.28) meaningless.
+    if spec.get("needs_sources"):
+        g = check_grounding(answer, case.get("prompt", ""), tool_calls, grounding_threshold)
+        if g is not None:
+            results["grounding"] = g
     return results
