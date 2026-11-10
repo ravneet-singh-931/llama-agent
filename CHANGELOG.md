@@ -27,12 +27,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reasons over the original text. The Luhn check is what keeps a 16-digit order
   number intact — deliberately not a general PII classifier, because names and
   emails cannot be told from ordinary words without destroying the log.
+- **Goldens doubled: 30 -> 60 cases, with `difficulty` and `tool_recall`.** The
+  original 30 never pinned the router's hard boundaries — the regex that decides
+  "write an essay on functional programming" is prose but "write a Python class"
+  is code had no golden either way. The 30 new cases target those seams (six
+  coder verb/noun shapes, three writer topic-word cases, five adversarial
+  attacks incl. an injected document) plus a `difficulty` field on every case
+  (easy 17 / medium 19 / hard 16 / adversarial 8) and `expected_tools` on cases
+  that must search. Every asserted route was checked against the live router
+  before being written down.
+- **Nightly eval workflow with a baseline diff** (`.github/workflows/nightly-evals.yml`).
+  The goldens need `GROQ_API_KEY` and a judge call per case, so they still
+  cannot gate a PR — but they ran *nowhere at all* before, which meant the
+  compare machinery in `evals/run.py` (built weeks earlier) had never produced
+  a diff. Runs at 03:17 UTC: executes the suite, downloads the previous run's
+  artifact, and calls `--compare --fail-on-regression`. Absolute pass rate is
+  not the signal — a one-case regression on Tuesday is noise in one report and
+  obvious in a diff. Missing baseline or missing key degrades to a notice, not
+  a red job.
+- **`min_words` check.** "Write an essay" graded on keywords alone passes a
+  twelve-word answer that name-drops the right vocabulary. `checks.py` only had
+  a ceiling. The offline gate now covers it in both directions.
 - **Trajectory metrics in the eval report.** `avg_steps`, `total_redundant_steps`
   (repeat `(tool, arguments)` calls) and `tool_recall` (cases whose declared
   `expected_tools` were actually called). A run that succeeds in 3 tool calls
   beats one that succeeds in 15, and nothing measured the difference before.
 
 ### Changed
+- **Conversation history is rendered from one shared budget, not three copies
+  of `content[:200]`.** The same line was pasted in `api._with_context`,
+  `memory.get_context_string` and `llama_agent1._budget_context_string`, each
+  with different surrounding code. Measured on six ordinary turns: 281 tokens
+  admitted by `_window_messages`, 181 sent — 36% lost, and a steady 54% on
+  longer conversations because assistant answers run ~500 characters. The cap
+  also cut mid-word ("...the sorti" / "ng is O(n log n)"), so a reply that
+  said "O(n) if already sorted" looked like it had not. The third copy was
+  worse: it cut to 200 chars *before* estimating token cost, so it budgeted
+  against text a fifth the size of what it was deciding about. All three now
+  call `modules/context_budget.render_history`, which spends one budget
+  newest-first and keeps short conversations verbatim.
 - **The critic now reviews on a different model tier than the one that wrote
   the answer.** A model checking its own output with the same weights agrees
   with itself — it confidently passes exactly the errors it made. Falls back to

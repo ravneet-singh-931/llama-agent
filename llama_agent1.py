@@ -120,21 +120,23 @@ def _budget_context_string(mem, user_id, conversation_id, max_tokens: int = 2000
         msgs = []
     if not msgs:
         return "No conversation history yet."
+    # Select by TRUE size, then render within the budget. The previous version
+    # capped each message at 200 chars BEFORE estimating its cost, so the
+    # token count it was budgeting against was understated ~2.5x: it admitted
+    # more turns than fit and then sent a fifth of each one anyway.
     kept = []
     used = 0
     for m in reversed(msgs):
-        content = (m.get("content") or "")[:200]  # parity with get_context_string cap
+        content = (m.get("content") or "").strip()
         t = len(content) // 4 + 1
         if used + t > max_tokens and kept:
             break
         used += t
-        kept.append((m.get("role", "user"), content))
+        kept.append(m)
     kept.reverse()
-    lines = ["Recent conversation history:"]
-    for role, content in kept:
-        r = "User" if role == "user" else "Assistant"
-        lines.append(f"{r}: {content}")
-    return "\n".join(lines)
+    from modules.context_budget import render_history
+    return "Recent conversation history:\n" + render_history(
+        kept, max_tokens=max_tokens)
 
 
 def _span_cm(name: str, user_id: str, conversation_id: str):

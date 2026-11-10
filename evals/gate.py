@@ -153,6 +153,8 @@ _CHECK_FIXTURES = [
     # agents"), not "As an AI..." boilerplate. Test the real contract.
     ("meta_agent_leak", {},
      "That part is outside the scope of my step; the other agents handle it.", [], False),
+    ("min_words_short", {"checks": {"min_words": 50}}, "Too short.", [], False),
+    ("min_words_long", {"checks": {"min_words": 5}}, "This one is comfortably long enough.", [], True),
     ("unclosed_fence", {}, "```python\nprint(1)\n", [], False),
 ]
 

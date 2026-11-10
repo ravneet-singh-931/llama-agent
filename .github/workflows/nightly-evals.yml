@@ -1,0 +1,180 @@
+name: Nightly Agent Evals
+
+# The agent goldens cannot gate a PR: every case is a real model call plus a
+# judge call, so a full 60-case run costs minutes and money. That is exactly
+# why they belong on a schedule instead of a pull request.
+#
+# The point of running nightly is not the absolute pass rate -- it drifts. The
+# point is the DELTA against yesterday: `compare()` reports which cases flipped,
+# which category moved and whether latency or fabrication got worse. A quiet
+# one-case regression on Tuesday is indistinguishable from noise in a single
+# report and obvious in a diff.
+#
+# Two reports, one comparison:
+#   1. run the suite on this commit      -> eval-today.json
+#   2. fetch yesterday's from the last run's artifacts -> eval-yesterday.json
+#   3. evals.run --compare A B --fail-on-regression
+#
+# If there is no previous run (first execution, or artifacts expired) the job
+# reports the pass rate and passes: a missing baseline is not a regression.
+
+on:
+  schedule:
+    # 03:17 UTC daily. Off the hour on purpose -- GitHub's scheduler queues
+    # every ":00" workflow at once and the start time slips by 10+ minutes.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fail_on_regression:
+        description: "Fail the job when a case regresses vs the baseline"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read   # required to list previous runs and download their artifacts
+
+concurrency:
+  group: nightly-evals
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  nightly:
+    name: "🌙 Nightly agent eval"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: "📥 Checkout code"
+        uses: actions/checkout@v4
+
+      - name: "🐍 Set up Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: "📦 Install dependencies"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -c "import evals.run, evals.judge, modules.routing; print('imports OK')"
+
+      # Without the key every case degrades the same way and the report is
+      # meaningless. Say so plainly instead of producing 60 identical
+      # "not graded" rows that look like a product failure.
+      - name: "🔑 Check for the API key"
+        id: key
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "::warning title=No GROQ_API_KEY::Nightly evals skipped - add the repository secret to enable them."
+            echo "have_key=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "🏃 Run the eval suite"
+        if: steps.key.outputs.have_key == 'true'
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          # --pause keeps consecutive cases under the free tier's per-minute
+          # token limit; without it the judge starts returning 429s halfway
+          # through and the second half of the report is noise.
+          python -m evals.run --out eval-today.json --pause 10
+
+      - name: "📤 Upload today's report"
+        if: steps.key.outputs.have_key == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-${{ github.run_id }}
+          path: eval-today.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      # Pull the most recent OTHER run's artifact. `gh run list` scoped to this
+      # workflow file, excluding the current run, newest first.
+      - name: "📥 Fetch the baseline report"
+        id: baseline
+        if: steps.key.outputs.have_key == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # `.[0] // ""` yields "" when the filtered list is empty; a bare [0]
+          # would print "null", which is non-empty in the test below.
+          PREV=$(gh run list --workflow nightly-evals.yml --status success \
+                   --limit 10 --json databaseId \
+                   --jq "[.[] | .databaseId | select(. != ${{ github.run_id }})] | .[0] // \"\"" \
+                 2>/dev/null || true)
+          if [ -z "${PREV:-}" ] || [ "$PREV" = "null" ]; then
+            echo "::notice title=No baseline::No previous successful run - reporting absolute numbers only."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Baseline run: $PREV"
+          rm -rf baseline && mkdir -p baseline
+          if gh run download "$PREV" --pattern 'eval-report-*' --dir baseline; then
+            REPORT=$(find baseline -name 'eval-today.json' | head -1)
+            if [ -n "$REPORT" ]; then
+              cp "$REPORT" eval-yesterday.json
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "::notice title=No baseline artifact::Previous run had no usable artifact - absolute numbers only."
+          echo "found=false" >> "$GITHUB_OUTPUT"
+
+      - name: "📊 Compare against yesterday"
+        if: steps.baseline.outputs.found == 'true'
+        run: |
+          # Scheduled runs and manual runs both fail on a regression; a manual
+          # run can opt out with fail_on_regression=false.
+          FAIL_FLAG=""
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.fail_on_regression }}" = "true" ]; then
+            FAIL_FLAG="--fail-on-regression"
+          fi
+          set +e
+          python -m evals.run --compare eval-yesterday.json eval-today.json $FAIL_FLAG
+          STATUS=$?
+          # Exit 1 means a real regression and is already reported by the table
+          # above; anything else (argparse usage error = 2) is a bug in this
+          # workflow and must fail loudly.
+          if [ "$STATUS" -ne 0 ] && [ "$STATUS" -ne 1 ]; then
+            echo "::error title=compare() crashed::exit $STATUS"
+          fi
+          exit "$STATUS"
+
+      - name: "📊 No baseline - show absolute numbers"
+        if: steps.key.outputs.have_key == 'true' && steps.baseline.outputs.found != 'true'
+        run: |
+          python - <<'PY'
+          import json
+          s = json.load(open("eval-today.json"))["summary"]
+          print(f"pass rate      : {s['pass_rate']}%  ({s['cases']} cases)")
+          print(f"judge overall  : {s['judge_overall']}")
+          print(f"grounding rate : {s['grounding_rate']}")
+          print(f"fabrication    : {s['fabrication_rate']}%")
+          print(f"latency p50/p95: {s['latency_p50_s']}s / {s['latency_p95_s']}s")
+          print(f"tool calls/case: {s.get('avg_steps')}")
+          if s.get("check_failures"):
+              print(f"check failures : {s['check_failures']}")
+          print("\nRun again tomorrow to get a diff.")
+          PY
+
+      - name: "📎 Upload both reports"
+        if: always() && steps.key.outputs.have_key == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-comparison-${{ github.run_id }}
+          path: |
+            eval-today.json
+            eval-yesterday.json
+          retention-days: 30
+          if-no-files-found: ignore

@@ -286,6 +286,31 @@ Two consequences worth stating explicitly:
   a `start_char` offset and reports the total, so an agent can walk a 40-page
   PDF instead of silently answering from its first three pages.
 
+## Evaluation tiers (what runs when, and why)
+
+The eval suite is split by what a check *costs*, because that decides where it
+can run. A gate that needs an API key cannot block a PR; a check that runs in
+0.2 s should never wait for a nightly job.
+
+| Tier | What it covers | Needs | Runs |
+|---|---|---|---|
+| **Offline gate** (`evals/gate.py`) | 53 routing decisions + 18 check fixtures | nothing (stdlib) | every PR, in the `test` job, < 1 s |
+| **RAG retrieval** (`evals/rag_eval.py`) | hit@6 on the committed corpus, cross-user leaks | embedding model, no LLM | every PR |
+| **Agent goldens** (`evals/run.py`) | 60 cases: real answers, real judge, tool recall, trajectory | `GROQ_API_KEY` + a judge call per case | nightly (`.github/workflows/nightly-evals.yml`) |
+
+The reason the first tier exists at all: routing and answer checks are pure
+functions, and they are where regressions actually hide. Reorder a keyword
+group in `modules/routing.py` and "write a blog post" routes to `general` --
+the answer is still *plausible*, so only the golden comparison catches it. The
+goldens cost minutes and money; the routing half costs nothing. Splitting them
+means the cheap half runs on every PR instead of never.
+
+The nightly job's value is the **diff**, not the pass rate. A single run says
+"87%"; two runs say "case `write-essay-topic` flipped, coding dropped 8 points,
+fabrication up 3%". `compare()` reports exactly that, and exits non-zero only
+on a real regression -- a missing baseline or a missing key degrades to a
+notice so the job cannot go red for reasons unrelated to the product.
+
 ## Scalability
 
 ### Current (Single Server)
