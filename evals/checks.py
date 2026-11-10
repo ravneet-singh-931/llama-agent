@@ -194,6 +194,16 @@ def check_length(answer: str, max_words: int) -> Dict:
     return {"pass": n <= max_words, "detail": f"{n} words (max {max_words})"}
 
 
+def check_min_length(answer: str, min_words: int) -> Dict:
+    """A floor on length: an essay case cannot pass on one sentence.
+
+    Without this, "write an essay" graded on keywords alone passes a 12-word
+    answer that name-drops the right vocabulary.
+    """
+    n = len(prose(answer).split())
+    return {"pass": n >= min_words, "detail": f"{n} words (min {min_words})"}
+
+
 def check_sources(tool_calls: List[Dict]) -> Dict:
     searched = [t for t in tool_calls if t.get("name") == "web_search"]
     return {"pass": bool(searched), "detail": f"{len(searched)} web searches"}
@@ -234,6 +244,8 @@ def evaluate(case: Dict, answer: str, tool_calls: List[Dict],
         results["excludes"] = check_excludes(answer, spec["must_not_include"])
     if spec.get("max_words"):
         results["length"] = check_length(answer, spec["max_words"])
+    if spec.get("min_words"):
+        results["min_length"] = check_min_length(answer, spec["min_words"])
     if case.get("route") and route is not None:
         results["route"] = check_route(route, case["route"])
     if spec.get("needs_sources"):

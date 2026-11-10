@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reasons over the original text. The Luhn check is what keeps a 16-digit order
   number intact — deliberately not a general PII classifier, because names and
   emails cannot be told from ordinary words without destroying the log.
+- **Goldens doubled: 30 -> 60 cases, with `difficulty` and `tool_recall`.** The
+  original 30 never pinned the router's hard boundaries — the regex that decides
+  "write an essay on functional programming" is prose but "write a Python class"
+  is code had no golden either way. The 30 new cases target those seams (six
+  coder verb/noun shapes, three writer topic-word cases, five adversarial
+  attacks incl. an injected document) plus a `difficulty` field on every case
+  (easy 17 / medium 19 / hard 16 / adversarial 8) and `expected_tools` on cases
+  that must search. Every asserted route was checked against the live router
+  before being written down.
+- **`min_words` check.** "Write an essay" graded on keywords alone passes a
+  twelve-word answer that name-drops the right vocabulary. `checks.py` only had
+  a ceiling. The offline gate now covers it in both directions.
 - **Trajectory metrics in the eval report.** `avg_steps`, `total_redundant_steps`
   (repeat `(tool, arguments)` calls) and `tool_recall` (cases whose declared
   `expected_tools` were actually called). A run that succeeds in 3 tool calls

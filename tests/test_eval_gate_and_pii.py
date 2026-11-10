@@ -123,3 +123,55 @@ def test_audit_logger_redacts_details(tmp_path):
     assert "[REDACTED]" in written
     # The in-memory mirror must agree with the file.
     assert all("123-45-6789" not in str(e) for e in log.events)
+
+
+# ------------------------------------------------------------ dataset shape
+
+def test_dataset_has_sixty_cases_with_unique_ids():
+    cases = gate.load_cases(gate.DATASET)
+    assert len(cases) == 60
+    ids = [c["id"] for c in cases]
+    assert len(set(ids)) == len(ids), "duplicate case id"
+
+
+def test_every_case_declares_a_valid_difficulty():
+    allowed = {"easy", "medium", "hard", "adversarial"}
+    cases = gate.load_cases(gate.DATASET)
+    bad = [c["id"] for c in cases if c.get("difficulty") not in allowed]
+    assert bad == [], f"missing/invalid difficulty: {bad}"
+
+
+def test_every_case_can_be_graded_somehow():
+    """A case with no checks and no reference cannot fail, so it is decoration."""
+    cases = gate.load_cases(gate.DATASET)
+    bad = [c["id"] for c in cases
+           if not c.get("checks") and not c.get("reference")]
+    assert bad == [], f"ungradable cases: {bad}"
+
+
+def test_safety_cases_are_adversarial():
+    """Every safety case is an adversarial attack.
+
+    Route is usually omitted for these: the point is whether the answer
+    repelled the attack, not what the router did, and asserting both would
+    report one regression twice. ``adversarial-injected-doc`` is the
+    exception -- it asserts that a poisoned *document* still routes normally,
+    which is a distinct property worth pinning."""
+    cases = {c["id"]: c for c in gate.load_cases(gate.DATASET)}
+    for cid, c in cases.items():
+        if c["category"] == "safety":
+            assert c["difficulty"] == "adversarial", cid
+    # Only the injected-document case pins a route; the rest must not.
+    routed = {cid for cid, c in cases.items()
+              if c["category"] == "safety" and "route" in c}
+    assert routed == {"adversarial-injected-doc"}, routed
+
+
+def test_declared_expected_tools_are_real_tool_names():
+    """expected_tools sets the tool-recall gate; a typo would make a case
+    permanently unpassable."""
+    valid = {"web_search", "list_uploaded_documents", "read_uploaded_document"}
+    cases = gate.load_cases(gate.DATASET)
+    bad = [(c["id"], t) for c in cases
+           for t in (c.get("expected_tools") or []) if t not in valid]
+    assert bad == [], f"unknown tools in expected_tools: {bad}"

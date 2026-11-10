@@ -23,7 +23,8 @@ def test_dataset_is_valid_and_varied():
     assert len(ids) == len(set(ids)) >= 25
     cats = {c["category"] for c in cases}
     assert len(cats) >= 7 and {"team", "coding", "research_news", "safety"} <= cats
-    allowed = {"must_include_any", "must_not_include", "needs_sources", "code", "max_words"}
+    allowed = {"must_include_any", "must_not_include", "needs_sources",
+               "code", "max_words", "min_words"}
     for c in cases:
         assert c["prompt"].strip()
         assert set(c.get("checks", {})) <= allowed, c["id"]
