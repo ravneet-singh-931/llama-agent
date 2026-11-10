@@ -265,6 +265,16 @@ def _pct(n: int, d: int) -> float:
     return round(100.0 * n / d, 1) if d else 0.0
 
 
+def _mean(values: List) -> Optional[float]:
+    """Mean of the non-None values, or None if there are none.
+
+    Older result records (and hand-built ones in tests) predate the trajectory
+    fields, so a missing value must not turn a report into a crash.
+    """
+    present = [v for v in values if v is not None]
+    return round(statistics.mean(present), 2) if present else None
+
+
 def _redundant(calls: List[Dict]) -> int:
     """Calls beyond the first with the same (tool, arguments) pair.
 
@@ -321,8 +331,10 @@ def summarize(results: List[Dict]) -> Dict:
         "usage": {k: round(v, 4) for k, v in sorted(usage.items())},
         # Trajectory efficiency (16.2). Steps are tool calls; LLM calls are
         # not individually visible to the runner, so this is the tool half.
-        "avg_steps": round(statistics.mean([r["steps"] for r in results]), 2) if results else None,
-        "total_redundant_steps": sum(r["redundant_steps"] for r in results),
+        # Read with .get so a baseline file written before these fields
+        # existed still summarizes instead of raising KeyError.
+        "avg_steps": _mean([r.get("steps") for r in results]),
+        "total_redundant_steps": sum(r.get("redundant_steps", 0) for r in results),
         "tool_recall": (
             _pct(sum(1 for r in results if r.get("tool_recall")),
                  sum(1 for r in results if r.get("tool_recall") is not None))
