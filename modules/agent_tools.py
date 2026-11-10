@@ -42,6 +42,13 @@ _TOOL_RESULT_CHARS = int(os.getenv("AGENT_TOOL_RESULT_CHARS", "4000") or 4000)
 # failure mode at the second attempt.
 _MAX_IDENTICAL_CALLS = int(os.getenv("AGENT_MAX_IDENTICAL_CALLS", "2") or 2)
 
+# Total input tokens one tool loop may spend across all its rounds.
+# _MAX_TOOL_ROUNDS bounds the number of rounds and _MAX_IDENTICAL_CALLS bounds
+# repeats, but neither bounds SIZE: each round resends the whole conversation
+# plus the tool results, so four rounds of a long web search is 4x the tokens
+# of one and the caps never fire. This is the missing ceiling.
+_MAX_TOOL_TOKENS = int(os.getenv("AGENT_MAX_TOOL_TOKENS", "48000") or 48000)
+
 # The RAG store the document tools read from (bound at app startup).
 _document_store = None
 
@@ -230,8 +237,13 @@ def dispatch_tool(name: str, arguments: dict) -> str:
     finally:
         elapsed = time.monotonic() - t0
         try:
-            from modules.prometheus_metrics import record_tool_seconds
+            from modules.prometheus_metrics import record_tool_seconds, tool_span
             record_tool_seconds(name, elapsed)
+            # A span as well as a histogram: the histogram answers "how slow
+            # is web_search on average", the span answers "what did THIS run
+            # do, and which call was the slow one".
+            with tool_span(name, elapsed, ok=ok, detail=detail or ""):
+                pass
         except Exception:  # nosec B110 - telemetry must never fail a tool call
             pass
         # Audit trail. Tool calls are the only outbound surface (web_search
@@ -438,6 +450,18 @@ def run_tool_rounds(client, model: str, messages: List[dict],
         return messages, [], None
     events: List[str] = []
     seen: Dict[tuple, int] = {}
+    spent_tokens = 0
+
+    def _over_budget() -> Optional[str]:
+        """Message to hand the model when the token ceiling is reached.
+
+        Returned as content rather than raised: the loop should still produce
+        an answer from what it already has. An exception here would turn a
+        budget stop into a failed chat.
+        """
+        return (f"I have gathered enough information and used my research "
+                f"budget ({spent_tokens:,} tokens). Answer now using only the "
+                f"results already collected, and say what is uncertain.")
 
     def _guarded_dispatch(name: str, args: dict) -> str:
         """Dispatch, but refuse to re-run the same (tool, args) repeatedly.
@@ -462,6 +486,19 @@ def run_tool_rounds(client, model: str, messages: List[dict],
         return dispatch_tool(name, args)
 
     for _ in range(max_rounds):
+        # Count what this round will actually send, then stop before paying
+        # for it. Estimated with the same helper llm_guard uses so the two
+        # cannot disagree about what a token is.
+        try:
+            from modules.llm_guard import estimate_tokens
+            round_tokens = estimate_tokens(messages, tools)
+        except Exception:
+            round_tokens = 0
+        if round_tokens and spent_tokens + round_tokens > _MAX_TOOL_TOKENS:
+            events.append("🛑 tool budget reached")
+            messages.append({"role": "user", "content": _over_budget()})
+            return messages, events, None
+        spent_tokens += round_tokens
         try:
             response = client.chat.completions.create(
                 model=model,

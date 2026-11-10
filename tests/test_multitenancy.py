@@ -451,13 +451,14 @@ def test_hybrid_bm25_adds_keyword_hits_for_same_owner_only():
 
 def test_llm_usage_is_costed_and_route_labels_are_templates(api_client):
     api, TestClient = api_client
-    from modules.prometheus_metrics import record_llm_usage
-    from modules.advanced_monitoring import cost_tracker
+    from modules.prometheus_metrics import record_llm_usage, cost_summary
 
-    before = cost_tracker.usage["total_cost"]
+    # The spend is read back from the Prometheus counter -- the same series
+    # Grafana reads -- rather than from a second in-process ledger.
+    before = cost_summary()["total_cost"]
     cost = record_llm_usage("openai/gpt-oss-20b", 1_000_000, 1_000_000)
     assert abs(cost - (0.075 + 0.30)) < 1e-9
-    assert cost_tracker.usage["total_cost"] - before >= cost - 1e-9
+    assert cost_summary()["total_cost"] - before >= cost - 1e-9
 
     c = TestClient(api.app)
     c.get("/conversations/some-random-id-123")

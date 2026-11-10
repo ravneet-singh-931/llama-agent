@@ -346,17 +346,22 @@ class TestEnterpriseModules:
         assert any(a["type"] == "high_error_rate" for a in triggered)
 
     def test_default_models_have_explicit_prices(self, monkeypatch):
-        """Both tier defaults are priced explicitly (no silent default-price guess)."""
+        """Both tier defaults are priced explicitly (no silent default-price guess).
+
+        This used to read ``CostTracker.DEFAULT_PRICING``. That class is gone
+        -- its table moved to modules.prometheus_metrics.PRICING, which is now
+        the single source for both the Grafana counter and the dashboard. The
+        intent is unchanged: a tier default with no explicit price would be
+        silently costed at the fallback rate.
+        """
         monkeypatch.delenv("GROQ_PRICING", raising=False)
-        from modules.advanced_monitoring import CostTracker
+        from modules.prometheus_metrics import PRICING, _price
         from modules.model_tiers import DEFAULT_FAST_MODEL, DEFAULT_STRONG_MODEL
 
-        tracker = CostTracker()
-        assert DEFAULT_STRONG_MODEL in tracker.pricing
-        assert DEFAULT_FAST_MODEL in tracker.pricing
+        assert DEFAULT_STRONG_MODEL in PRICING
+        assert DEFAULT_FAST_MODEL in PRICING
         # qwen/qwen3.8-27b on Groq: $0.80 in / $4.00 out per 1M tokens
-        cost = tracker.record_usage(DEFAULT_STRONG_MODEL, 1_000_000, 1_000_000)
-        assert abs(cost - 4.80) < 1e-9
+        assert abs(_price(DEFAULT_STRONG_MODEL, 1_000_000, 1_000_000) - 4.80) < 1e-9
 
     def test_monitoring_dashboard_shape(self):
         from modules.advanced_monitoring import get_monitoring_dashboard

@@ -1606,9 +1606,16 @@ class MultiAgentOrchestrator:
                 return f"[The {step['agent']} agent could not complete this step.]"
 
         # 3. Execute level by level; steps within a level run in parallel.
-        with ThreadPoolExecutor(
-            max_workers=int(os.getenv("AGENT_PARALLEL", "4"))
-        ) as pool:
+        #
+        # The pool is shut down explicitly rather than by `with`, because
+        # ThreadPoolExecutor.__exit__ calls shutdown(wait=True): after a step
+        # times out, the `with` block would still block until the hung worker
+        # finished, so the deadline above bounded the loop and not the request.
+        # shutdown(wait=False) lets the placeholder answer return immediately;
+        # the abandoned thread is a daemon-equivalent worker that exits on its
+        # own timeout.
+        pool = ThreadPoolExecutor(max_workers=int(os.getenv("AGENT_PARALLEL", "4")))
+        try:
             for level in levels:
                 # 7. Budget guard before spawning the level.
                 if self._budget_exceeded(start_time, est_tokens):
@@ -1626,11 +1633,19 @@ class MultiAgentOrchestrator:
                 # (those only check BEFORE each level). On timeout we degrade
                 # to the same placeholder a failed step produces, so the rest
                 # of the DAG still completes.
+                # The timeout belongs to the LEVEL, not to each future.
+                # Calling f.result(timeout=T) in a loop gives the Nth future
+                # T seconds ON TOP of the first N-1, so a two-step level could
+                # block for 2 x T -- measured: AGENT_STEP_TIMEOUT=150 produced
+                # a 309 s run, past AGENT_LATENCY_BUDGET=180 and past the
+                # eval's 300 s case timeout. Deadline arithmetic below means
+                # the level as a whole is bounded by step_timeout.
                 step_timeout = _step_timeout_seconds()
+                deadline = time.monotonic() + step_timeout
                 outs = []
                 for sid, f in zip(level, futures):
                     try:
-                        outs.append(f.result(timeout=step_timeout))
+                        outs.append(f.result(timeout=max(0.0, deadline - time.monotonic())))
                     except FuturesTimeout:
                         logger.error("team step %s timed out after %ss",
                                      sid, step_timeout)
@@ -1639,6 +1654,8 @@ class MultiAgentOrchestrator:
                                     f"finish within {int(step_timeout)}s.]")
                 for sid, out in zip(level, outs):
                     results[sid] = out
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         # Combine results in step order.
         final_result = "🎯 **Multi-Agent Collaboration Result:**\n\n"

@@ -65,6 +65,7 @@ from modules.mcp_client import get_mcp_status, call_mcp_tool
 ws_handler = get_ws_handler()
 
 # Prometheus metrics
+from modules.pii import StreamRedactor
 from modules.prometheus_metrics import (
     init_metrics,
     metrics_endpoint,
@@ -1760,7 +1761,10 @@ def _check_doc_citations(answer: str, context: str) -> str:
         pass
     if report["unsourced"]:
         return answer + "\n\n" + _DOC_UNSOURCED_NOTE
-    bad = ", ".join(f"{f} chunk {c}" for f, c in (report["invented_files"] or report["invalid"]))
+    # Spell the citation the way the prompt asks the model to write it, so the
+    # note reads as a quote of what the answer did rather than a new format.
+    bad = ", ".join(f"{f} (chunk {c})"
+                    for f, c in (report["invented_files"] or report["invalid"]))
     return answer + "\n\n" + _DOC_BAD_CITATION_NOTE.format(bad=bad)
 
 
@@ -2351,6 +2355,22 @@ async def chat_stream(
     rag = _user_rag(user_id)  # this caller's documents only
     # Per-user default conversation (never share the legacy "default" id).
     conversation_id = request.conversation_id or _default_conversation_id(user_id)
+
+    # Per-tenant token budget. llm_guard's ITPM window bounds tokens per
+    # minute globally; this bounds what ONE user may spend per window, so a
+    # single client looping a @team request cannot consume the whole
+    # organisation quota. Disabled unless AGENT_USER_TOKEN_BUDGET is set.
+    from modules import llm_guard as _guard
+    if _guard.over_budget(user_id):
+        _log.warning("token budget exhausted for %s", user_id)
+
+        def _refuse():
+            yield "data: " + json.dumps({"type": "reasoning", "stage": "budget",
+                                         "content": _guard.budget_message()}) + "\n\n"
+            yield f"data: {escape_sse(_guard.budget_message())}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(_refuse(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache"})
     # SLO metrics: the branches below set the route; timed_chat_stream records
     # the full wait (start -> end of stream), outcome and time to first text.
     chat_meta = {"route": "command", "start": time.monotonic()}
@@ -2535,6 +2555,7 @@ async def chat_stream(
             final_text = ""
             streamed = ""
             used_agents = set()
+            _redactor = StreamRedactor()
             try:
                 async for ev in _aiter_in_thread(lambda: orchestrator.collaborate_stream(
                         task, critique=critic, reflect=reflect, parallel=parallel)):
@@ -2544,7 +2565,9 @@ async def chat_stream(
                     etype = ev.get("type")
                     if etype == "token":
                         streamed += ev.get("content", "")
-                        yield f"data: {escape_sse(ev.get('content', ''))}\n\n"
+                        _safe = _redactor.feed(ev.get("content", ""))
+                        if _safe:
+                            yield f"data: {escape_sse(_safe)}\n\n"
                     elif etype in ("tool", "reasoning"):
                         # Tool activity / plan / critic notes go to the
                         # reasoning view, never into the answer text.
@@ -2603,6 +2626,7 @@ async def chat_stream(
             )
             full = ""
             reviewed = False  # the agent ran critic/reflection itself
+            _redactor = StreamRedactor()
             try:
                 async for event in _aiter_in_thread(lambda: agent.execute_stream(
                         task, critique=critic, reflect=reflect)):
@@ -2616,11 +2640,17 @@ async def chat_stream(
                         yield _reasoning_sse(event)
                     else:
                         full += event.get("content", "")
-                        yield f"data: {escape_sse(event.get('content', ''))}\n\n"
+                        _safe = _redactor.feed(event.get("content", ""))
+                        if _safe:
+                            yield f"data: {escape_sse(_safe)}\n\n"
             except Exception:
                 logging.getLogger(__name__).exception("%s agent stream failed", agent_type)
                 full = f"⚠️ The {agent.name} could not complete this task. Please try again."
                 yield f"data: {escape_sse(full)}\n\n"
+            _tail = _redactor.flush()
+            if _tail:
+                full += _tail
+                yield f"data: {escape_sse(_tail)}\n\n"
             if not full.strip():
                 full = "⚠️ The model returned an empty answer. Please try again, or rephrase the question."
                 yield f"data: {escape_sse(full)}\n\n"
@@ -2639,6 +2669,11 @@ async def chat_stream(
                         )
                 except Exception:
                     pass
+            _tail = _redactor.flush()
+            if _tail:
+                streamed += _tail
+                full = (full or "") + _tail
+                yield f"data: {escape_sse(_tail)}\n\n"
             await _persist_message(user_id, conversation_id, "assistant", full)
             yield "data: [DONE]\n\n"
         else:
@@ -2658,6 +2693,7 @@ async def chat_stream(
                 + "\n\n"
             )
             full_response = ""
+            _redactor = StreamRedactor()
             async for token in _aiter_in_thread(lambda: run_agent_stream(
                 request.message,
                 memory=memory,
@@ -2669,7 +2705,13 @@ async def chat_stream(
                     yield f"data: {escape_sse(f'⚠️ Stream timed out after {int(STREAM_MAX_DURATION)}s.')}\n\n"
                     break
                 full_response += token
-                yield f"data: {escape_sse(token)}\n\n"
+                _safe = _redactor.feed(token)
+                if _safe:
+                    yield f"data: {escape_sse(_safe)}\n\n"
+            _tail = _redactor.flush()
+            if _tail:
+                full_response += _tail
+                yield f"data: {escape_sse(_tail)}\n\n"
             # The agent already wrote both messages to the JSON memory store;
             # mirror them to PostgreSQL (durable history the sidebar reads) and
             # refresh the Redis caches so the sidebar/conversation views agree.
@@ -2720,6 +2762,27 @@ async def chat_options():
             "parallel": "@team (independent steps run concurrently)",
         },
     }
+
+
+def _redacted_stream(chunks):
+    """Wrap a token stream so PII is redacted before the user sees it.
+
+    Redaction used to happen only on the way into logs (modules/monitoring.py,
+    modules/security_hardening.py). A model that echoes an SSN or a card number
+    out of an uploaded document sent it straight to the browser. This is the
+    output half of that boundary, and it is stream-aware: StreamRedactor holds
+    back enough text that a number split across two tokens is still redacted
+    whole.
+    """
+    from modules.pii import StreamRedactor
+    redactor = StreamRedactor()
+    for chunk in chunks:
+        out = redactor.feed(chunk)
+        if out:
+            yield out
+    tail = redactor.flush()
+    if tail:
+        yield tail
 
 
 def escape_sse(text: str) -> str:

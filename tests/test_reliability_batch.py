@@ -207,35 +207,29 @@ class TestFactHistory:
 
 
 # =================================================== per-step cost attribution
+# =================================================== per-step cost attribution
 
 class TestCostAttribution:
-    def test_component_lands_in_cost_by_query_type(self):
-        """record_llm_usage took a component label but never passed it to
-        CostTracker, so cost_by_query_type was empty in production."""
-        from modules.prometheus_metrics import record_llm_usage
-        from modules.advanced_monitoring import CostTracker
-        tracker = CostTracker()
-        import modules.advanced_monitoring as am
-        original = am.cost_tracker
-        am.cost_tracker = tracker
-        try:
-            record_llm_usage("qwen/qwen3.8-27b", 1000, 500, component="research")
-            record_llm_usage("openai/gpt-oss-20b", 2000, 800, component="coder")
-        finally:
-            am.cost_tracker = original
-        buckets = dict(tracker.usage["cost_by_query_type"])
-        assert "research" in buckets and "coder" in buckets
-        assert buckets["research"] > buckets["coder"], "the strong-tier step costs more"
+    def test_component_lands_in_cost_by_component(self):
+        """record_llm_usage took a component label but never passed it on, so
+        per-step attribution was empty in production.
+
+        This used to reach into a CostTracker dict. That class is gone: the
+        bucket is now the `component` label of llama_agent_llm_cost_usd_total,
+        which is what Grafana reads. Same assertion, one store.
+        """
+        from modules.prometheus_metrics import record_llm_usage, cost_by_component
+        before = cost_by_component()
+        record_llm_usage("qwen/qwen3.8-27b", 1000, 500, component="research")
+        record_llm_usage("openai/gpt-oss-20b", 2000, 800, component="coder")
+        after = cost_by_component()
+
+        assert after["research"] > before.get("research", 0.0)
+        assert after["coder"] > before.get("coder", 0.0)
+        assert after["research"] > after["coder"], "the strong-tier step costs more"
 
     def test_unknown_component_is_normalised_not_dropped(self):
-        from modules.prometheus_metrics import record_llm_usage
-        from modules.advanced_monitoring import CostTracker
-        tracker = CostTracker()
-        import modules.advanced_monitoring as am
-        original = am.cost_tracker
-        am.cost_tracker = tracker
-        try:
-            record_llm_usage("openai/gpt-oss-20b", 100, 10, component="never-heard-of-it")
-        finally:
-            am.cost_tracker = original
-        assert dict(tracker.usage["cost_by_query_type"])
+        from modules.prometheus_metrics import record_llm_usage, cost_by_component
+        before = cost_by_component().get("other", 0.0)
+        record_llm_usage("openai/gpt-oss-20b", 1000, 100, component="never-heard-of-it")
+        assert cost_by_component().get("other", 0.0) > before
