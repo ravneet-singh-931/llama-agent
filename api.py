@@ -31,9 +31,7 @@ from fastapi import (
     UploadFile,
     File,
     WebSocket,
-    WebSocketDisconnect,
     Depends,
-    status,
     Request,
     Response,
 )
@@ -45,7 +43,7 @@ from pydantic import BaseModel, EmailStr, Field
 sys.path.insert(0, os.path.dirname(__file__))
 
 # Import new modules
-from modules.config import get_config, AppConfig
+from modules.config import get_config
 from modules.database import get_db_manager
 from modules.model_tiers import resolve_model, should_fallback
 from modules.auth import (
@@ -58,10 +56,10 @@ from modules.auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     REFRESH_TOKEN_EXPIRE_DAYS,
 )
-from modules.websocket import get_ws_handler, MessageType, WSMessage
+from modules.websocket import get_ws_handler
 
 # MCP client (real Model Context Protocol over SSE)
-from modules.mcp_client import MCP_SERVER_URL, get_mcp_status, call_mcp_tool
+from modules.mcp_client import get_mcp_status, call_mcp_tool
 
 # WebSocket handler
 ws_handler = get_ws_handler()
@@ -88,7 +86,6 @@ from modules.security_hardening import (
 from modules.advanced_monitoring import (
     alert_manager,
     business_metrics,
-    cost_tracker,
     sla_monitor,
     get_monitoring_dashboard,
 )
@@ -2227,7 +2224,6 @@ def answer_from_documents(query: str, rag) -> str:
     if "No documents" in context:
         return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
 
-    from multi_agent import InstrumentedGroqClient
     from modules.secrets import get_secret
     api_key = os.environ.get("GROQ_API_KEY", "") or get_secret("GROQ_API_KEY", default="")
     if not api_key:

@@ -13,7 +13,6 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
-from functools import wraps
 
 # JWT for token-based auth
 import jwt  # PyJWT (python-jose is unmaintained: PYSEC-2026-4298, no fix)
@@ -27,10 +26,14 @@ from modules.database import (
     get_db_manager,
     User,
     ApiKey,
-    hash_password,
-    verify_password,
     generate_api_key,
 )
+
+# Re-exported on purpose: callers and the test suite import these from
+# modules.auth (`from modules.auth import hash_password, verify_password`),
+# so they are part of this module's public surface even though nothing in
+# this file calls them. Dropping them breaks the test suite.
+from modules.database import hash_password, verify_password  # noqa: F401
 
 # ============ CONFIGURATION ============
 

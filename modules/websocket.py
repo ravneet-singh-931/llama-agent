@@ -10,17 +10,14 @@ Features:
 - Automatic reconnection
 """
 
-import os
 import json
-import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Set, Optional, Any, List
 from dataclasses import dataclass, field
 from enum import Enum
 
-from fastapi import WebSocket, WebSocketDisconnect, status
-from starlette.websockets import WebSocketState
+from fastapi import WebSocket, WebSocketDisconnect
 
 
 # ============ MESSAGE TYPES ============

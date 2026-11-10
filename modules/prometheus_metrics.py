@@ -22,7 +22,6 @@ Metrics exposed:
 import asyncio
 import json
 import time
-import prometheus_client
 from prometheus_client import (
     Counter,
     Histogram,

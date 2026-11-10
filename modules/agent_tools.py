@@ -26,7 +26,6 @@ import os
 import re
 from typing import Dict, List, Optional, Tuple
 
-from modules.secrets import get_secret
 from modules.web_tools import web_search, WEB_SEARCH_TOOL
 
 logger = logging.getLogger(__name__)

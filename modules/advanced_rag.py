@@ -24,9 +24,7 @@ This module adds 4 advanced features on top of ChromaDB:
 """
 
 import time
-import json
-from typing import List, Dict, Optional, Any
-from dataclasses import dataclass, field
+from typing import List, Dict, Any
 
 
 # ============ 1. RE-RANKING (Rearranging) ============

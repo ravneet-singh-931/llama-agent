@@ -13,13 +13,11 @@ Tables:
 import os
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict
 from contextlib import asynccontextmanager
 
 # SQLAlchemy for database ORM
 from sqlalchemy import (
-    create_engine,
-    Column,
     String,
     Text,
     DateTime,
@@ -51,7 +49,6 @@ import bcrypt as _bcrypt
 
 class Base(DeclarativeBase):
     """Base class for all database models"""
-    pass
 
 
 # ============ USER MODEL ============

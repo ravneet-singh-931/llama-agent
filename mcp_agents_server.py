@@ -18,7 +18,6 @@ Run: python mcp_agents_server.py
 
 import os
 import sys
-from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
