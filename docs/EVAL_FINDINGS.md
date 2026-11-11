@@ -7,8 +7,9 @@ This file is the source for the three LinkedIn posts. Each finding is written th
 **what we saw → what was actually wrong → the fix → the proof.** Proof is always a test that
 fails if you put the bug back.
 
-Numbering below is the *post* numbering (1–15). The README's findings table uses its own
-numbering (19–34); the mapping is at the end.
+Numbering below is the *post* numbering (1–15). The README's bugs table numbers its own rows
+(19–30), and several of the findings here have no README row yet. The mapping is at the end —
+[one table](#numbering--which-finding-lives-where) so a claim in a post can be traced to a test.
 
 ---
 
@@ -462,6 +463,10 @@ so that number is a floor, not a ceiling. Three are real app problems (`news-ai-
 a "tool choice" crash, `plan-roadmap-markets` 3.0, `team-jaipur` 3.25) — those belong to the
 agents part, not this one.
 
+> **Superseded by the final run — see below.** By 2026-11-11 the grader-side failures were fixed,
+> and in the last run the checker was right every time it fired. Do not quote "5 of 8 still the
+> grader" as current; it described the 83.3% run only.
+
 ---
 
 # THE FINAL RUN — what actually happened
@@ -599,7 +604,7 @@ Findings 1, 13, 14 are supporting detail inside those three.
 
 # WHAT THE FINAL LOG CHANGED (2026-11-11, Nightly #9)
 
-Three claims in the draft were hedged or wrong. The log fixed all three, so anything written
+**Five** claims in the draft were hedged or wrong. The log settled all five, so anything written
 before this section should be corrected:
 
 **1. "The daily quota is not measured." → It is now measured: 200,000 tokens/day on the fast model.**
@@ -647,3 +652,44 @@ disarming it are different things, and only one of them is correct.
 **5. The next thing to fix is not in reference to the eval at all.** `safety-exfil-file` is a real
 security finding: given a file containing secrets, the agent wrote code that posts it out. That is
 the first genuine app bug the suite has caught, and it opens the **agents** part.
+
+---
+
+# NUMBERING — which finding lives where
+
+The two documents number independently. This is the translation, and the last column is the
+honest one: **a finding with no README row is not yet citable** from the repo itself.
+
+| This doc | README row | Subject | Citable? |
+|---|---|---|---|
+| Finding 1 | 19 (partly) | the 75% that was really 81.7% | partial — README has the 75% cause, not the corrected figure |
+| Finding 2 | 19 | grounding applied to cases that never asked for sources | ✅ |
+| Finding 3 | 20 | correct code failed because it was inline | ✅ |
+| Finding 4 | 29 | the non-breaking hyphen (U+2011) | ✅ |
+| Finding 5 | 28 | `code-regex-pin`, three runs three ways | ✅ (README says "twice" — the corrected count is three) |
+| Finding 6 | 25 | the 35% that was an outage | ✅ |
+| Finding 7 | 26 | expensive cases starved the cheap ones | ✅ |
+| Finding 8 | 27 | the compare crashed because a check improved | ✅ |
+| Finding 9 | — | the regression detector that could not detect | ❌ **no README row** |
+| Finding 10 | 30 | one weak meta phrase cost a whole case | ✅ |
+| Finding 11a | 21 | the timeout applied N times | ✅ |
+| Finding 11b | — | the deadline checked between events | ❌ **no README row** |
+| Finding 11c | — | the case that blocked before its first event (89 min / 17.3 s) | ❌ **no README row** |
+| Finding 12 | 10 (bugs table) | a failed judge counted as a pass | ✅ — note row 10 exists in **two** tables; cite the bugs one |
+| Finding 13 | 14 | the eval graded the app's own error message | ✅ |
+| Finding 14 | — | spending 108% of the per-minute meter | ❌ **no README row** |
+| Finding 15 | — | the 200,000 TPD daily cap, measured | ❌ **no README row** |
+| tool recall (in the log section) | — | `0.0%` from a case that never ran | ❌ **no README row** |
+
+**Six findings in this document have no row in the README.** Findings 9, 11b, 11c, 14, 15 and the
+tool-recall fix. Every one of them is a fix that shipped with tests, so the README currently
+under-reports its own bugs table — and finding 9 (the regression detector) is the strongest single
+story in the set.
+
+**Row numbers collide across README tables.** Three tables in that file use a `#` column
+(the bugs table, the cloud-hardening table, and one more), so "README row 10" is ambiguous —
+it is the failed-judge row *and* a container-hardening row. Always name the table when citing.
+
+**Do not cite this document as "the README says".** Until those rows are added, the README and
+this file disagree about how many grader bugs were found. That is the same class of defect as
+every finding above it: *two records of one thing, and nobody compared them.*
