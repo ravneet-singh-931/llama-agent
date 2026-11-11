@@ -30,10 +30,10 @@ on:
         type: boolean
         default: true
       scope:
-        description: "smoke = 12 cases, all 9 categories (fits the free tier) | full = all 60"
+        description: "full = all 60 (~50 min) | smoke = 12 cases, all 9 categories (~5 min)"
         type: choice
-        options: [smoke, full]
-        default: smoke
+        options: [full, smoke]
+        default: full
 
 permissions:
   contents: read
@@ -50,7 +50,10 @@ jobs:
   nightly:
     name: "🌙 Nightly agent eval"
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 90, not 60. A full 60-case run at a safe pause is ~50-55 minutes, and
+    # team-todo-landing alone can take 300s. The old cap would have killed a
+    # healthy run at the point it was finally reaching its tail.
+    timeout-minutes: 90
 
     steps:
       - name: "📥 Checkout code"
@@ -107,13 +110,20 @@ jobs:
           # now runs the `smoke` set (12 cases, all 9 categories, the checks
           # that have historically broken) and keeps the full 60 for runs
           # that can afford them. Coverage matters less than reaching the end.
+          #
+          # PAUSE 25, not 10. Measured on the 11:09 run: 5,239 tokens per case
+          # over 36 minutes is 7,567 tokens/min against a 7,000 ITPM cap -- 108%
+          # of the limit, which is why that run lost its tail to 429s. A full
+          # run is ~314k tokens; sustained under 7,000/min needs >=45 minutes,
+          # so the pause has to carry it: 25s gives ~50 min and ~6,300/min.
+          # The old value was not too few cases. It was too much traffic.
           SCOPE="${{ inputs.scope }}"
-          if [ -z "$SCOPE" ]; then SCOPE="smoke"; fi   # schedule has no inputs
+          if [ -z "$SCOPE" ]; then SCOPE="full"; fi   # schedule has no inputs
           ARGS=""
           if [ "$SCOPE" = "smoke" ]; then ARGS="--tags smoke"; fi
           echo "Running scope: $SCOPE ($ARGS)"
           set +e
-          python -m evals.run $ARGS --out eval-today.json --pause 10
+          python -m evals.run $ARGS --out eval-today.json --pause 25
           STATUS=$?
           if [ "$STATUS" -eq 3 ]; then
             echo "::warning title=Incomplete run::Too few cases were graded for a pass rate to mean anything (provider limits). The report says so; do not quote the pass rate."
