@@ -139,6 +139,21 @@ def _looks_like_regex(snippet: str) -> bool:
         return False
 
 
+_REGEX_LITERAL_RE = re.compile(r"""re\.(?:compile|match|fullmatch|search|findall|sub)\(\s*[rbuf]?[\'"](.+?)[\'"]""")
+
+
+def _regex_literal_in(code: str) -> str:
+    """The pattern from `re.fullmatch(r'...', x)` / `pattern = r'...'`, else "".
+
+    Falls back to the whole block so a bare pattern in a fence still counts.
+    """
+    m = _REGEX_LITERAL_RE.search(code or "")
+    if m:
+        return m.group(1)
+    m = re.search(r"""[rbuf]?['"]([^'"\n]*[\\\[\](){}+*?^$|][^'"\n]*)['"]""", code or "")
+    return m.group(1) if m else ""
+
+
 def code_blocks(text: str) -> List[Dict[str, str]]:
     return [{"lang": (m.group(1) or "").lower(), "code": m.group(2)}
             for m in _FENCE_BLOCK_RE.finditer(text or "")]
@@ -209,9 +224,27 @@ class _TagBalance(HTMLParser):
             self.errors.append(f"stray </{tag}>")
 
 
+# Hyphens and dashes a model emits in place of "-". U+2011 (non-breaking
+# hyphen) is the one that bit: team-slack-bot scored judge 4.75/5 and failed on
+# "invalid character '‑' (U+2011)" because the model wrote a typographic
+# hyphen inside a Python snippet. U+2013 en dash is the same bug class and was
+# already on the known-limits list after fact-node-latest. A human reading the
+# answer sees a minus sign; only the compiler disagrees. Normalising here means
+# no case has to care which glyph the model chose.
+_DASHES = str.maketrans({"‐": "-", "‑": "-", "‒": "-",
+                         "–": "-", "—": "-", "―": "-",
+                         "−": "-", "­": "-"})
+
+
+def normalise_dashes(text: str) -> str:
+    """Fold typographic dashes to ASCII '-' so code validates as written."""
+    return (text or "").translate(_DASHES)
+
+
 def validate_code(lang: str, code: str) -> Optional[str]:
     """Return an error string, or None when the code looks valid."""
     lang = (lang or "").lower()
+    code = normalise_dashes(code)
     if lang in _LANG_ALIASES["python"]:
         try:
             ast.parse(code)
@@ -251,6 +284,28 @@ def check_code(answer: str, expected_lang: Optional[str]) -> Dict:
             shaped = {"python": _parses_as_python, "regex": _looks_like_regex}.get(expected_lang)
             if shaped and any(shaped(i) for i in inline):
                 return {"pass": True, "detail": ""}
+            # "Give me a regex" is usually answered with a PYTHON block, because
+            # that is how a developer would use it:
+            #     ```python
+            #     pattern = r'^[1-9][0-9]{5}$'
+            #     ```
+            # Demanding a block tagged ```regex asks for a language tag that
+            # barely exists in the wild, so the check was still grading
+            # formatting -- the exact bug fixed for inline spans. Accept a
+            # requested regex when one appears inside any fenced block
+            # (string literals or raw strings), or bare in the prose.
+            if expected_lang == "regex":
+                # A regex literal lifted out of a python block must itself look
+                # like a pattern -- otherwise print('hello') passes because
+                # 'hello' is a valid literal string.
+                literals = [_regex_literal_in(b["code"]) for b in blocks]
+                if any(_looks_like_regex(c) for c in literals if c):
+                    return {"pass": True, "detail": ""}
+                # Bare pattern in the prose, scanned WITHOUT the fences: a
+                # fenced block's ``` + braces otherwise satisfies the "contains
+                # pattern syntax" test on its own, so any code block passed.
+                if _looks_like_regex(prose(answer)):
+                    return {"pass": True, "detail": ""}
             return {"pass": False, "detail": f"no {expected_lang} code block"}
     return {"pass": not errors, "detail": "; ".join(errors)}
 

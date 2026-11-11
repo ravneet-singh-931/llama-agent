@@ -608,3 +608,59 @@ def test_a_check_that_goes_to_zero_does_not_crash_the_compare():
 
     assert diff["check_failure_delta"] == {"no_meta": -1, "code_valid": 2}
     assert "no_meta -1" in run.render_compare(diff)
+
+
+# ------------------------------------------------- regex answers in the wild
+# code-regex-pin scored judge 5.0/5 and failed "no regex code block" twice: the
+# first fix covered inline spans only, and a coder agent answers "give me a
+# regex" with a PYTHON block, because that is how you would use it.
+
+def _regex_passes(answer):
+    return checks.check_code(answer, "regex")["pass"]
+
+
+def test_regex_answered_as_a_bare_pattern_passes():
+    assert _regex_passes("Use this: ^[1-9][0-9]{5}$")
+
+
+def test_regex_inside_a_python_block_passes():
+    assert _regex_passes("```python\nimport re\nre.fullmatch(r'^[1-9][0-9]{5}$', pin)\n```")
+    assert _regex_passes("```python\npattern = r'^[1-9][0-9]{5}$'\n```")
+
+
+def test_regex_in_a_plain_fence_still_passes():
+    assert _regex_passes("```\n^[1-9][0-9]{5}$\n```")
+
+
+def test_prose_about_a_regex_is_still_not_a_regex():
+    assert not _regex_passes("Use the six digit rule and reject a leading zero.")
+
+
+def test_any_code_block_is_not_automatically_a_regex():
+    """A fence contains ``` + braces, which satisfied the pattern-syntax test."""
+    assert not _regex_passes("```python\nprint('hello')\n```")
+    assert not _regex_passes("```python\ndef add(a, b):\n    return a + b\n```")
+
+
+# ------------------------------------------------- typographic dashes
+# team-slack-bot: judge 4.75/5, failed on "invalid character '‑' (U+2011)".
+
+def test_a_typographic_hyphen_in_code_does_not_fail_the_case():
+    answer = "```python\ndef f(x):\n    y = x \u2011 1\n    return y\n```"
+    assert checks.check_code(answer, "python")["pass"]
+
+
+def test_every_dash_in_the_family_is_folded():
+    for ch, name in [("\u2010", "hyphen"), ("\u2011", "non-breaking hyphen"),
+                     ("\u2012", "figure dash"), ("\u2013", "en dash"),
+                     ("\u2014", "em dash"), ("\u2212", "minus sign")]:
+        code = f"y = x {ch} 1"
+        assert checks.validate_code("python", code) is None, name
+
+
+def test_normalising_does_not_change_real_subtraction():
+    """The gate must not 'fix' code by changing what it computes."""
+    assert checks.normalise_dashes("y = x - 1") == "y = x - 1"
+    assert checks.normalise_dashes("a\u2013b") == "a-b"
+    # a string that legitimately contains an en dash keeps its meaning elsewhere
+    assert checks.normalise_dashes("print('a\u2013b')") == "print('a-b')"
