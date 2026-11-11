@@ -246,6 +246,32 @@ def _case_span(case: Dict):
     return _Span()
 
 
+def evidence_fingerprint() -> Dict[str, object]:
+    """What the GRADER is: the checks, the judge, the dataset.
+
+    prompt_fingerprint answers "which prompts did the app see". It does not
+    answer "which checks graded the output", and on 2026-11-11 that was the
+    question: the grader changed between the two runs being diffed, the
+    prompt hash stayed identical, and a 30-case report was compared against a
+    60-case one and called a regression. Recorded explicitly so compare() can
+    tell "the app got worse" from "we changed the measuring stick".
+    """
+    import hashlib
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parent
+    out: Dict[str, object] = {}
+    for name, rel in (("checks", "checks.py"), ("judge", "judge.py"),
+                      ("dataset", "dataset.jsonl")):
+        try:
+            out[name] = hashlib.sha256((here / rel).read_bytes()).hexdigest()[:12]
+        except OSError:
+            out[name] = ""
+    out["judge_model"] = os.getenv("EVAL_JUDGE_MODEL", os.getenv("GROQ_MODEL_FAST", ""))
+    out["grounding_threshold"] = os.getenv("EVAL_GROUNDING_THRESHOLD", "0.7")
+    return out
+
+
 def prompt_fingerprint() -> str:
     """Stable id for the prompts in force during a run.
 
@@ -405,6 +431,11 @@ def summarize(results: List[Dict]) -> Dict:
         # Not-graded cases count as not passed; see "not_graded".
         "pass_rate": _pct(sum(r["passed"] for r in results), n),
         "not_graded": not_graded,
+        # A third of the suite arriving as provider notices is not a quality
+        # number, whatever the pass rate says. Flagged in the summary so the
+        # nightly can shout instead of publishing 35%.
+        "provider_failures": len(not_graded),
+        "provider_failure_pct": _pct(len(not_graded), n),
         "by_category": {c: {"cases": len(rs), "pass_rate": _pct(sum(r["passed"] for r in rs), len(rs))}
                         for c, rs in sorted(by_cat.items())},
         "check_failures": dict(sorted(check_fail.items())),
@@ -480,6 +511,25 @@ def compare(old: Dict, new: Dict) -> Dict:
     worse = [k for k, v in metrics.items() if v["delta"] is not None and (
         (v["delta"] < 0 and k in ("pass_rate", "judge_overall", "grounding_rate"))
         or (v["delta"] > 0 and k == "fabrication_rate"))]
+    # Newly not-graded cases. A case the provider never answered is counted as
+    # not passed by summarize(), so it shows up as a pass_rate drop identical
+    # to a real quality loss. It is not the same thing: on the 2026-11-11 run
+    # the pass rate fell 75% -> 35% while the judge (which reads the answers)
+    # moved 4.43 -> 4.35, and 8 of the 9 victims were the safety cases, whose
+    # median latency halved. Answers stopped arriving; they did not get worse.
+    # Without this field the report cannot tell a broken provider from
+    # regressed code, and the diff is not evidence of either.
+    old_ng = set(old["summary"].get("not_graded") or [])
+    new_ng = set(new["summary"].get("not_graded") or [])
+    newly_not_graded = sorted(new_ng - old_ng)
+    # The per-check tally is computed by summarize() and then never compared,
+    # so "12 cases started failing" could not be attributed to a check. That is
+    # exactly the question a red nightly asks first.
+    old_cf = old["summary"].get("check_failures") or {}
+    new_cf = new["summary"].get("check_failures") or {}
+    check_delta = {k: new_cf[k] - old_cf.get(k, 0)
+                   for k in set(old_cf) | set(new_cf)
+                   if new_cf.get(k, 0) != old_cf.get(k, 0)}
     # Which prompts were in force for each side. Without this a diff says a
     # case flipped but not whether the prompt changed underneath it, which is
     # the difference between "the model got worse" and "we edited the prompt".
@@ -487,11 +537,30 @@ def compare(old: Dict, new: Dict) -> Dict:
         old.get("prompt_fingerprint")
         and new.get("prompt_fingerprint")
         and old["prompt_fingerprint"] != new["prompt_fingerprint"])
+    # A diff taken while the INSTRUMENT changed compares two measurements, not
+    # two versions of the app. The echo that landed after the 2026-11-11 run is
+    # the argument: the two reports cover 30 vs 60 cases and different check
+    # logic, so every category delta is meaningless -- and the old rule
+    # ("any category down = regression") turned that into a red build, which is
+    # how a real signal gets ignored. Such a diff is still REPORTED (it is how
+    # you find out the suite changed); it just must not fail the job.
+    old_n = int(so.get("cases") or 0)
+    new_n = int(sn.get("cases") or 0)
+    old_checks = old.get("evidence") or {}
+    new_checks = new.get("evidence") or {}
+    incompatible = "cases_changed" if old_n != new_n else (
+        "check_logic_changed" if old_checks != new_checks and old_checks and new_checks else "")
+    if prompt_changed and not incompatible:
+        incompatible = "prompt_changed"
     return {"metrics": metrics, "category_pass_delta": cats, "regressed_cases": regressed,
             "fixed_cases": fixed,
+            "newly_not_graded": newly_not_graded,
+            "check_failure_delta": check_delta,
             "prompt_changed": prompt_changed,
             "prompt_old": old.get("prompt_fingerprint", ""),
             "prompt_new": new.get("prompt_fingerprint", ""),
+            "incomparable": incompatible,
+            "cases": {"old": old_n, "new": new_n},
             "regression": bool(regressed) or bool(worse) or any(v < 0 for v in cats.values())}
 
 
@@ -502,12 +571,27 @@ def render_compare(diff: Dict) -> str:
     lines += ["", "Category pass-rate delta: " + json.dumps(diff["category_pass_delta"]),
               f"Fixed: {diff['fixed_cases'] or 'none'}",
               f"Regressed: {diff['regressed_cases'] or 'none'}"]
+    if diff.get("newly_not_graded"):
+        lines.append(f"Newly NOT GRADED: {diff['newly_not_graded']}")
+    if diff.get("check_failure_delta"):
+        lines.append("Check failures: " + ", ".join(
+            f"{k} {v:+d}" for k, v in sorted(diff["check_failure_delta"].items())))
+    c = diff.get("cases") or {}
+    if diff.get("incomparable"):
+        lines += ["",
+                  f"**NOT COMPARABLE: {diff['incomparable'].replace('_', ' ')}** "
+                  f"({c.get('old')} -> {c.get('new')} cases). The two reports do not "
+                  "measure the same suite; a pass-rate delta across them is not a "
+                  "statement about the app."]
     if diff.get("prompt_changed"):
         # Say this loudly: a diff taken across a prompt edit is comparing two
         # different systems, so a "regression" may be the prompt, not the code.
         lines.append(f"Prompts CHANGED between runs ({diff.get('prompt_old')} -> "
                      f"{diff.get('prompt_new')}); attribute flips carefully.")
-    lines.append(f"Verdict: {'REGRESSION' if diff['regression'] else 'no regression'}")
+    if diff.get("incomparable"):
+        lines.append("Verdict: inconclusive (instrument changed) - not failing the job")
+    else:
+        lines.append(f"Verdict: {'REGRESSION' if diff['regression'] else 'no regression'}")
     return "\n".join(lines)
 
 
@@ -541,6 +625,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             new = json.load(f)
         diff = compare(old, new)
         print(render_compare(diff))
+        # An inconclusive diff must not fail the build. It is reported, and it
+        # is still worth reading -- but "we changed the suite" is not "the app
+        # regressed", and a job that goes red for the former teaches everyone
+        # to ignore the colour.
+        if diff.get("incomparable"):
+            return 0
         return 1 if (args.fail_on_regression and diff["regression"]) else 0
 
     cases = load_cases(args.dataset, args.ids, args.categories, args.tags, args.limit)
@@ -567,6 +657,9 @@ def main(argv: Optional[List[str]] = None) -> int:
               # Which prompts, not just which commit -- see prompt_fingerprint.
               "prompt_version": os.getenv("PROMPT_VERSION", ""),
               "prompt_fingerprint": prompt_fingerprint(),
+              # What graded this run. compare() refuses to call a pass-rate
+              # delta a regression when this differs between the two reports.
+              "evidence": evidence_fingerprint(),
               "args": vars(args),
               "summary": summary, "results": results}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
