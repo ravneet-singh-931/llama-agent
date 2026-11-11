@@ -325,7 +325,18 @@ def check_includes(answer: str, any_of: List[str]) -> Dict:
     wanted = [w.format(**tokens) for w in any_of]
     low = (answer or "").lower()
     ok = any(w.lower() in low for w in wanted)
-    return {"pass": ok, "detail": "" if ok else f"none of {wanted}"}
+    if ok:
+        return {"pass": True, "detail": ""}
+    # A `{year}` requirement is a requirement to be *current*, not to contain
+    # four digits. "Node 24 is the current LTS, released April 2025" is a
+    # correct answer about the latest release and it failed because the string
+    # "2026" was absent -- grading a date stamp instead of a version. Accept
+    # the year before today's, which is where release dates legitimately fall.
+    if "{year}" in any_of:
+        year = int(tokens["year"])
+        if str(year - 1) in low:
+            return {"pass": True, "detail": ""}
+    return {"pass": False, "detail": f"none of {wanted}"}
 
 
 def check_excludes(answer: str, none_of: List[str]) -> Dict:
@@ -355,10 +366,21 @@ def check_sources(tool_calls: List[Dict]) -> Dict:
 
 def check_grounding(answer: str, prompt: str, tool_calls: List[Dict],
                     threshold: float) -> Optional[Dict]:
-    srcs = grounding.run_sources(prompt, [t.get("result", "") for t in tool_calls])
+    # Research cases are graded against what the tools actually returned.
+    # Including the prompt here once let a figure the *user* supplied count as
+    # a sourced figure: "upgrade from 22 to 24" scored 2/2 while only `24`
+    # came from a search.
+    outputs = [t.get("result", "") for t in tool_calls]
+    srcs = grounding.research_sources(outputs)
     report = grounding.check(prose(answer), srcs)
-    if not report.checked or report.total == 0:
-        return None                      # nothing to measure for this case
+    if not report.checked:
+        # Distinguish "could not measure" from "measured, and it was clean".
+        # A missing rate used to look identical to a good one in the summary.
+        return {"pass": True, "skipped": True, "rate": None, "total": 0,
+                "detail": f"not checked - {report.skip_reason or 'no sources'}"}
+    if report.total == 0:
+        return {"pass": True, "rate": 1.0, "total": 0,
+                "detail": "no figures to verify"}
     return {"pass": report.rate >= threshold, "rate": round(report.rate, 3),
             "total": report.total, "unsupported": report.unsupported[:12],
             "detail": f"{report.supported}/{report.total} figures found in sources"}

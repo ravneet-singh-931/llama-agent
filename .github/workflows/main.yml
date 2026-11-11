@@ -83,6 +83,11 @@ jobs:
       - name: "\U0001F3AF Eval gate (offline: routing + answer checks)"
         run: python -m evals.gate -v
 
+      # Every check, against every case, with a synthetic answer. Free and
+      # instant. The nightly runs the same thing before spending tokens.
+      - name: "\U0001F9EA Eval selftest (no API calls)"
+        run: python -m evals.run --selftest
+
       - name: "\U0001F4CA Upload coverage"
         if: matrix.python-version == '3.11'
         uses: codecov/codecov-action@v4

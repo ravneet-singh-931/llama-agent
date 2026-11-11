@@ -78,6 +78,13 @@ jobs:
             echo "have_key=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Before spending a run: does every check still work against the whole
+      # dataset? Sixty cases, no model, no tokens, ~1 second. This is the step
+      # that would have caught three separate grading bugs that unit tests
+      # missed, because it exercises the pipeline instead of an assertion.
+      - name: "🧪 Selftest the checks (no API calls)"
+        run: python -m evals.run --selftest
+
       - name: "🏃 Run the eval suite"
         if: steps.key.outputs.have_key == 'true'
         env:
