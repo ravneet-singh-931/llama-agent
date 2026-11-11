@@ -1079,3 +1079,123 @@ def test_the_job_timeout_allows_a_full_run():
                       ".github", "workflows", "nightly-evals.yml")
     m = re.search(r"timeout-minutes:\s*(\d+)", open(wf).read())
     assert m and int(m.group(1)) >= 80
+
+
+# ------------------------------------------------- the case that never came back
+# 2026-11-11 13:29: 11 cases in 17 seconds of work, then safety-english never
+# returned and the job sat idle until the 90-minute workflow timeout killed it.
+# The per-case deadline existed and could not fire, because it was only checked
+# between events and the FIRST call blocked.
+
+def test_a_case_that_hangs_before_any_event_is_abandoned():
+    import time as _t
+
+    def hangs():
+        _t.sleep(600)
+    t0 = _t.monotonic()
+    rec, out = run._run_with_hard_deadline(hangs, 1.5)
+    assert _t.monotonic() - t0 < 3.0
+    assert out["route"] == "timeout"
+    assert "abandoned" in out["error"]
+
+
+def test_a_normal_case_is_unaffected_by_the_hard_deadline():
+    rec, out = run._run_with_hard_deadline(
+        lambda: ("rec", {"route": "general", "answer": "hi", "reasoning": []}), 5.0)
+    assert rec == "rec" and out["answer"] == "hi"
+
+
+def test_an_exception_inside_a_case_still_propagates():
+    def boom():
+        raise ValueError("provider died")
+    try:
+        run._run_with_hard_deadline(boom, 5.0)
+    except ValueError as exc:
+        assert "provider died" in str(exc)
+    else:
+        raise AssertionError("the exception was swallowed")
+
+
+def test_a_timed_out_case_is_not_graded_and_does_not_crash_the_report():
+    """It has no recorder and no answer; run_case must still return a row."""
+    import time as _t
+
+    def executor(prompt, dsa=True, timeout_s=300):
+        _t.sleep(600)
+    case = {"id": "safety-english", "category": "safety", "prompt": "x", "checks": {}}
+    r = run.run_case(case, use_judge=True, dsa=False, grounding_threshold=0.7,
+                     judge_threshold=3.5, timeout_s=1.0, executor=executor)
+    assert r["route"] == "timeout" and not r["graded"]
+    s = run.summarize([r])
+    assert s["not_graded"] == ["safety-english"]
+    assert "not graded" in run.render_markdown(s, [r])
+
+
+def test_an_abandoned_case_does_not_leave_dispatch_tool_patched():
+    """ToolRecorder swaps dispatch_tool and swaps it back in __exit__.
+
+    A case abandoned at its deadline never reaches __exit__, so without an
+    explicit restore every LATER case records into a dead recorder and the
+    wrappers stack one per timeout. Found while checking the fix for the
+    13:29 stall, which is the kind of bug a fix introduces if nobody looks.
+    """
+    import time as _t
+    from modules import agent_tools
+    original = agent_tools.dispatch_tool
+
+    def hangs_after_patching(prompt, dsa=True, timeout_s=300):
+        agent_tools.dispatch_tool = lambda n, a: "patched"
+        _t.sleep(600)
+
+    case = {"id": "safety-english", "category": "safety", "prompt": "x", "checks": {}}
+    r = run.run_case(case, use_judge=False, dsa=False, grounding_threshold=0.7,
+                     judge_threshold=3.5, timeout_s=1.0, executor=hangs_after_patching)
+    assert r["route"] == "timeout"
+    assert agent_tools.dispatch_tool is original, "dispatch_tool left patched"
+
+
+def test_the_case_after_an_abandoned_one_still_records_its_tools():
+    import time as _t
+
+    def hangs(prompt, dsa=True, timeout_s=300):
+        _t.sleep(600)
+    run.run_case({"id": "safety-english", "category": "safety", "prompt": "x", "checks": {}},
+                 use_judge=False, dsa=False, grounding_threshold=0.7,
+                 judge_threshold=3.5, timeout_s=1.0, executor=hangs)
+
+    def works(prompt, dsa=True, timeout_s=300):
+        from modules import agent_tools
+        agent_tools.dispatch_tool("web_search", {"query": "x"})
+        return {"route": "agent:research", "answer": "a", "reasoning": []}
+
+    r2 = run.run_case({"id": "news-ai-week", "category": "research_news",
+                       "prompt": "y", "checks": {}},
+                      use_judge=False, dsa=False, grounding_threshold=0.7,
+                      judge_threshold=3.5, timeout_s=5.0, executor=works)
+    assert r2["steps"] == 1
+
+
+def test_a_judge_that_never_answers_does_not_hold_the_run():
+    """The judge is called after the agent answers, so the case deadline does
+    not cover it. It used to be unbounded: two retries, no client timeout."""
+    import time as _t
+
+    def slow_judge(case, answer, sources):
+        _t.sleep(600)
+
+    def works(prompt, dsa=True, timeout_s=300):
+        return {"route": "general", "answer": "an answer", "reasoning": []}
+
+    old = run._JUDGE_TIMEOUT_S
+    run._JUDGE_TIMEOUT_S = 1.0
+    try:
+        t0 = _t.monotonic()
+        r = run.run_case({"id": "j", "category": "general", "prompt": "x", "checks": {}},
+                         executor=works, judge_fn=slow_judge, dsa=False,
+                         grounding_threshold=0.7, judge_threshold=3.5, timeout_s=10.0)
+        elapsed = _t.monotonic() - t0
+    finally:
+        run._JUDGE_TIMEOUT_S = old
+    assert elapsed < 3.0
+    assert not r["graded"], "a judge that never answered must not grade the case"
+    assert "error" in r["judge"]

@@ -89,6 +89,44 @@ def order_by_cost(cases: List[Dict]) -> List[Dict]:
 
 # ------------------------------------------------------------------ instrumentation
 
+# A judge that never answers must not hold the run. It is one extra HTTP call
+# per case, so a generous cap costs nothing when the provider is healthy.
+_JUDGE_TIMEOUT_S = float(os.getenv("EVAL_JUDGE_TIMEOUT", "180"))
+
+_ORIGINAL_DISPATCH = None
+
+
+def restore_dispatch_tool() -> None:
+    """Undo any ToolRecorder patches left behind by an abandoned case.
+
+    ToolRecorder swaps `modules.agent_tools.dispatch_tool` for a recording
+    wrapper and swaps it back in `__exit__`. A case abandoned at its deadline
+    never gets there, so the wrapper stays installed -- and the next case's
+    ToolRecorder captures *that* wrapper as its "original", stacking one
+    wrapper per timeout. Every later case would then record into a recorder
+    nobody reads, and tool_calls / steps / tool_recall would be wrong for the
+    rest of the run.
+    """
+    try:
+        from modules import agent_tools
+    except Exception:                      # noqa: BLE001 - best effort
+        return
+    if _ORIGINAL_DISPATCH is not None:
+        agent_tools.dispatch_tool = _ORIGINAL_DISPATCH
+
+
+def _snapshot_dispatch_tool() -> None:
+    """Record the unpatched dispatcher once, before any case runs."""
+    global _ORIGINAL_DISPATCH
+    if _ORIGINAL_DISPATCH is not None:
+        return
+    try:
+        from modules import agent_tools
+        _ORIGINAL_DISPATCH = agent_tools.dispatch_tool
+    except Exception:                      # noqa: BLE001 - best effort
+        pass
+
+
 class ToolRecorder:
     """Wraps modules.agent_tools.dispatch_tool to capture every tool call
     (name, arguments, raw result) made while a case runs."""
@@ -278,6 +316,68 @@ def execute(message: str, dsa: bool = True, timeout_s: float = 300.0) -> Dict:
     return {"route": r["route"], "answer": "".join(answer).strip(), "reasoning": reasoning}
 
 
+class _Deadline:
+    """Result of a case that outlived its own timeout."""
+
+
+def _run_with_hard_deadline(fn: Callable, timeout_s: float, on_timeout=None):
+    """Run `fn`, but stop waiting after `timeout_s` whatever it is doing.
+
+    The 2026-11-11 13:29 run died differently from every run before it: 11
+    cases finished in a total of 17 seconds, then case 12 (safety-english)
+    never returned, and the job sat idle until the 90-minute workflow timeout
+    killed it. 89 minutes of wall clock for 17 seconds of work.
+
+    The per-case deadline existed and could not fire, for the third time in
+    this file:
+
+      * finding 10   a step timeout applied N times over
+      * PR #20       the deadline was checked *between* events, so a stream
+                     that went silent was never checked at all
+      * this one     `_bounded()` guards the gap between events, but the
+                     stream object itself is created on the calling thread
+                     first. If THAT blocks - the model request, the client,
+                     anything before the first token - there is no event and
+                     nobody is holding a clock.
+
+    So the guarantee has to be one level up: whatever the case does, the
+    runner stops waiting at `timeout_s`. A worker thread is left behind, which
+    is acceptable in a short-lived process and is why the thread is a daemon.
+    """
+    box: Dict[str, object] = {}
+    # Snapshot the real dispatcher before the worker starts: it patches
+    # dispatch_tool on the way in, so reading it after a timeout would capture
+    # the wrapper and "restore" to the broken state.
+    _snapshot_dispatch_tool()
+
+    def target():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:            # noqa: BLE001 - re-raised below
+            box["error"] = exc
+
+    t = threading.Thread(target=target, daemon=True, name="eval-case")
+    t.start()
+    t.join(timeout=max(1.0, timeout_s))
+    if t.is_alive():
+        # The worker is stuck inside ToolRecorder.__enter__'s reach: it patched
+        # modules.agent_tools.dispatch_tool on the way in and will not reach
+        # __exit__, so the patch would stay installed and every LATER case would
+        # record its tool calls into this dead recorder, nesting one wrapper per
+        # case. Abandoning a case must not leave the process dirty.
+        restore_dispatch_tool()
+        if on_timeout is not None:
+            # A caller whose fn returns a single value (the judge) passes the
+            # placeholder it wants back, so the return shape never changes.
+            return on_timeout
+        return _Deadline(), {"route": "timeout", "answer": "",
+                             "reasoning": [],
+                             "error": f"case exceeded {timeout_s:.0f}s and was abandoned"}
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 def _case_span(case: Dict):
     """Context manager: one OTel span per eval case (no-op when untraced)."""
     class _Null:
@@ -400,22 +500,39 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
     # captured and then flattened to a string. As a span the case is a trace
     # you can open in Phoenix and read end to end.
     with _case_span(case):
-        rec, out = _run()
+        rec, out = _run_with_hard_deadline(_run, timeout_s)
     latency = round(time.monotonic() - t0, 2)
     usage = _delta(metric_totals(), before)
 
-    results = checks.evaluate(case, out["answer"], rec.calls, grounding_threshold,
+    # A case that was abandoned has no recorder (it was still open in the
+    # worker). Treat it as an empty answer rather than dereferencing None.
+    calls = getattr(rec, "calls", []) or []
+    results = checks.evaluate(case, out["answer"], calls, grounding_threshold,
                               route=out.get("route"))
     verdict, graded, judge_src = None, True, ""
-    if checks.is_provider_failure(out["answer"]):
+    if out.get("route") == "timeout":
+        # The case was abandoned, so there is no answer to grade. Marking it
+        # not-graded keeps it out of the pass rate and out of the judge, and
+        # names it in the report -- the same treatment a provider notice gets,
+        # for the same reason: we did not observe the app, so we do not score.
+        verdict = {"error": out.get("error") or "case timed out"}
+        graded = False
+    elif checks.is_provider_failure(out["answer"]):
         # Rate limit / outage notice: don't grade an error message.
         verdict = {"error": "not judged: the answer is the app's rate-limit/outage notice"}
         graded = False
     elif use_judge and out["answer"]:
         from evals.judge import judge, judge_sources
-        sources = [c["result"] for c in rec.calls]
+        sources = [c["result"] for c in calls]
         judge_src = judge_sources(sources, out["answer"])
-        verdict = (judge_fn or judge)(case, out["answer"], sources)
+        # The judge call is the second unbounded call in a case and it happens
+        # AFTER the agent has answered, so the case deadline above does not
+        # cover it. Two retries with no client timeout is the same shape of bug
+        # as the stall: an HTTP call with nobody holding a clock.
+        verdict = _run_with_hard_deadline(
+            lambda: (judge_fn or judge)(case, out["answer"], sources),
+            _JUDGE_TIMEOUT_S,
+            on_timeout={"error": f"judge exceeded {_JUDGE_TIMEOUT_S:.0f}s"})
         # A judge failure (429, no JSON) is not a pass: the case is not graded.
         graded = bool(verdict) and "overall" in verdict
     passed = all(r["pass"] for r in results.values())
@@ -427,7 +544,7 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
     expected_tools = case.get("expected_tools") or []
     tools_ok = None
     if expected_tools:
-        called = {c["name"] for c in rec.calls}
+        called = {c["name"] for c in calls}
         tools_ok = set(expected_tools) <= called
         passed = passed and tools_ok
     passed = passed and graded
@@ -436,10 +553,10 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
         "route": out["route"], "passed": passed, "graded": graded, "latency_s": latency,
         "checks": results, "judge": verdict, "judge_sources": judge_src, "usage": usage,
         "tools": [{"name": c["name"], "arguments": c["arguments"],
-                   "result_chars": len(c["result"] or "")} for c in rec.calls],
+                   "result_chars": len(c["result"] or "")} for c in calls],
         "tool_recall": tools_ok,
-        "steps": len(rec.calls),
-        "redundant_steps": _redundant(rec.calls),
+        "steps": len(calls),
+        "redundant_steps": _redundant(calls),
         "reasoning": out["reasoning"], "answer": out["answer"],
         **({"error": out["error"]} if out.get("error") else {}),
     }
