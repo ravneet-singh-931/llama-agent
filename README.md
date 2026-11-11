@@ -61,12 +61,12 @@ on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 
 | What | Result | How it was measured |
 |---|---|---|
-| **Agent quality** | **45/60 cases passed (75%)**, judge average 4.43 / 5 — *on a run where 4 of the 15 failures were the grader's fault* ([why](#agent-eval-30-60-cases)) | 60 prompts in 9 categories: rule checks + figure grounding + LLM judge, nightly in CI |
+| **Agent quality** | **50/60 cases passed (83.3%)**, judge average 4.56 / 5 — *5 of the 8 remaining failures are still the grader's fault, so this is a floor* ([why](#agent-eval-30-60-cases)) | 60 prompts in 9 categories: rule checks + figure grounding + LLM judge, nightly in CI |
 | **Regression detection** | every run is diffed against the previous one; CI fails on a real regression | `evals.run --compare … --fail-on-regression`, artifacts kept per run |
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 661 passed, 6 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 661 + 27 new eval tests, 6 skipped (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
 | **Cost** | $0.26 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (finding 22) |
 | **Bugs found and fixed** | 24 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
 
@@ -77,10 +77,14 @@ case in the 30-case run had figures that were in no source, and the judge still 
 
 The second most useful finding came from the 60-case run: **the graders can be wrong while
 the judge is right.** The suite reported 75% while the judge averaged 4.43/5. The
-deterministic checks were at fault — grounding was being applied to planning answers whose
-figures came from the request, and correct answers were failing because their code snippet
-was inline instead of fenced. Four of the fifteen failures were measurement error, not
-quality. See [findings 19–24](#-bugs-found-and-fixed).
+deterministic checks were at fault — grounding applied to planning answers whose figures
+came from the request, correct answers failed on formatting, and a non-breaking hyphen
+failed a 4.75/5 answer ([findings 19–27](#-bugs-found-and-fixed)).
+
+The third came from a run that reported **35%**. It was not a score at all: the free tier
+ran out at case 29, and 31 unanswered cases were counted in the denominator. Among cases
+that ran it was 72.4%. **The suite published its own outage as its quality** — so it now
+refuses to print a pass rate below 90% coverage and says `INCONCLUSIVE` instead.
 
 ---
 
@@ -204,37 +208,50 @@ The suite started at 30 cases, run by hand, split across three app versions beca
 free tier's daily cap runs out after ~15 graded cases. It then doubled to 60 and moved
 into CI, where it runs nightly against one commit and is diffed against the previous run.
 
-| | 30 cases (2026-10-25) | 60 cases (nightly, CI) |
-|---|---|---|
-| Passed | 26/30 (**87%**) | 45/60 (**75%**) |
-| Judge average | 4.88 / 5 | 4.43 / 5 |
-| `@team` cases | 5 | **7** |
-| Where it runs | by hand, split across 3 versions | **nightly, one commit, unattended** |
-| Comparable to the previous run? | — | yes: same cases every night, diffed |
+| | 30 cases, by hand (2026-10-25) | 60 cases, first nightly | **60 cases, current** |
+|---|---|---|---|
+| Passed | 26/30 (**87%**) | 45/60 (75%) | **50/60 (83.3%)** |
+| Judge average | 4.88 / 5 | 4.43 / 5 | **4.56 / 5** |
+| Grounding rate | — | 0.28 | **0.375** |
+| Fabrication flagged | — | 15.3% | **13.8%** |
+| `@team` cases passing | — | 28.6% | **57.1%** |
+| Where it runs | by hand, 3 versions | nightly, one commit | nightly, diffed |
 
-**The rate went down because the suite got harder, and because the graders were wrong.**
+**The score went 87% → 75% → 83.3%, and every step of that is explained — including a time
+it reported 35%.**
 
-Three things changed at once, which is why the two numbers are not directly comparable:
+That 35% is the most useful number in this table, and it was **not a measurement of the
+app.** The nightly hit the free tier's token limit at case 29; the remaining 31 cases came
+back as the app's own *"can't answer right now"* notice in ~0.1 s, were marked *not graded*,
+and — by a rule that is correct — counted as not passed. 21 of 60 was published as a pass
+rate. Among cases that actually ran it was 21/29 = 72.4%. **The suite reported its own
+outage as its quality**, and the latency column gives it away: p50 fell from 3.0 s to 0.9 s
+because almost nothing was answered.
 
-1. **Twice the cases, including more `@team` ones** — `team` is the weakest category
-   (28.6%) and it grew from 5 of 30 to 7 of 60.
-2. **The graders had bugs.** Grounding was applied to *every* case with tool output,
-   including planning answers whose figures are budgets and timelines derived from the
-   request — "1 of 42 figures found in sources" is not a defect in a trip plan. And two
-   correct coding answers failed because the snippet was inline instead of fenced, while
-   the judge scored both 5.0. **4 of the 15 failures were the grader, not the app**
-   ([findings 19–24](#-bugs-found-and-fixed)).
-3. **One case hit a real timeout bug** — `team-library-api` took 309 s, which is exactly
-   two `AGENT_STEP_TIMEOUT`s because the timeout was applied per future instead of per
-   level (finding 21).
+That is now impossible: below 90% coverage the report refuses to print a pass rate and says
+`INCONCLUSIVE` with the graded rate beside it (findings 25–27).
 
-All three are fixed. The next nightly is the first that measures the app rather than the
-instrument, and it is the first with a baseline to diff against.
+**Why 75% was too low, and why 87% was too high.** The 30-case run was small and run by
+hand on the strongest version; the 60-case suite is harder and adds `@team`, the weakest
+category. Both are true, and neither is the whole reason. The rest was the grader:
+
+- **Grounding ran on cases that never asked for sources.** A migration plan's figures come
+  from the request, so "1 of 42 figures found in sources" is not a defect in a trip plan.
+- **Correct answers failed on formatting.** A snippet written inline, or inside a Python
+  block when the check wanted a `regex` fence, failed while the judge scored it 5.0.
+- **A non-breaking hyphen failed a 4.75/5 answer.** U+2011 where `-` was meant; the
+  compiler disagreed with a human who sees a minus sign.
+- **One case hit a real timeout bug** — `team-library-api` took 309 s, exactly two
+  `AGENT_STEP_TIMEOUT`s, because the timeout was applied per future instead of per level.
+
+Every one of those is fixed, each with a test that fails without the fix
+([findings 19–27](#-bugs-found-and-fixed)). **5 of the 8 remaining failures today are still
+the grader's fault**, so 83.3% remains a floor rather than a ceiling.
 
 #### Why nightly, and why the diff matters
 
 60 cases is 120+ real model calls, so it cannot gate a pull request. It runs on a schedule,
-and the value is not the pass rate but the **delta**: one run says "75%"; two runs say
+and the value is not the pass rate but the **delta**: one run says "83.3%"; two runs say
 "`write-essay-topic` flipped, coding dropped 8 points, fabrication up 3%". `compare()`
 reports exactly that, fails the job on a real regression, and labels a diff taken across a
 prompt edit (`prompt_changed`) so a flip cannot be blamed on the model when the prompt moved.
@@ -325,7 +342,15 @@ version that fixed it and a test or a before/after number as proof; details are 
 | 21 | `team-library-api` took **309 s**, past the 300 s case timeout | `f.result(timeout=150)` was called in a loop, so the Nth future got 150 s *on top of* the first N−1: a 2-step level could block for 300 s. `shutdown(wait=True)` then blocked on the hung worker anyway | One deadline shared across the level; pool shut down with `wait=False` — 3 hanging steps now return in 1.0 s, not 3 s | `test_team_step_deadline.py` |
 | 22 | The spend on `/monitoring/dashboard` and the spend in Grafana disagreed | Costs were recorded twice: an in-memory `CostTracker` dict (per-process, erased on restart, and the only place the pricing table lived) and the Prometheus counter Grafana reads | `CostTracker` deleted (126 lines); the dashboard renders from the counter, so there is one number | `test_the_dashboard_reads_the_prometheus_counter`, `test_costtracker_is_gone` |
 | 23 | Estimated cost always read **$0** | `_price()` used `os` without importing it; `except Exception: return 0.0` swallowed the `NameError`, so every call was priced at zero | `os` imported, and a test asserts `record_llm_usage` returns a non-zero cost | `test_groq_pricing_env_override_is_honoured` (fails without the import) |
+
 | 24 | A card number from an uploaded document reached the browser | `pii.redact()` ran in two *logging* paths only; nothing redacted the answer. The first streaming version also leaked, because a fixed-offset cut splits `4111 1111 1111 1111` into two halves that each match no pattern | `StreamRedactor` cuts at a digit-run boundary, so a number split across tokens is redacted whole | `TestStreamRedactor` — the split-card case fails against the fixed-offset version |
+
+| 25 | The nightly published **35%** — the worst number it ever reported | The free tier ran out at case 29. The 31 cases after it returned the app's rate-limit notice in ~0.1 s and were *not graded*; not-graded counts as not-passed, so they entered the denominator and the rate was computed over cases that never ran. Among cases that ran it was 72.4%, against 75% the day before — the app had not regressed at all | Below 90% coverage the report prints `INCONCLUSIVE` with the graded rate, never a headline pass rate; the run exits 3 so it is neither a green tick nor a red build | `test_a_half_run_report_is_inconclusive_not_a_pass_rate` (replays 21 pass / 31 ungraded / 8 fail and asserts 72.4%, not 35%) |
+| 26 | The expensive cases starved the cheap ones | The five `@team` cases sat at positions 24–28 and took 74 s, 140 s and 39 s, exhausting the token window; 31 cheap cases behind them got 429s | Cases are ordered cheapest-category-first (stable within a category), so a truncated run loses the expensive tail instead of everything after it | `test_team_cases_run_last_so_quota_starvation_hits_them_not_the_cheap_ones` |
+| 27 | The diff crashed **because a check improved** | `compare()` computed `new_cf[k] - old_cf.get(k, 0)`; `no_meta` failed once in the baseline and zero times today, so the key existed only on the old side and indexing it raised `KeyError`. The one comparison worth reading — "the check that used to fire, doesn't" — was the one that could not run | `.get` on both sides | `test_a_check_that_goes_to_zero_does_not_crash_the_compare` |
+| 28 | `code-regex-pin` failed twice for the same reason | First fix accepted an inline span only; a coder agent answers "give me a regex" with a **python** block (`re.fullmatch(r'...')`), and the check demanded a block tagged `regex` — a tag that barely exists. Judge 5.0, check fail | A pattern literal inside any fenced block, or bare in the prose. The extracted text must still *look* like a pattern, and the prose scan strips fences first — otherwise `` ``` `` plus braces satisfied "contains pattern syntax" and every code block passed | `test_regex_inside_a_python_block_passes`, `test_any_code_block_is_not_automatically_a_regex` |
+| 29 | A correct 4.75/5 answer failed on a non-breaking hyphen | The model wrote `‑` (**U+2011**) where `-` was meant; `ast.parse` rejects it as `invalid character '‑'`. Same class as the U+2013 en dash | `validate_code` folds U+2010–2015, U+2212 and soft hyphen to ASCII `-` before parsing | `test_every_dash_in_the_family_is_folded`, plus one asserting the fold does **not** change real subtraction |
+| 30 | A check that failed once in 60 passed cost a whole case | `no_meta` matched the bare phrase "source material 2", which is as likely an ordinary sentence about a document as pipeline narration. `no_meta` fired exactly once in the run | Such hits are reported as `advisory` instead of failing the case; real narration ("I'll pass this to the other agents") still fails | `test_a_single_weak_meta_phrase_does_not_fail_the_case` |
 
 **Operations runbook items** (no code change): a kubelet image pull that hung was fixed by
 pulling with `crictl pull` and deleting the stuck pods; Prometheus uses a ReadWriteOnce volume,
@@ -844,7 +869,7 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status:** 661 passed, 6 skipped, 17 deselected (`-m "not mcp"`), across
+**Current status:** 661 + 27 new eval tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
 30 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
@@ -1011,12 +1036,12 @@ kubectl -n llama-agent exec deploy/prometheus -- wget -qO- 'http://localhost:909
 
 ### Open, not yet fixed
 
-Four known problems, none blocking, listed so they are not discovered by a reader first:
+Three known problems, none blocking, listed so they are not discovered by a reader first:
 
 | Problem | What it is | Why it is still open |
 |---|---|---|
 | **`@team` latency** | 90 – 155 s per case even after the step-timeout fix; the slowest was 309 s from a timeout bug now fixed | The remainder is genuine work, not a bug — every agent call in the DAG is serial in token count. Needs profiling before a fix is worth guessing at. |
-| **Model emits typographic punctuation in code** | `–` (U+2013) as a Python operator, and JSON with trailing commas — both fail the `code` check for a real reason | Needs either a prompt rule or a sanitizer; the check is right to fail them |
+| **JSON with trailing commas** | The model emits `{"a": 1,}` and the `code` check fails it — correctly, it is not valid JSON | Needs a prompt rule; the typographic-dash half of this row was fixed in finding 29 |
 | **`fact-node-latest`** | The research agent could not establish the current release, so `must_include "2026"` failed | Needs a date-grounding prompt rule, not a check change |
 | **`llm_guard._tier_of`** | Misclassifies `gpt-4o` as `"other"`, so `LLM_INPUT_BUDGET_STRONG/FAST` would be ignored for non-Groq models | Proven latent: the one call site always passes a Groq model, and both budgets default to the same value. Not worth churn on working code. |
 
