@@ -212,7 +212,7 @@ into CI, where it runs nightly against one commit and is diffed against the prev
 
 | | 30 cases, by hand (2026-10-25) | 60 cases, first nightly | **60 cases, current** |
 |---|---|---|---|
-| Passed | 26/30 (**87%**) | 45/60 (75%) | **50/60 (83.3%)** |
+| Passed | 26/30 (**87%**) | 45/60 (75%) → **81.7%** | **50/60 (83.3%)** |
 | Judge average | 4.88 / 5 | 4.43 / 5 | **4.56 / 5** |
 | Grounding rate | — | 0.28 | **0.375** |
 | Fabrication flagged | — | 15.3% | **13.8%** |
@@ -220,8 +220,10 @@ into CI, where it runs nightly against one commit and is diffed against the prev
 | Where it runs | by hand, 3 versions | nightly, one commit | nightly, diffed |
 
 **The score went 87% → 75% → 83.3%, and every step of that is explained — including a time
-it reported 35%.** The 75% is a floor, not a reading: four of its fifteen failures were the
-grader's, and with those corrected it is **81.7%** ([details](docs/EVAL_FINDINGS.md)).
+it reported 35%.** The 75% is a floor, not a reading: **4 of its 15 failures were the grader's**,
+not the app's. Restore them and the same 60 questions read **49/60 = 81.7%** (the denominator
+stays at 60 — the claim is that the *grader* failed those four, not that the app passed them).
+[Details](docs/EVAL_FINDINGS.md).
 
 That 35% is the most useful number in this table, and it was **not a measurement of the
 app.** The nightly hit the free tier's token limit at case 29; the remaining 31 cases came
@@ -323,6 +325,13 @@ Found by running the system (evals, metrics, logs, deploys) and by review. Each 
 version that fixed it and a test or a before/after number as proof; details are in the
 [CHANGELOG](CHANGELOG.md).
 
+**Rows 19–37 are the eval work: 16 findings.** Fifteen were in the harness — the grader, the
+runner, the report, the diff — and **one was in the app** (row 21, a per-future timeout in
+`multi_agent.py`). None was in the model's behaviour, which is the point of the section: the
+measuring stick was wrong far more often than the thing being measured. The long-form write-up,
+with the corrected headline figures, is in
+[docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md).
+
 | # | Symptom | Root cause | Fix | Proof |
 |---|---|---|---|---|
 | 1 | Research crashed with 413 "Request too large" and rate-limit errors | Tool-loop resends exceeded the free tier's 7,000 input tokens/min | LLM guard: token window shared via Redis, switch to the fast model when near the limit, wait, shrink-and-retry on 413 (v3.3.6) | `tests/test_llm_guard.py` |
@@ -357,6 +366,13 @@ version that fixed it and a test or a before/after number as proof; details are 
 | 28 | `code-regex-pin` failed twice for the same reason | First fix accepted an inline span only; a coder agent answers "give me a regex" with a **python** block (`re.fullmatch(r'...')`), and the check demanded a block tagged `regex` — a tag that barely exists. Judge 5.0, check fail | A pattern literal inside any fenced block, or bare in the prose. The extracted text must still *look* like a pattern, and the prose scan strips fences first — otherwise `` ``` `` plus braces satisfied "contains pattern syntax" and every code block passed | `test_regex_inside_a_python_block_passes`, `test_any_code_block_is_not_automatically_a_regex` |
 | 29 | A correct 4.75/5 answer failed on a non-breaking hyphen | The model wrote `‑` (**U+2011**) where `-` was meant; `ast.parse` rejects it as `invalid character '‑'`. Same class as the U+2013 en dash | `validate_code` folds U+2010–2015, U+2212 and soft hyphen to ASCII `-` before parsing | `test_every_dash_in_the_family_is_folded`, plus one asserting the fold does **not** change real subtraction |
 | 30 | A check that failed once in 60 passed cost a whole case | `no_meta` matched the bare phrase "source material 2", which is as likely an ordinary sentence about a document as pipeline narration. `no_meta` fired exactly once in the run | Such hits are reported as `advisory` instead of failing the case; real narration ("I'll pass this to the other agents") still fails | `test_a_single_weak_meta_phrase_does_not_fail_the_case` |
+| 31 | The regression detector **could not detect a regression** | A red nightly compared a report graded by the old check logic against one graded by the new. Three defects: (a) any negative category counted as a regression (`analysis` has 4 cases, so one flip = −25 points — noise was structurally guaranteed to trip the gate); (b) `check_failures` and `not_graded` were computed and then never compared, so "12 cases regressed" gave nothing to act on; (c) `prompt_fingerprint` hashes prompt *text*, so the largest change to the grading logic in the project's history left the one change-detector identical | Reports record an **evidence fingerprint** (sha of `checks.py`, `judge.py`, `dataset.jsonl`, judge model, threshold). `compare()` returns `newly_not_graded` and `check_failure_delta`, and marks a diff **incomparable** when the case count, the checks or the prompts moved. An incomparable diff is reported, not failed — "we changed the suite" is not "the app regressed." The guard's own follow-up bug: a baseline predating the field compared **empty as equal**, so a missing field now means UNKNOWN | `test_a_diff_across_a_changed_suite_is_not_called_a_regression`, `test_a_baseline_without_an_evidence_record_is_not_comparable`, and `test_a_comparable_diff_still_fails_on_a_real_regression` (the guard must not disarm the detector it protects) |
+| 32 | A case ran for **85 minutes and produced nothing** | The per-case deadline was checked *between* stream events. A stream that went **silent** has no events, so there was nothing to check between, and nothing ever fired | The deadline owns a clock independent of the stream | `test_a_generator_that_goes_silent_stops_at_the_deadline`, `test_a_normal_stream_is_not_delayed_by_the_deadline_wrapper` |
+| 33 | A full run did **89 minutes of wall clock for 17.3 seconds of work** | `_bounded()` guards the gap between events, but the stream object is created on the calling thread *first*. If that call blocks — the model request, the client, anything before the first token — there is no event and nobody holds a clock. **The third time in this file that a guard was attached one level too low** | The guarantee moves up: a daemon worker runs the case and the runner stops waiting at `timeout_s`. An abandoned case is reported **not graded** and named, the same treatment a provider notice gets | `test_a_case_that_hangs_before_any_event_is_abandoned` (600 s sleep abandoned at 2.00 s); a 5-case suite where #2 hangs finishes in 2.9 s |
+| 34 | Abandoning a case silently corrupted **every case after it** | `ToolRecorder.__exit__` never runs for an abandoned case, so the `dispatch_tool` patch stayed installed and each later case's recorder captured *that* wrapper as its "original" — one wrapper deeper per timeout, with every later case recording into a dead recorder. Two more holes in the same fix: the judge is a second unbounded call that runs *after* the answer, and five bare `rec.calls` dereferences raised `AttributeError` on the sentinel | Dispatch restored from a snapshot taken **before** the worker starts (reading it after a timeout captures the wrapper and "restores" the broken state); the judge capped at `EVAL_JUDGE_TIMEOUT` (180 s); the safe local used everywhere | `test_an_abandoned_case_does_not_leave_dispatch_tool_patched`, `test_the_case_after_an_abandoned_one_still_records_its_tools`, `test_a_judge_that_never_answers_does_not_hold_the_run` |
+| 35 | A **fresh API key did not fix the lost tail** | Two independent problems, and only one was obvious. Quota: a full run needs ~314,330 input tokens. Pace: at a 10 s pause the run finished in ~35 min, which is **7,567–8,981 tokens/min against a 7,000 cap — 108% of the meter**. A new key gives you the budget; it does not stop you spending it faster than allowed | Pause 25 s (60 cases × 25 s ≈ 50 min ≈ 6,300/min) and the job timeout raised 60 → 90 min. A full run has a **45-minute floor** whatever else you do: 314,330 ÷ 7,000 | `test_the_nightly_pause_can_sustain_a_full_run`, `test_the_job_timeout_allows_a_full_run` (≥ 80 min) |
+| 36 | Every full run lost its tail **no matter how it was paced** | The per-minute cap was the only one measured. The other cap was inferred from a 12-case run that spent 4,313 tokens and still 429'd on 10 of 12 — impossible under a 7,000/min limit. Then a full run printed it: `tokens per day (TPD): Limit 200000, Used 198265, Requested 4506` | Recorded: **200,000 tokens/day** on the fast model, against ~314,000 for a full run. **A full run does not fit inside one day of the free tier** — the per-minute cap decides where a run *starts*, the daily cap decides where it *ends*. Reaching 60/60 graded needs a paid tier or a smaller suite, not another pacing tweak | `summarize()` reports coverage per category and refuses a headline rate below 90%, so a capped tail is named instead of averaged in — `test_a_half_run_report_is_inconclusive_not_a_pass_rate` |
+| 37 | **`tool recall 0.0%`** on a run where the only relevant case never ran | Exactly one case declares `expected_tools` (`team-slack-bot`) and the provider refused it. An ungraded case has no calls, so `set(expected) <= set()` was `False` and **the case entered the recall denominator as a failure** — a case that never executed scored against the agent | Recall only scores cases that were actually graded, so one ungraded case reports *nothing* rather than *zero*. Silencing a measurement and disarming it are different things | `test_a_case_that_never_ran_is_not_scored_on_tool_recall`, and `test_a_graded_case_that_skipped_its_tools_still_counts_as_a_miss` so the fix cannot disarm the measurement it protects |
 
 **Operations runbook items** (no code change): a kubelet image pull that hung was fixed by
 pulling with `crictl pull` and deleting the stuck pods; Prometheus uses a ReadWriteOnce volume,

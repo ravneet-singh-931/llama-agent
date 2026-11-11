@@ -590,7 +590,10 @@ Hook: *"My eval reported 35%. The real number was 72.4%. Here is how a measureme
 Supporting: finding 7 (file order decided the failure), finding 15 (two caps).
 
 **Post 2 — grading the shape instead of the answer (findings 2, 3, 4, 5, 10).**
-Hook: *"Five bugs. Not one was in the agent. Every single one was in the thing measuring it."*
+Hook: *"Five bugs in one night. Not one of them was in the agent — every single one was in the
+thing measuring it."* (True as stated, because it is scoped to one night's five: findings 2, 3, 4,
+5 and 10. Do **not** widen it to "not one was ever in the agent" — see
+[the count](#the-count-and-a-claim-that-needs-correcting).)
 Best beat: finding 5, where the third failure was mine.
 
 **Post 3 — the detector that could not detect (findings 8, 9, 11, 12).**
@@ -660,31 +663,34 @@ the first genuine app bug the suite has caught, and it opens the **agents** part
 The two documents number independently. This is the translation, and the last column is the
 honest one: **a finding with no README row is not yet citable** from the repo itself.
 
-| This doc | README row | Subject | Citable? |
-|---|---|---|---|
-| Finding 1 | 19 (partly) | the 75% that was really 81.7% | partial — README has the 75% cause, not the corrected figure |
-| Finding 2 | 19 | grounding applied to cases that never asked for sources | ✅ |
-| Finding 3 | 20 | correct code failed because it was inline | ✅ |
-| Finding 4 | 29 | the non-breaking hyphen (U+2011) | ✅ |
-| Finding 5 | 28 | `code-regex-pin`, three runs three ways | ✅ (README says "twice" — the corrected count is three) |
-| Finding 6 | 25 | the 35% that was an outage | ✅ |
-| Finding 7 | 26 | expensive cases starved the cheap ones | ✅ |
-| Finding 8 | 27 | the compare crashed because a check improved | ✅ |
-| Finding 9 | — | the regression detector that could not detect | ❌ **no README row** |
-| Finding 10 | 30 | one weak meta phrase cost a whole case | ✅ |
-| Finding 11a | 21 | the timeout applied N times | ✅ |
-| Finding 11b | — | the deadline checked between events | ❌ **no README row** |
-| Finding 11c | — | the case that blocked before its first event (89 min / 17.3 s) | ❌ **no README row** |
-| Finding 12 | 10 (bugs table) | a failed judge counted as a pass | ✅ — note row 10 exists in **two** tables; cite the bugs one |
-| Finding 13 | 14 | the eval graded the app's own error message | ✅ |
-| Finding 14 | — | spending 108% of the per-minute meter | ❌ **no README row** |
-| Finding 15 | — | the 200,000 TPD daily cap, measured | ❌ **no README row** |
-| tool recall (in the log section) | — | `0.0%` from a case that never ran | ❌ **no README row** |
+| This doc | README row | Subject |
+|---|---|---|
+| Finding 1 | 19 (cause) + 31–37 don't cover it | the 75% that was really 81.7% |
+| Finding 2 | 19 | grounding applied to cases that never asked for sources |
+| Finding 3 | 20 | correct code failed because it was inline |
+| Finding 4 | 29 | the non-breaking hyphen (U+2011) |
+| Finding 5 | 28 | `code-regex-pin`, three runs three ways |
+| Finding 6 | 25 | the 35% that was an outage |
+| Finding 7 | 26 | expensive cases starved the cheap ones |
+| Finding 8 | 27 | the compare crashed because a check improved |
+| Finding 9 | **31** | the regression detector that could not detect |
+| Finding 10 | 30 | one weak meta phrase cost a whole case |
+| Finding 11a | 21 | the timeout applied N times |
+| Finding 11b | **32** | the deadline checked between events |
+| Finding 11c | **33** | the case that blocked before its first event |
+| Finding 11c's holes | **34** | the abandoned case corrupted every case after it |
+| Finding 12 | 10 (bugs table) | a failed judge counted as a pass |
+| Finding 13 | 14 (bugs table) | the eval graded the app's own error message |
+| Finding 14 | **35** | spending 108% of the per-minute meter |
+| Finding 15 | **36** | the 200,000 TPD daily cap, measured |
+| tool recall | **37** | `0.0%` from a case that never ran |
 
-**Six findings in this document have no row in the README.** Findings 9, 11b, 11c, 14, 15 and the
-tool-recall fix. Every one of them is a fix that shipped with tests, so the README currently
-under-reports its own bugs table — and finding 9 (the regression detector) is the strongest single
-story in the set.
+**Every finding in this document now has a README row** — findings 9, 11b, 11c, 11c's holes,
+14, 15 and the tool-recall fix were added as rows **31–37**, and finding 1's corrected figure is
+now in the README's results table (`45/60 (75%) → 81.7%`) and in the paragraph beneath it.
+
+**The README now states its own count** at the top of the bugs section: *"Rows 19–37 are the eval
+work: 16 findings."* Two documents, one number, and a reader can check it.
 
 **Row numbers collide across README tables.** Three tables in that file use a `#` column
 (the bugs table, the cloud-hardening table, and one more), so "README row 10" is ambiguous —
@@ -693,3 +699,36 @@ it is the failed-judge row *and* a container-hardening row. Always name the tabl
 **Do not cite this document as "the README says".** Until those rows are added, the README and
 this file disagree about how many grader bugs were found. That is the same class of defect as
 every finding above it: *two records of one thing, and nobody compared them.*
+
+---
+
+# THE COUNT, AND A CLAIM THAT NEEDS CORRECTING
+
+The line the posts were going to use was:
+
+> Eleven bugs. Not one was in the agent. Every single one was in the thing that was measuring it.
+
+It was understating the work **and** overstating the pattern. The README's bugs table now has
+**16 eval findings** (rows 19–30 plus the new 31–37, excluding rows 22–24 which are cost, a missing
+`os` import, and PII redaction — not eval bugs).
+
+**And one of them is app code, not tooling:**
+
+| Row | Where the bug was |
+|---|---|
+| **21** — `team-library-api` took 309 s | **`multi_agent.py`** — `f.result(timeout=150)` called in a loop, so the Nth future got 150 s *on top of* the first N−1. That is a real bug in the product: a team step could block for 300 s and `shutdown(wait=True)` blocked on it anyway |
+
+So the honest count is:
+
+> **Sixteen findings. Fifteen were in the thing that measures the app. One was in the app.**
+
+That is a weaker-sounding but far more defensible claim, and it survives the first reader who
+opens the README and counts. "Not one was in the agent" is the kind of line that is true until
+somebody checks — which is the entire thesis of this document, so it cannot contain one.
+
+**What actually holds, and is still remarkable:** fourteen of the fifteen tooling findings were
+in the grader or the runner, and **none** of them was in the model's behaviour. The measuring
+stick was wrong far more often than the thing being measured.
+
+**A second correction to the same family:** the posts said "11 grader bugs". The number is **15**,
+and it grew every time someone audited a disagreement instead of picking a side.
