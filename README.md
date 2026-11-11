@@ -66,7 +66,7 @@ on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 713 passed, 6 skipped, 17 deselected (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 724 passed, 6 skipped, 17 deselected (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
 | **Cost** | $0.26 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (finding 22) |
 | **Bugs found and fixed** | 24 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
 
@@ -869,7 +869,7 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status:** 713 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
+**Current status:** 724 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
 30 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
@@ -1003,7 +1003,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 713 passed, 6 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 724 passed, 6 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89

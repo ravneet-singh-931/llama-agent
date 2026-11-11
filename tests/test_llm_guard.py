@@ -6,7 +6,8 @@ and the agent prompt fixes that ship with it.
 - ITPM sliding window (local + Redis buckets), proactive strong->fast
   routing, bounded wait when every tier is saturated.
 - InstrumentedGroqClient: guard applied on every call, eager streaming
-  (errors raise inside the caller's try/except), 413 shrink-and-retry.
+  (the first chunk is pulled inside create() so a 413 from a lazy generator
+  surfaces there), 413 shrink-and-retry.
 - Guard notes surface as "llmops" reasoning events in the agent stream.
 - Tool-result / search-snippet caps, bigger hand-offs, no team meta-talk,
   grounded research prompt.
@@ -229,8 +230,17 @@ def _install_fake_groq(monkeypatch, behaviour):
 
         def stream_chat(self, messages, **kw):
             calls.append(("stream", self.model, messages))
-            items = behaviour(self.model, messages)   # raises EAGERLY (like Groq)
-            return iter([_Chunk(i) for i in items])
+
+            # LAZY, like the real GroqLLM.stream_chat in llama_agent1.py: the
+            # provider is not contacted until the first next(), so an error is
+            # raised inside the caller's loop and not here. The old fake raised
+            # eagerly, which is why a production 413 escaped the shrink-retry
+            # for months while this test stayed green -- the test asserted the
+            # property the code needed, not the property the source has.
+            def _gen():
+                for i in behaviour(self.model, messages):
+                    yield _Chunk(i)
+            return _gen()
 
         def chat(self, messages, **kw):
             calls.append(("chat", self.model, messages))
@@ -245,7 +255,11 @@ def _install_fake_groq(monkeypatch, behaviour):
 
 def test_instrumented_stream_raises_inside_create(monkeypatch):
     """Errors must surface from create(), not later during iteration, so the
-    agents' strong->fast try/except actually catches them."""
+    agents' strong->fast try/except actually catches them.
+
+    The real GroqLLM.stream_chat is lazy, so this can only hold because
+    multi_agent pulls the first chunk itself (_call_streaming). With a lazy
+    fake this test fails against the pre-fix code and passes after it."""
     from multi_agent import InstrumentedGroqClient
 
     def boom(model, msgs):

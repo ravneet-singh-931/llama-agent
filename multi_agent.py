@@ -333,14 +333,41 @@ class InstrumentedGroqClient:
                     return (chunk.raw for chunk in gen)
                 return llm.chat(chat_messages, **llm_kwargs).raw
 
+            def _call_streaming(msgs):
+                """Stream, but make the FIRST chunk arrive inside the try.
+
+                `stream_chat` builds its generator lazily: the provider is not
+                contacted until the first `next()`, so a 413 is raised in the
+                caller's loop, past this function's `except`, and
+                shrink-for-retry never ran. 2026-11-11 logged 22
+                `too_large_retry` metrics while two cases still died on
+                "Request too large" -- the counter was incremented by
+                prepare_call()'s compaction, not by this path, which is how a
+                guard can look busy and never fire. Same family as the 300s
+                deadline that only checked after an event: the limit exists
+                and is never applied to the thing that blocks.
+
+                Pull one chunk here so the request is genuinely started inside
+                the try, then hand back a generator that replays it.
+                """
+                gen = _call(msgs)
+                first = next(gen)              # raises 413 here, where we catch
+                return _prepend(first, gen)
+
+            def _prepend(first, rest):
+                yield first
+                yield from rest
+
             try:
-                result = _call(messages)
+                result = _call_streaming(messages) if kwargs.get("stream") else _call(messages)
+            except StopIteration:
+                result = iter(())              # empty stream, nothing to replay
             except Exception as e:
                 if not llm_guard.is_request_too_large(e):
                     raise
                 messages, est = llm_guard.shrink_for_retry(
                     model, messages, kwargs.get("tools"))
-                result = _call(messages)
+                result = _call_streaming(messages) if kwargs.get("stream") else _call(messages)
             llm_guard.record_call(model, est)
             return result
 
