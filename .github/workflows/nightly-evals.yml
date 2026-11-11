@@ -29,6 +29,11 @@ on:
         description: "Fail the job when a case regresses vs the baseline"
         type: boolean
         default: true
+      scope:
+        description: "smoke = 12 cases, all 9 categories (fits the free tier) | full = all 60"
+        type: choice
+        options: [smoke, full]
+        default: smoke
 
 permissions:
   contents: read
@@ -94,8 +99,21 @@ jobs:
           # --pause keeps consecutive cases under the free tier's per-minute
           # token limit; without it the judge starts returning 429s halfway
           # through and the second half of the report is noise.
+          #
+          # SCOPE. The free tier cannot finish 60 agent cases in one window.
+          # Three consecutive runs proved it: 52/60, then 40/60, with the
+          # expensive categories starved every time. A suite that never
+          # reaches its own tail does not measure the tail -- so the nightly
+          # now runs the `smoke` set (12 cases, all 9 categories, the checks
+          # that have historically broken) and keeps the full 60 for runs
+          # that can afford them. Coverage matters less than reaching the end.
+          SCOPE="${{ inputs.scope }}"
+          if [ -z "$SCOPE" ]; then SCOPE="smoke"; fi   # schedule has no inputs
+          ARGS=""
+          if [ "$SCOPE" = "smoke" ]; then ARGS="--tags smoke"; fi
+          echo "Running scope: $SCOPE ($ARGS)"
           set +e
-          python -m evals.run --out eval-today.json --pause 10
+          python -m evals.run $ARGS --out eval-today.json --pause 10
           STATUS=$?
           if [ "$STATUS" -eq 3 ]; then
             echo "::warning title=Incomplete run::Too few cases were graded for a pass rate to mean anything (provider limits). The report says so; do not quote the pass rate."
