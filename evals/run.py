@@ -443,7 +443,11 @@ def summarize(results: List[Dict]) -> Dict:
                 check_fail[name] += 1
     judged = [r["judge"]["overall"] for r in results if r.get("judge") and "overall" in r["judge"]]
     fabric = [r for r in results if r.get("judge") and r["judge"].get("fabrication")]
-    ground = [r["checks"]["grounding"]["rate"] for r in results if "grounding" in r["checks"]]
+    # Only cases that were actually measured. A case whose sources were too
+    # small to check used to contribute nothing here while still appearing as
+    # a clean pass in the per-case table, which made the two views disagree.
+    ground = [r["checks"]["grounding"]["rate"] for r in results
+              if r["checks"].get("grounding", {}).get("rate") is not None]
     lat = sorted(r["latency_s"] for r in results)
     usage: Dict[str, float] = defaultdict(float)
     for r in results:
@@ -490,6 +494,9 @@ def summarize(results: List[Dict]) -> Dict:
         "judge_overall": round(statistics.mean(judged), 2) if judged else None,
         "fabrication_rate": _pct(len(fabric), len(judged)) if judged else None,
         "grounding_rate": round(statistics.mean(ground), 3) if ground else None,
+        "grounding_checked": len(ground),
+        "grounding_skipped": sum(1 for r in results
+                                 if r["checks"].get("grounding", {}).get("skipped")),
         "latency_p50_s": round(statistics.median(lat), 1) if lat else None,
         "latency_p95_s": round(lat[min(len(lat) - 1, int(0.95 * len(lat)))], 1) if lat else None,
         "usage": {k: round(v, 4) for k, v in sorted(usage.items())},
@@ -523,7 +530,11 @@ def render_markdown(summary: Dict, results: List[Dict]) -> str:
                     f"{len(s['not_graded'])}" if s.get("not_graded") else "")]
     lines = ["# Evaluation report", ""] + head + [
         f"- Judge overall (1-5): **{s['judge_overall']}** - fabrication flagged: {s['fabrication_rate']}%",
-        f"- Grounding rate (figures found in sources): **{s['grounding_rate']}**",
+        f"- Grounding rate (figures found in sources): **{s['grounding_rate']}**"
+        + (f" - measured on {s['grounding_checked']} case(s)"
+           if s.get("grounding_checked") is not None else "")
+        + (f", {s['grounding_skipped']} skipped (too few source characters)"
+           if s.get("grounding_skipped") else ""),
         f"- Latency p50 / p95: {s['latency_p50_s']}s / {s['latency_p95_s']}s",
         f"- Trajectory: {s.get('avg_steps')} tool calls/case on average, "
         f"{s.get('total_redundant_steps')} redundant"
@@ -538,6 +549,16 @@ def render_markdown(summary: Dict, results: List[Dict]) -> str:
     for r in results:
         failed = [f"{k} ({c.get('detail', '')})" if c.get("detail") else k
                   for k, c in r["checks"].items() if not c["pass"]]
+        # "0/3 figures found in sources" does not tell you whether the check
+        # is right. Name the figures so the next reader can decide for
+        # themselves instead of guessing (this is what made grounding look
+        # unfixable: the culprits were computed and then never printed).
+        g = r["checks"].get("grounding") or {}
+        if g and not g.get("pass") and g.get("unsupported"):
+            failed.append("grounding: not in sources -> "
+                          + ", ".join(f"'{u}'" for u in g["unsupported"][:5]))
+        if g.get("skipped"):
+            failed.append(f"grounding skipped ({g.get('detail', '')})")
         j = r.get("judge") or {}
         score = j.get("overall", j.get("error", "-"))
         status = "⚠️ not graded" if not r.get("graded", True) else ("✅" if r["passed"] else "❌")
@@ -678,6 +699,40 @@ def render_compare(diff: Dict) -> str:
 
 # ------------------------------------------------------------------ CLI
 
+def _selftest(cases: List[Dict]) -> int:
+    """Run every case's checks against one canonical synthetic answer.
+
+    Not an accuracy test - it asserts that each check *can* pass and that
+    nothing raises. It exists because three separate grading bugs survived
+    hundreds of unit tests and were only found by reading a real report; this
+    exercises the whole path (dataset -> checks -> summary -> markdown) in a
+    second, for free, without touching the model.
+    """
+    sample = {
+        "general": "Sure - here is a short answer with a figure: 42 items and 7 steps.",
+        "writing": "Here is the copy. It is friendly, short and has no jargon.",
+        "coding": "```python\ndef f(x):\n    return x + 1\n```\n\nThis returns the input plus one.",
+        "analysis": "1. First point\n2. Second point\n3. Third point",
+    }
+    problems, checked = [], 0
+    for case in cases:
+        answer = sample.get(case.get("category"), sample["general"])
+        try:
+            checks.evaluate(case, answer, [{"name": "web_search", "result": "x " * 300}], 0.7)
+            checked += 1
+        except Exception as exc:                       # noqa: BLE001 - report, don't crash
+            problems.append(f"{case['id']}: {type(exc).__name__}: {exc}")
+    try:
+        render_markdown(summarize([]), [])
+    except Exception as exc:                           # noqa: BLE001
+        problems.append(f"empty report: {type(exc).__name__}: {exc}")
+    for p in problems:
+        print(f"FAIL {p}")
+    print(f"selftest: {checked}/{len(cases)} cases evaluated, "
+          f"{len(problems)} problem(s)")
+    return 1 if problems else 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Run the Llama Agent evaluation suite.")
     ap.add_argument("--dataset", default=DATASET)
@@ -697,6 +752,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--compare", nargs=2, metavar=("OLD", "NEW"),
                     help="compare two report files instead of running")
     ap.add_argument("--fail-on-regression", action="store_true")
+    ap.add_argument("--selftest", action="store_true",
+                    help="exercise every check against synthetic answers, no API calls")
     args = ap.parse_args(argv)
 
     if args.compare:
@@ -713,6 +770,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if diff.get("incomparable"):
             return 0
         return 1 if (args.fail_on_regression and diff["regression"]) else 0
+
+    if args.selftest:
+        return _selftest(load_cases(args.dataset, args.ids, args.categories,
+                                    args.tags, args.limit))
 
     cases = load_cases(args.dataset, args.ids, args.categories, args.tags, args.limit)
     if not cases:

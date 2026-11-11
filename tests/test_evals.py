@@ -664,3 +664,103 @@ def test_normalising_does_not_change_real_subtraction():
     assert checks.normalise_dashes("a\u2013b") == "a-b"
     # a string that legitimately contains an en dash keeps its meaning elsewhere
     assert checks.normalise_dashes("print('a\u2013b')") == "print('a-b')"
+
+
+# ------------------------------------------------- grounding: what counts as a source
+# fact-node-latest, 2026-11-11: the answer credited `22` as "sourced" because
+# the QUESTION contained it ("I'm on 22"). Nothing had been looked up for it.
+
+def test_a_figure_from_the_question_is_not_a_sourced_figure():
+    from modules import grounding
+    tool = [("Node.js release page. Node 24 is the current LTS, released April 2025. "
+             "Download it from nodejs.org. Node 25 is Current. ") * 3]
+    # the prompt contains 22; the sources do not
+    answer = "Upgrade from 22 to 24. Node 24 is the current LTS."
+    prompt = "What is the latest Node.js? I'm on 22."
+    report = grounding.check(grounding._prose(answer),
+                             grounding.research_sources(tool))
+    assert "22" in report.unsupported
+    # the old call included the prompt and scored this 2/2
+    with_prompt = grounding.check(grounding._prose(answer),
+                                  grounding.run_sources(prompt, tool))
+    assert "22" not in with_prompt.unsupported
+
+
+def test_an_unsourced_range_names_the_member_that_is_missing():
+    """'40-50 million' with 40 sourced must report '50', not the whole range."""
+    from modules import grounding
+    src = ("Revenue was 40 million in 2024 and the company grew steadily. ") * 5
+    report = grounding.check("Revenue was 40-50 million.", src)
+    assert report.unsupported == ["50 million"], report.unsupported
+
+
+def test_a_single_document_is_not_iterated_character_by_character():
+    """Passing one string used to make every 'source' 1 char and skip the check."""
+    from modules import grounding
+    src = ("Revenue was 40 million. Reported 1\u202f200 crates and 45 percent growth. ") * 4
+    assert grounding.check("It reported 1200 crates and 45% growth.", src).total == 2
+    assert grounding.check("It reported 1200 crates and 45% growth.", [src]).total == 2
+
+
+def test_a_number_grouped_with_a_narrow_space_still_matches():
+    from modules import grounding
+    src = [("Reported 1\u202f200 crates and 45 percent growth this year. ") * 5]
+    report = grounding.check("It reported 1200 crates and 45% growth.", src)
+    assert report.supported == report.total == 2, report.unsupported
+
+
+def test_a_result_big_enough_to_check_at_runtime_is_checked_in_the_eval_too():
+    """The 200-char gate lived in run_sources() AND check(); they disagreed."""
+    from modules import grounding
+    result = ("Todo apps are a crowded market. Teams differentiate on offline "
+              "support, collaboration and price. Most charge 5 dollars a month. ") * 2
+    assert 200 <= len(result) < 400
+    sources = grounding.run_sources("research the todo app market", [result])
+    assert grounding.check("Most apps charge 5 dollars.", sources).checked
+
+
+def test_a_skipped_grounding_check_says_so_instead_of_looking_clean():
+    report = checks.check_grounding("It costs 5 dollars.", "p", [], 0.7)
+    assert report["pass"] and report.get("skipped")
+    assert "not checked" in report["detail"]
+
+
+def test_grounding_rate_ignores_cases_that_were_never_measured():
+    results = [
+        {"id": "a", "category": "research_facts", "passed": True, "graded": True,
+         "latency_s": 1.0, "usage": {},
+         "checks": {"grounding": {"pass": True, "rate": 1.0, "total": 2}}},
+        {"id": "b", "category": "research_facts", "passed": True, "graded": True,
+         "latency_s": 1.0, "usage": {},
+         "checks": {"grounding": {"pass": True, "rate": None, "total": 0, "skipped": True}}},
+    ]
+    s = run.summarize(results)
+    assert s["grounding_rate"] == 1.0          # not 1.0 averaged with a fake
+    assert s["grounding_checked"] == 1 and s["grounding_skipped"] == 1
+
+
+def test_a_failing_grounding_row_names_the_figures():
+    results = [{"id": "fact-node-latest", "category": "research_news",
+                "route": "agent:research", "passed": False,
+                "graded": True, "latency_s": 2.0, "usage": {},
+                "judge": {"overall": 4.0},
+                "checks": {"grounding": {"pass": False, "rate": 0.333, "total": 3,
+                                         "unsupported": ["22", "60"],
+                                         "detail": "1/3 figures found in sources"}}}]
+    s = run.summarize(results)
+    md = run.render_markdown(s, results)
+    assert "'22'" in md and "'60'" in md
+
+
+# ------------------------------------------------- {year} means "current", not "2026"
+# fact-node-latest: "released April 2025" is a correct answer to "latest version"
+# and failed because the literal string "2026" was missing.
+
+def test_a_release_date_from_last_year_satisfies_a_year_requirement():
+    assert checks.check_includes("Node 24 is the current LTS, released April 2025.",
+                                 ["{year}"])["pass"]
+
+
+def test_an_old_year_does_not_satisfy_a_year_requirement():
+    assert not checks.check_includes("Node 18 was released in 2022.", ["{year}"])["pass"]
+    assert not checks.check_includes("Node 24 is available.", ["{year}"])["pass"]
