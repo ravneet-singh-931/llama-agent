@@ -110,6 +110,35 @@ def _parses_as_python(snippet: str) -> bool:
     return True
 
 
+def _looks_like_regex(snippet: str) -> bool:
+    """True when `snippet` is plausibly a pattern rather than prose.
+
+    `re.compile` is used as the authority because it is the same engine the
+    pattern will run on, but a validation regex is usually written bare
+    (``^[1-9][0-9]{5}$``), which is a syntax error on its own. So: either it
+    compiles as-is, or it contains pattern syntax *and* compiling it inside a
+    group succeeds. Prose with backticks ("use `the six digit rule`") satisfies
+    neither.
+    """
+    snippet = (snippet or "").strip()
+    if not snippet:
+        return False
+    # Prose compiles as a literal pattern too ("the six digit rule" is a valid
+    # regex), so anchoring is part of the shape, not just "it compiles".
+    if not re.search(r"[\[\](){}+*?^$|\\]", snippet):
+        return False
+    try:
+        re.compile(snippet)
+        return True
+    except re.error:
+        pass
+    try:
+        re.compile(f"(?:{snippet})")
+        return True
+    except re.error:
+        return False
+
+
 def code_blocks(text: str) -> List[Dict[str, str]]:
     return [{"lang": (m.group(1) or "").lower(), "code": m.group(2)}
             for m in _FENCE_BLOCK_RE.finditer(text or "")]
@@ -132,9 +161,26 @@ def check_english(answer: str, max_ratio: float = 0.01) -> Dict:
     return {"pass": ratio <= max_ratio, "detail": f"non-Latin letters: {other}" if other else ""}
 
 
+# Phrases that are weak evidence on their own. "source material 2" can be an
+# agent citing its own scaffolding OR an ordinary sentence about a document;
+# the regex cannot tell, and it fired once in 60 cases (team-cafe, 2026-11-11)
+# where the judge had already marked the answer down for real reasons. A hit
+# on one of these is reported but does not fail the case by itself. `advisory`
+# is not a pass: evaluate() still lists it, the report still shows it.
+_ADVISORY_META = (r"source material \d",)
+
+
 def check_no_meta(answer: str) -> Dict:
-    hits = sorted({m.group(0).lower() for m in _META_RE.finditer(prose(answer))})
-    return {"pass": not hits, "detail": ", ".join(hits)}
+    found = sorted({m.group(0).lower() for m in _META_RE.finditer(prose(answer))})
+    advisory_re = re.compile("|".join(_ADVISORY_META), re.I)
+    weak = [h for h in found if advisory_re.fullmatch(h)]
+    hard = [h for h in found if h not in weak]
+    if hard:
+        return {"pass": False, "detail": ", ".join(hard)}
+    if weak:
+        # Soft: surfaced, not fatal. The judge decides this answer.
+        return {"pass": True, "advisory": ", ".join(weak)}
+    return {"pass": True, "detail": ""}
 
 
 def check_fences(answer: str) -> Dict:
@@ -196,8 +242,14 @@ def check_code(answer: str, expected_lang: Optional[str]) -> Dict:
             # instead of fenced. The judge scores those answers 5.0 -- the
             # request WAS answered -- so calling it a failure grades formatting,
             # not correctness. Judge an inline span as code when it parses.
+            # Same rule for a non-Python language: `code-regex-pin` answers
+            # "Give me a regex..." with `^[1-9][0-9]{5}$` inline, the judge
+            # scores it 5.0/5, and this check called it "no regex code block" --
+            # grading formatting again. Accept an inline span when it is shaped
+            # like the requested language.
             inline = inline_code_spans(answer)
-            if expected_lang == "python" and any(_parses_as_python(i) for i in inline):
+            shaped = {"python": _parses_as_python, "regex": _looks_like_regex}.get(expected_lang)
+            if shaped and any(shaped(i) for i in inline):
                 return {"pass": True, "detail": ""}
             return {"pass": False, "detail": f"no {expected_lang} code block"}
     return {"pass": not errors, "detail": "; ".join(errors)}

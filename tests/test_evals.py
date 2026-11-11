@@ -49,7 +49,15 @@ def test_english_check():
 
 def test_meta_talk_check_is_generic():
     assert not checks.check_no_meta("My step is only research; other agents will code.")["pass"]
-    assert not checks.check_no_meta("Based on Source material 2, the price is...")["pass"]
+    # "Source material N" is a weak phrase on its own: it can be an agent
+    # citing its own scaffolding or an ordinary sentence about a document. It is
+    # surfaced as an advisory instead of failing the case outright (it fired
+    # once in 60 cases on 2026-11-11, on an answer the judge had already marked
+    # down for real reasons). Pipeline narration still fails -- see the next
+    # assertion, and test_real_pipeline_narration_still_fails_the_case.
+    weak = checks.check_no_meta("Based on Source material 2, the price is...")
+    assert weak["pass"] and weak.get("advisory") == "source material 2"
+    assert not checks.check_no_meta("I'll pass this to the other agents now.")["pass"]
     ok = "### Coder Agent\n\nHere is the page. The user agent string is logged."
     assert checks.check_no_meta(ok)["pass"]
 
@@ -260,6 +268,14 @@ def test_summary_compare_and_markdown(tmp_path):
     p_old, p_new = tmp_path / "o.json", tmp_path / "n.json"
     p_old.write_text(json.dumps({"summary": so, "results": old}))
     p_new.write_text(json.dumps({"summary": sn, "results": new}))
+    # These reports carry no `evidence` record, so what graded each run is
+    # unknown; the diff is printed but must not fail the job (#13's guard never
+    # fired for exactly this reason). Give both sides an identical evidence
+    # record and the same regression is fatal again.
+    assert run.main(["--compare", str(p_old), str(p_new), "--fail-on-regression"]) == 0
+    ev = {"checks": "c1", "dataset": "d1"}
+    p_old.write_text(json.dumps({"summary": so, "results": old, "evidence": ev}))
+    p_new.write_text(json.dumps({"summary": sn, "results": new, "evidence": ev}))
     assert run.main(["--compare", str(p_old), str(p_new), "--fail-on-regression"]) == 1
     assert run.main(["--compare", str(p_old), str(p_old), "--fail-on-regression"]) == 0
 
@@ -457,3 +473,124 @@ def test_a_run_where_a_third_of_cases_were_not_graded_says_so():
 
     assert s["provider_failures"] == 3
     assert s["provider_failure_pct"] == 100.0
+
+
+# ------------------------------------------------- the 2026-11-11 nightly
+# 21 passed, 31 never ran (free tier 429 after case 29), 8 failed. The report
+# published 35.0% and, on the next line, "not graded: 31". Among cases that
+# actually ran the rate was 21/29 = 72.4%, against 75% the day before.
+
+def _run_mix(passed, ungraded, failed):
+    out = []
+    for i in range(passed):
+        out.append({"id": f"p{i}", "category": "coding", "passed": True, "graded": True,
+                    "checks": {}, "usage": {}, "latency_s": 2.0, "judge": {"overall": 4.5},
+                    "route": "general"})
+    for i in range(failed):
+        out.append({"id": f"f{i}", "category": "coding", "passed": False, "graded": True,
+                    "checks": {"completed": {"pass": False, "detail": "failure marker"}},
+                    "usage": {}, "latency_s": 3.0, "judge": {"overall": 3.0},
+                    "route": "general"})
+    for i in range(ungraded):
+        out.append({"id": f"u{i}", "category": "team", "passed": False, "graded": False,
+                    "checks": {}, "usage": {}, "latency_s": 0.09,
+                    "judge": {"error": "RateLimitError: 429"}, "route": "team"})
+    return out
+
+
+def test_a_half_run_report_is_inconclusive_not_a_pass_rate():
+    """The bug: ungraded cases in the denominator published 35% as quality."""
+    s = run.summarize(_run_mix(passed=21, ungraded=31, failed=8))
+
+    assert s["cases"] == 60
+    assert s["graded"] == 29
+    assert s["completeness_pct"] == 48.3
+    assert s["status"] == "inconclusive"
+    assert s["pass_rate_graded"] == 72.4, "the number worth quoting"
+    assert s["pass_rate"] == 35.0, "still reported, but no longer the headline"
+    assert s["provider_failures"] == 31
+
+
+def test_a_complete_run_is_not_inconclusive():
+    s = run.summarize(_run_mix(passed=45, ungraded=0, failed=15))
+
+    assert s["status"] == "ok"
+    assert s["pass_rate"] == 75.0
+    assert s["pass_rate_graded"] == 75.0
+    assert s["completeness_pct"] == 100.0
+
+
+def test_the_inconclusive_report_leads_with_coverage_not_a_score():
+    md = run.render_markdown(run.summarize(_run_mix(passed=21, ungraded=31, failed=8)), [])
+
+    assert "INCONCLUSIVE" in md
+    assert "21/29 cases ran" not in md          # wording: graded/total
+    assert "29/60 cases ran" in md
+    assert md.index("INCONCLUSIVE") < md.index("Pass rate among cases that ran")
+
+
+# ------------------------------------------------- cheap cases run first
+
+def test_team_cases_run_last_so_quota_starvation_hits_them_not_the_cheap_ones():
+    cases = run.load_cases()
+    cats = [c["category"] for c in cases]
+    assert cases[-1]["category"] == "team", "the most expensive category runs last"
+    assert cases[0]["category"] == "general"
+    first_team = cats.index("team")
+    assert all(c != "team" for c in cats[:first_team])
+    # ordering must be a stable permutation: nothing lost or duplicated
+    assert len(cases) == len({c["id"] for c in cases})
+
+
+def test_ordering_keeps_dataset_order_within_a_category():
+    cases = run.load_cases(categories=["team"])
+    ids = [c["id"] for c in cases]
+    assert ids == ["team-todo-landing", "team-cafe", "team-library-api",
+                   "team-jaipur", "team-ev-india", "team-slack-bot", "team-budget-tracker"]
+
+
+# ------------------------------------------------- code check: per language
+
+def test_an_inline_regex_counts_as_code_when_the_case_asks_for_a_regex():
+    """code-regex-pin: judge 5.0, check said 'no regex code block'."""
+    answer = r"The pattern is `^[1-9][0-9]{5}$` -- match it against the whole PIN."
+    assert checks.check_code(answer, "regex")["pass"]
+
+
+def test_prose_in_backticks_is_not_a_regex():
+    assert not checks.check_code("use `the six digit rule` here", "regex")["pass"]
+
+
+def test_an_inline_python_snippet_still_passes():
+    assert checks.check_code("use `len(x) == 0`", "python")["pass"]
+
+
+# ------------------------------------------------- no_meta: soft vs hard
+
+def test_a_single_weak_meta_phrase_does_not_fail_the_case():
+    r = checks.check_no_meta("Source material 2 covers the market data for Pune.")
+    assert r["pass"] is True
+    assert r.get("advisory") == "source material 2"
+
+
+def test_real_pipeline_narration_still_fails_the_case():
+    r = checks.check_no_meta("I'll pass this to the other agents now.")
+    assert r["pass"] is False
+
+
+def test_a_normal_answer_trips_no_meta_at_all():
+    r = checks.check_no_meta("The specialty coffee market in Pune is growing about 12% a year.")
+    assert r["pass"] is True and not r.get("advisory")
+
+
+# ------------------------------------------------- missing evidence is unknown
+
+def test_a_baseline_without_an_evidence_record_is_not_comparable():
+    """#13's guard never fired because absent read as equal."""
+    old = _cmp_report(_cmp_summary(60, 45))                      # no "evidence"
+    new = _cmp_report(_cmp_summary(60, 21), evidence={"checks": "abc", "dataset": "def"})
+
+    diff = run.compare(old, new)
+
+    assert diff["incomparable"] == "missing_evidence"
+    assert "NOT COMPARABLE" in run.render_compare(diff)

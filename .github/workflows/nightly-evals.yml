@@ -87,7 +87,14 @@ jobs:
           # --pause keeps consecutive cases under the free tier's per-minute
           # token limit; without it the judge starts returning 429s halfway
           # through and the second half of the report is noise.
+          set +e
           python -m evals.run --out eval-today.json --pause 10
+          STATUS=$?
+          if [ "$STATUS" -eq 3 ]; then
+            echo "::warning title=Incomplete run::Too few cases were graded for a pass rate to mean anything (provider limits). The report says so; do not quote the pass rate."
+            exit 0
+          fi
+          exit "$STATUS"
 
       - name: "📤 Upload today's report"
         if: steps.key.outputs.have_key == 'true'

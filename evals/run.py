@@ -60,7 +60,31 @@ def load_cases(path: str = DATASET, ids: Optional[List[str]] = None,
         cases = [c for c in cases if c["category"] in categories]
     if tags:
         cases = [c for c in cases if set(tags) & set(c.get("tags", []))]
-    return cases[:limit] if limit else cases
+    if limit:
+        cases = cases[:limit]
+    return order_by_cost(cases)
+
+
+# Cheapest first, so a quota-starved run loses the expensive cases rather than
+# everything after them.
+#
+# The 2026-11-11 nightly put the five @team cases at positions 24-28. They took
+# 74 s, 140 s, 39 s, and burned the free tier's token window; every case after
+# position 29 came back as a 429 in ~0.1 s. Thirty-one ungraded cases, and the
+# report published 35% -- a number that was mostly a description of the run
+# order. Ordering by cost means a truncated run degrades at the far end, where
+# the expensive cases are, instead of taking the cheap majority with it.
+_CATEGORY_COST = {
+    "general": 0, "writing": 1, "coding": 1,
+    "analysis": 2, "planning": 2,
+    "research_facts": 3, "research_news": 3,
+    "team": 4,
+}
+
+
+def order_by_cost(cases: List[Dict]) -> List[Dict]:
+    """Stable sort: same content, ordered cheapest-category-first."""
+    return sorted(cases, key=lambda c: _CATEGORY_COST.get(c.get("category", ""), 2))
 
 
 # ------------------------------------------------------------------ instrumentation
@@ -426,10 +450,34 @@ def summarize(results: List[Dict]) -> Dict:
         for k, v in r["usage"].items():
             usage[k] += v
     not_graded = [r["id"] for r in results if not r.get("graded", True)]
+    # A pass rate over cases that never RAN is not a quality number.
+    #
+    # The 2026-11-11 nightly reported 35% and, on the next line, "not graded:
+    # 31". Both were true and together they were a lie: the free tier ran out
+    # at case 29, so 31 cases came back as the app's own "can't answer right
+    # now" notice in ~0.1 s each and were counted as failures by the rule
+    # below. Among cases that actually ran the rate was 21/29 = 72.4%, against
+    # 75% the day before -- i.e. noise. The suite published its worst number
+    # as its quality because the denominator included cases with no answer.
+    #
+    # Counting ungraded as not-passed is still right: a broken judge must not
+    # silently inflate a score. What is wrong is calling the result a pass
+    # rate at all. Above the threshold the headline becomes UNGRADED and the
+    # pass rate is reported over graded cases only, next to its coverage.
+    graded = [r for r in results if r.get("graded", True)]
+    passed_graded = sum(r["passed"] for r in graded)
+    completeness = _pct(len(graded), n)
+    threshold = float(os.getenv("EVAL_MIN_GRADED_PCT", "90") or 90)
+    inconclusive = n > 0 and completeness < threshold
     return {
         "cases": n,
         # Not-graded cases count as not passed; see "not_graded".
         "pass_rate": _pct(sum(r["passed"] for r in results), n),
+        "graded": len(graded),
+        "completeness_pct": completeness,
+        # The only pass rate worth quoting when cases did not run.
+        "pass_rate_graded": _pct(passed_graded, len(graded)) if graded else None,
+        "status": "inconclusive" if inconclusive else "ok",
         "not_graded": not_graded,
         # A third of the suite arriving as provider notices is not a quality
         # number, whatever the pass rate says. Flagged in the summary so the
@@ -460,11 +508,20 @@ def summarize(results: List[Dict]) -> Dict:
 
 def render_markdown(summary: Dict, results: List[Dict]) -> str:
     s = summary
-    lines = [
-        "# Evaluation report", "",
-        f"- Cases: **{s['cases']}** - pass rate **{s['pass_rate']}%**"
-        + (f" - **not graded** (judge failed, counted as not passed): {len(s['not_graded'])}"
-           if s.get("not_graded") else ""),
+    # Never lead with a score the suite cannot back up. When too few cases ran,
+    # the headline is the coverage, and the pass rate is labelled as being over
+    # the cases that did (see compute of `status` in summarize()).
+    head = [f"- Cases: **{s['cases']}**"]
+    if s.get("status") == "inconclusive":
+        head += [f"- **INCONCLUSIVE - only {s.get('graded', 0)}/{s['cases']} cases ran** "
+                 f"({s.get('completeness_pct')}% coverage)",
+                 f"- Pass rate among cases that ran: **{s.get('pass_rate_graded')}%** "
+                 f"({len(s['not_graded'])} not graded: provider rate limit / outage)"]
+    else:
+        head += [f"- pass rate **{s['pass_rate']}%**"
+                 + (f" - **not graded** (judge failed, counted as not passed): "
+                    f"{len(s['not_graded'])}" if s.get("not_graded") else "")]
+    lines = ["# Evaluation report", ""] + head + [
         f"- Judge overall (1-5): **{s['judge_overall']}** - fabrication flagged: {s['fabrication_rate']}%",
         f"- Grounding rate (figures found in sources): **{s['grounding_rate']}**",
         f"- Latency p50 / p95: {s['latency_p50_s']}s / {s['latency_p95_s']}s",
@@ -546,10 +603,21 @@ def compare(old: Dict, new: Dict) -> Dict:
     # you find out the suite changed); it just must not fail the job.
     old_n = int(so.get("cases") or 0)
     new_n = int(sn.get("cases") or 0)
-    old_checks = old.get("evidence") or {}
-    new_checks = new.get("evidence") or {}
-    incompatible = "cases_changed" if old_n != new_n else (
-        "check_logic_changed" if old_checks != new_checks and old_checks and new_checks else "")
+    # A report written before `evidence` existed cannot be compared on the
+    # checks it used. Treating a missing field as "the same" is how the guard
+    # added in #13 failed to fire on the very diff that motivated it: the
+    # baseline had no `evidence` key, empty compared equal to present, and the
+    # two runs were declared comparable. Absent means UNKNOWN, not equal.
+    old_checks = old.get("evidence")
+    new_checks = new.get("evidence")
+    if old_n != new_n:
+        incompatible = "cases_changed"
+    elif old_checks is None or new_checks is None:
+        incompatible = "missing_evidence"
+    elif old_checks != new_checks:
+        incompatible = "check_logic_changed"
+    else:
+        incompatible = ""
     if prompt_changed and not incompatible:
         incompatible = "prompt_changed"
     return {"metrics": metrics, "category_pass_delta": cats, "regressed_cases": regressed,
@@ -578,8 +646,16 @@ def render_compare(diff: Dict) -> str:
             f"{k} {v:+d}" for k, v in sorted(diff["check_failure_delta"].items())))
     c = diff.get("cases") or {}
     if diff.get("incomparable"):
+        why = {
+            "missing_evidence": "the baseline predates `evidence` records, so what "
+                                "graded it is unknown",
+            "cases_changed": "the two reports cover a different number of cases",
+            "check_logic_changed": "the checks themselves changed between the runs",
+            "prompt_changed": "the prompts changed between the runs",
+        }.get(diff["incomparable"], diff["incomparable"].replace("_", " "))
         lines += ["",
                   f"**NOT COMPARABLE: {diff['incomparable'].replace('_', ' ')}** "
+                  f"-- {why}. "
                   f"({c.get('old')} -> {c.get('new')} cases). The two reports do not "
                   "measure the same suite; a pass-rate delta across them is not a "
                   "statement about the app."]
@@ -667,6 +743,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         json.dump(report, f, indent=2, ensure_ascii=False)
     print("\n" + render_markdown(summary, results))
     print(f"\nFull report: {args.out}")
+    if summary.get("status") == "inconclusive":
+        # Do not exit 0: a run this incomplete must be visible in the job list,
+        # or it becomes a green tick that measured half a suite. It is also not
+        # a regression (exit 1) -- nothing was compared. 3 = "ran, but not
+        # enough of it to score". The workflow prints this as a notice.
+        print(f"\n::warning title=Incomplete run::only {summary['graded']}/"
+              f"{summary['cases']} cases were graded "
+              f"({summary['completeness_pct']}%); pass rate {summary['pass_rate']} "
+              f"is NOT a quality score. Among graded cases: "
+              f"{summary['pass_rate_graded']}%")
+        return 3
     return 0
 
 
