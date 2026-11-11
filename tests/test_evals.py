@@ -850,3 +850,89 @@ def test_an_incomparable_diff_withholds_the_fixed_and_regressed_lists():
     md = run.render_compare(diff)
     assert "Regressed:" not in md and "Fixed:" not in md
     assert "Case-level deltas withheld" in md
+
+
+# ------------------------------------------------- coverage was the wrong question
+# team is 7 of 60 cases and runs last on purpose. Losing all 7 gives 53/60 =
+# 88.3% coverage, under a 90% bar -- so the guard added to stop a fake score
+# made every real score unprintable, permanently.
+
+def _res(cat, n, graded, passed=None):
+    return [{"id": f"{cat}-{i}", "category": cat, "passed": passed if passed is not None else True,
+             "graded": i < graded, "latency_s": 1.0, "usage": {}, "checks": {}}
+            for i in range(n)]
+
+
+def test_losing_only_the_deliberately_last_category_is_not_an_inconclusive_run():
+    results = _res("general", 53, 53) + _res("team", 7, 0)
+    s = run.summarize(results)
+    assert s["completeness_pct"] < 90          # the old trigger
+    assert s["status"] == "ok"                 # ...which no longer disables the report
+    assert s["tail_only_loss"] and s["categories_absent"] == ["team"]
+
+
+def test_a_loss_spread_across_categories_is_still_inconclusive():
+    results = _res("general", 20, 10) + _res("coding", 20, 10) + _res("team", 7, 0)
+    s = run.summarize(results)
+    assert s["status"] == "inconclusive"
+    assert not s["tail_only_loss"]
+
+
+def test_the_headline_does_not_count_cases_that_never_ran_as_failures():
+    """94.3% over 53/60, not 88.3% -- the 35% bug wearing a smaller hat."""
+    # 53 graded of 60 = 88.3%, under the 90% bar: the tail-only case
+    results = _res("general", 50, 50) + _res("coding", 3, 3, passed=False) + _res("team", 7, 0)
+    s = run.summarize(results)
+    assert s["graded"] == 53 and s["completeness_pct"] < 90
+    md = run.render_markdown(s, results)
+    assert "pass rate **94.3%** over the 53/60" in md
+    assert "88.3%" not in md
+    assert "No result at all for: team" in md
+
+
+def test_an_absent_category_is_named_not_scored_zero():
+    results = _res("general", 5, 5) + _res("team", 7, 0)
+    md = run.render_markdown(run.summarize(results), results)
+    assert "| team | 7 | **did not run** |" in md
+
+
+# ------------------------------------------------- the deadline that could not fire
+# team-todo-landing: 309.36s against a 300s cap, because the check ran after an
+# event and a stalled step emits none.
+
+def test_a_generator_that_goes_silent_stops_at_the_deadline():
+    import time as _t
+
+    def stalled():
+        yield {"type": "token", "content": "starting"}
+        _t.sleep(30)                      # never returns in practice
+    got = []
+    t0 = _t.monotonic()
+    hit = run._bounded(stalled(), lambda: 1.2 - (_t.monotonic() - t0), got.append)
+    assert hit and _t.monotonic() - t0 < 2.5
+    assert len(got) == 1
+
+
+def test_a_normal_stream_is_not_delayed_by_the_deadline_wrapper():
+    import time as _t
+
+    def fine():
+        for i in range(4):
+            yield {"type": "token", "content": str(i)}
+    got = []
+    t0 = _t.monotonic()
+    hit = run._bounded(fine(), lambda: 5.0 - (_t.monotonic() - t0), got.append)
+    assert not hit and len(got) == 4 and _t.monotonic() - t0 < 2.0
+
+
+def test_an_exception_inside_the_stream_is_raised_not_swallowed():
+    def boom():
+        yield {"type": "token", "content": "a"}
+        raise RuntimeError("provider died")
+    got = []
+    try:
+        run._bounded(boom(), lambda: 5.0, got.append)
+    except RuntimeError as exc:
+        assert "provider died" in str(exc)
+    else:
+        raise AssertionError("the exception was swallowed")
