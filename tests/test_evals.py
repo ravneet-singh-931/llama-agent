@@ -594,3 +594,17 @@ def test_a_baseline_without_an_evidence_record_is_not_comparable():
 
     assert diff["incomparable"] == "missing_evidence"
     assert "NOT COMPARABLE" in run.render_compare(diff)
+
+
+def test_a_check_that_goes_to_zero_does_not_crash_the_compare():
+    """Baseline had no_meta:1, today has none. Indexing new_cf raised KeyError
+    on 2026-11-11 -- the compare crashed because the check IMPROVED."""
+    old = _cmp_report(_cmp_summary(60, 45, check_failures={"no_meta": 1}),
+                      evidence={"checks": "a", "dataset": "b"})
+    new = _cmp_report(_cmp_summary(60, 50, check_failures={"code_valid": 2}),
+                      evidence={"checks": "a", "dataset": "b"})
+
+    diff = run.compare(old, new)          # must not raise
+
+    assert diff["check_failure_delta"] == {"no_meta": -1, "code_valid": 2}
+    assert "no_meta -1" in run.render_compare(diff)
