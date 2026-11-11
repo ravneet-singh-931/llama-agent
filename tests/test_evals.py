@@ -365,3 +365,95 @@ def test_compare_treats_slower_and_fabricated_more_as_worse():
     # More fabrication IS a regression.
     fab = run.compare(_report("y", BASE, fab=0.0), _report("t", BASE, fab=8.0))
     assert fab["regression"] is True
+
+
+# ------------------------------------------------------------------ compare()
+# The 2026-11-11 nightly went red comparing a 30-case report against a 60-case
+# one, after the checks themselves had changed. Every number in that diff was
+# meaningless and the build still failed. These tests pin the two fields that
+# make a diff readable, and the rule that an incomparable diff is reported but
+# does not fail the job.
+
+def _cmp_report(summary, **extra):
+    return {"summary": summary, "results": extra.pop("results", []), **extra}
+
+
+def _cmp_summary(cases, passed, **kw):
+    s = {"cases": cases, "pass_rate": round(passed / cases * 100, 1),
+         "by_category": {"coding": {"cases": cases, "pass_rate": round(passed / cases * 100, 1)}},
+         "check_failures": {}, "not_graded": [],
+         "judge_overall": 4.4, "fabrication_rate": 15.0, "grounding_rate": 0.3,
+         "latency_p50_s": 3.0, "latency_p95_s": 99.0}
+    s.update(kw)
+    return s
+
+
+def test_a_diff_across_a_changed_suite_is_not_called_a_regression():
+    """30 cases vs 60 cases are two different measurements, not two versions."""
+    old = _cmp_report(_cmp_summary(30, 26), evidence={"checks": "aaa", "dataset": "ddd"})
+    new = _cmp_report(_cmp_summary(60, 21), evidence={"checks": "bbb", "dataset": "eee"})
+
+    diff = run.compare(old, new)
+
+    assert diff["incomparable"] == "cases_changed"
+    assert diff["regression"] is True, "the delta is still reported honestly"
+    assert "NOT COMPARABLE" in run.render_compare(diff)
+    assert "inconclusive" in run.render_compare(diff)
+
+
+def test_a_diff_across_a_changed_grader_is_incomparable_not_a_regression():
+    """Same case count, different checks: the measuring stick moved."""
+    old = _cmp_report(_cmp_summary(60, 45), evidence={"checks": "aaa", "dataset": "ddd"})
+    new = _cmp_report(_cmp_summary(60, 21), evidence={"checks": "bbb", "dataset": "ddd"})
+
+    diff = run.compare(old, new)
+
+    assert diff["incomparable"] == "check_logic_changed"
+    assert "inconclusive" in run.render_compare(diff)
+
+
+def test_a_comparable_diff_still_fails_on_a_real_regression():
+    """The guard must not disarm the detector it was added to protect."""
+    old = _cmp_report(_cmp_summary(60, 45), evidence={"checks": "same", "dataset": "same"})
+    new = _cmp_report(_cmp_summary(60, 40), evidence={"checks": "same", "dataset": "same"})
+
+    diff = run.compare(old, new)
+
+    assert diff["incomparable"] == ""
+    assert diff["regression"] is True
+    assert "Verdict: REGRESSION" in run.render_compare(diff)
+
+
+def test_compare_names_the_checks_that_started_failing():
+    """'12 cases regressed' is not actionable; 'no_meta +8' is."""
+    old = _cmp_report(_cmp_summary(60, 45, check_failures={"no_meta": 2}))
+    new = _cmp_report(_cmp_summary(60, 21, check_failures={"no_meta": 10, "english": 1}))
+
+    diff = run.compare(old, new)
+    text = run.render_compare(diff)
+
+    assert diff["check_failure_delta"] == {"no_meta": 8, "english": 1}
+    assert "no_meta +8" in text
+
+
+def test_compare_separates_newly_not_graded_from_regressed():
+    """A provider failure looks like a pass-rate drop unless it is named."""
+    old = _cmp_report(_cmp_summary(60, 45, not_graded=[]))
+    new = _cmp_report(_cmp_summary(60, 37, not_graded=["safety-x", "team-y"]))
+
+    diff = run.compare(old, new)
+
+    assert diff["newly_not_graded"] == ["safety-x", "team-y"]
+    assert "Newly NOT GRADED" in run.render_compare(diff)
+
+
+def test_a_run_where_a_third_of_cases_were_not_graded_says_so():
+    """The summary must carry the count, not just bury it in a case list."""
+    results = [{"id": f"c{i}", "category": "coding", "passed": False, "graded": False,
+                "checks": {}, "usage": {}, "latency_s": 0.9,
+                "judge": {"error": "provider"}, "route": "general"}
+               for i in range(3)]
+    s = run.summarize(results)
+
+    assert s["provider_failures"] == 3
+    assert s["provider_failure_pct"] == 100.0
