@@ -178,6 +178,57 @@ def route(message: str) -> Dict:
     return {"route": "general", "task": message}
 
 
+def _bounded(stream, deadline_check, on_event):
+    """Consume `stream`, stopping at the deadline even if nothing arrives.
+
+    `execute()` used to check its deadline *after* an event yielded:
+
+        for ev in stream:
+            ...
+            if timed_out(): break
+
+    which cannot fire while the generator is blocked, because a stalled step
+    produces no event to test after. team-todo-landing ran 309.36 s against a
+    300 s cap -- the check was reachable in principle and unreachable in
+    practice, since the pipeline was silent for the whole overrun. Same class
+    of bug as a timeout applied to the wrong future (finding 21): the limit
+    exists, is documented, and is not actually enforced on the thing that
+    hangs.
+
+    So pull from the stream in a worker thread and give each pull a slice of
+    the remaining budget. A silent generator now times out on its own silence.
+    """
+    import queue
+    import threading
+
+    q: "queue.Queue" = queue.Queue()
+    _END = object()
+
+    def _pump():
+        try:
+            for ev in stream:
+                q.put(ev)
+        except BaseException as exc:            # noqa: BLE001 - surfaced to caller
+            q.put(exc)
+        finally:
+            q.put(_END)
+
+    threading.Thread(target=_pump, daemon=True).start()
+    while True:
+        remaining = deadline_check()
+        if remaining <= 0:
+            return True                          # out of time
+        try:
+            ev = q.get(timeout=min(remaining, 5.0))
+        except queue.Empty:
+            continue                             # still silent; re-check the clock
+        if ev is _END:
+            return False
+        if isinstance(ev, BaseException):
+            raise ev
+        on_event(ev)
+
+
 def execute(message: str, dsa: bool = True, timeout_s: float = 300.0) -> Dict:
     """Run one message through the real pipeline; returns answer + events."""
     from multi_agent import MultiAgentOrchestrator
@@ -186,44 +237,44 @@ def execute(message: str, dsa: bool = True, timeout_s: float = 300.0) -> Dict:
     critique = reflect = parallel = None if dsa else False
     start = time.monotonic()
 
-    def timed_out():
-        return time.monotonic() - start > timeout_s
+    def remaining():
+        return timeout_s - (time.monotonic() - start)
+
+    def take_team(ev):
+        t = ev.get("type")
+        if t == "token":
+            answer.append(ev.get("content", ""))
+        elif t == "agent_start":
+            answer.append(f"\n\n### {ev.get('agent', 'Agent')}\n\n")
+        elif t in ("reasoning", "tool"):
+            reasoning.append({"stage": ev.get("stage", t), "content": ev.get("content", "")})
+
+    def take_agent(ev):
+        t = ev.get("type")
+        if t == "token":
+            answer.append(ev.get("content", ""))
+        elif t in ("reasoning", "tool"):
+            reasoning.append({"stage": ev.get("stage", t), "content": ev.get("content", "")})
 
     if r["route"] == "team":
         orch = MultiAgentOrchestrator()
-        for ev in orch.collaborate_stream(r["task"], critique=critique, reflect=reflect,
-                                          parallel=parallel):
-            t = ev.get("type")
-            if t == "token":
-                answer.append(ev.get("content", ""))
-            elif t == "agent_start":
-                answer.append(f"\n\n### {ev.get('agent', 'Agent')}\n\n")
-            elif t in ("reasoning", "tool"):
-                reasoning.append({"stage": ev.get("stage", t), "content": ev.get("content", "")})
-            if timed_out():
-                answer.append("\n⚠️ Stream timed out.")
-                break
+        stream = orch.collaborate_stream(r["task"], critique=critique,
+                                         reflect=reflect, parallel=parallel)
+        if _bounded(stream, remaining, take_team):
+            answer.append("\n⚠️ Stream timed out.")
     elif r["route"].startswith("agent:"):
         agent = MultiAgentOrchestrator().agents[r["agent"]]
         crit = os.getenv("AGENT_CRITIQUE", "1") == "1" if dsa else False
         refl = os.getenv("AGENT_REFLECT", "1") == "1" if dsa else False
-        for ev in agent.execute_stream(r["task"], critique=crit, reflect=refl):
-            t = ev.get("type")
-            if t == "token":
-                answer.append(ev.get("content", ""))
-            elif t in ("reasoning", "tool"):
-                reasoning.append({"stage": ev.get("stage", t), "content": ev.get("content", "")})
-            if timed_out():
-                answer.append("\n⚠️ Stream timed out.")
-                break
+        stream = agent.execute_stream(r["task"], critique=crit, reflect=refl)
+        if _bounded(stream, remaining, take_agent):
+            answer.append("\n⚠️ Stream timed out.")
     else:
         from llama_agent1 import run_agent_stream
-        for tok in run_agent_stream(message, user_id="eval",
-                                    conversation_id=f"eval-{uuid.uuid4().hex[:8]}"):
-            answer.append(tok)
-            if timed_out():
-                answer.append("\n⚠️ Stream timed out.")
-                break
+        stream = run_agent_stream(message, user_id="eval",
+                                  conversation_id=f"eval-{uuid.uuid4().hex[:8]}")
+        if _bounded(stream, remaining, lambda tok: answer.append(tok)):
+            answer.append("\n⚠️ Stream timed out.")
     return {"route": r["route"], "answer": "".join(answer).strip(), "reasoning": reasoning}
 
 
@@ -431,6 +482,12 @@ def _redundant(calls: List[Dict]) -> int:
     return extra
 
 
+# Categories that order_by_cost() deliberately places last, so that a
+# quota-limited night degrades in a known direction. A loss confined to these
+# is a scheduling artefact, not a broken run.
+_TAIL_CATEGORIES = {"team"}
+
+
 def summarize(results: List[Dict]) -> Dict:
     n = len(results)
     by_cat: Dict[str, List[Dict]] = defaultdict(list)
@@ -472,7 +529,57 @@ def summarize(results: List[Dict]) -> Dict:
     passed_graded = sum(r["passed"] for r in graded)
     completeness = _pct(len(graded), n)
     threshold = float(os.getenv("EVAL_MIN_GRADED_PCT", "90") or 90)
+
+    # Coverage per category, not per suite.
+    #
+    # The suite-wide threshold was right about the problem and wrong about the
+    # remedy. `team` is 7 of 60 cases, and the cheapest-first ordering puts it
+    # last on purpose, so a quota-limited night loses exactly those 7 -- 53/60
+    # = 88.3% coverage, under a 90% bar, forever. A guard added to stop a fake
+    # score made every real score unprintable.
+    #
+    # The distinction the threshold was reaching for is not "how many cases
+    # ran" but "did a whole part of the suite go missing". 52/60 with the
+    # missing 8 spread one-per-category is a good run. 52/60 with all 7 team
+    # cases absent is a run with no team result. So: a category is *reported*
+    # when all its cases ran, *partial* when some did, and *absent* when none
+    # did. The suite is inconclusive only if the weighted coverage of the
+    # categories that ran is too thin to describe the app -- which is a much
+    # rarer condition than the total falling under 90%.
+    cover = {}
+    for cat, rs in sorted(by_cat.items()):
+        g = sum(1 for r in rs if r.get("graded", True))
+        cover[cat] = {"cases": len(rs), "graded": g, "pct": _pct(g, len(rs)),
+                      "status": ("absent" if g == 0 else
+                                 "complete" if g == len(rs) else "partial")}
+    absent = [c for c, v in cover.items() if v["status"] == "absent"]
+    partial = [c for c, v in cover.items() if v["status"] == "partial"]
     inconclusive = n > 0 and completeness < threshold
+    # Why the coverage is thin decides whether it matters.
+    #
+    # `order_by_cost()` deliberately runs the expensive category last so that a
+    # quota-limited night loses the tail instead of everything after case 29.
+    # Losing that tail used to make the whole report INCONCLUSIVE (7 of 60 =
+    # 88.3%, under a 90% bar), which meant a guard built to stop a fake score
+    # also suppressed every real one. But those are two different events:
+    #
+    #   quota tail   all the misses are in the categories ordered last, and
+    #                every other category is complete -> the 53 that ran are a
+    #                real sample, and the report says which part is missing.
+    #   real outage  misses are spread across categories -> no category is
+    #                trustworthy, and the honest word is INCONCLUSIVE.
+    #
+    # So: still inconclusive when coverage is thin, unless the only thing lost
+    # is the deliberate tail. The absent categories are named either way, so
+    # nobody quotes a suite figure as if it covered team.
+    only_tail_lost = bool(absent or partial) and set(absent) | set(partial) <= _TAIL_CATEGORIES
+    # A tail-only loss is still an outage, not a scheduling artefact, when more
+    # than a third of the whole suite failed to run. The 2026-11-11 35% run
+    # lost 31 of 60; calling that "ok, the tail is missing" would be exactly
+    # the mistake this guard exists to prevent, in the opposite direction.
+    massive = completeness < 70
+    inconclusive = bool(inconclusive and (not only_tail_lost or massive))
+    only_tail_lost = only_tail_lost and not massive
     return {
         "cases": n,
         # Not-graded cases count as not passed; see "not_graded".
@@ -482,6 +589,14 @@ def summarize(results: List[Dict]) -> Dict:
         # The only pass rate worth quoting when cases did not run.
         "pass_rate_graded": _pct(passed_graded, len(graded)) if graded else None,
         "status": "inconclusive" if inconclusive else "ok",
+        # True when the only missing cases are the deliberately-last category:
+        # the pass rate is real, the coverage line still says what is absent.
+        "tail_only_loss": only_tail_lost,
+        # What actually went missing, by name. "31 cases did not run" is a
+        # number; "the whole team category did not run" is a fact.
+        "coverage_by_category": cover,
+        "categories_absent": absent,
+        "categories_partial": partial,
         "not_graded": not_graded,
         # A third of the suite arriving as provider notices is not a quality
         # number, whatever the pass rate says. Flagged in the summary so the
@@ -534,6 +649,23 @@ def render_markdown(summary: Dict, results: List[Dict]) -> str:
                  f"({s.get('completeness_pct')}% coverage)",
                  f"- Pass rate among cases that ran: **{s.get('pass_rate_graded')}%** "
                  f"({len(s['not_graded'])} not graded: provider rate limit / outage)"]
+    if s.get("categories_absent"):
+        # Name the hole. "31 cases did not run" is a number; "the whole team
+        # category did not run" tells you which claim you cannot make.
+        head.append(f"- **No result at all for: {', '.join(s['categories_absent'])}** "
+                    f"- those categories did not run, so nothing is claimed about them")
+    if s.get("categories_partial"):
+        head.append(f"- Partly run: {', '.join(s['categories_partial'])} "
+                    f"- rates there are over the cases that ran")
+    if s.get("status") == "inconclusive":
+        pass                              # coverage already led the report
+    elif s.get("tail_only_loss"):
+        # Real rate, honest denominator. The raw pass_rate counts the absent
+        # tail as failures, which is the 35% bug wearing a smaller hat.
+        head += [f"- pass rate **{s.get('pass_rate_graded')}%** over the "
+                 f"{s.get('graded')}/{s['cases']} cases that ran",
+                 f"- {len(s.get('not_graded') or [])} case(s) did not run; the "
+                 f"missing categories are named below and nothing is claimed about them"]
     else:
         head += [f"- pass rate **{s['pass_rate']}%**"
                  + (f" - **not graded** (judge failed, counted as not passed): "
@@ -583,7 +715,7 @@ def _category_row(cat: str, v: Dict) -> str:
     if graded == v["cases"]:
         return f"| {cat} | {v['cases']} | {v['pass_rate']} |"
     if not graded:
-        return f"| {cat} | {v['cases']} | - (none ran) |"
+        return f"| {cat} | {v['cases']} | **did not run** |"
     return f"| {cat} | {v['cases']} | {v['pass_rate_graded']} (of {graded} that ran) |"
 
 
@@ -849,10 +981,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         # enough of it to score". The workflow prints this as a notice.
         print(f"\n::warning title=Incomplete run::only {summary['graded']}/"
               f"{summary['cases']} cases were graded "
-              f"({summary['completeness_pct']}%); pass rate {summary['pass_rate']} "
-              f"is NOT a quality score. Among graded cases: "
-              f"{summary['pass_rate_graded']}%")
+              f"({summary['completeness_pct']}%); the raw pass rate "
+              f"{summary['pass_rate']} is NOT a quality score. Among cases that "
+              f"ran: {summary['pass_rate_graded']}%")
+        if summary.get("categories_absent"):
+            print(f"::warning title=No result::nothing can be claimed about "
+                  f"{', '.join(summary['categories_absent'])} - "
+                  f"that category did not run at all")
         return 3
+    if summary.get("tail_only_loss") and summary.get("categories_absent"):
+        # Not a failure: the run is real and the rate is quotable. The missing
+        # category is a scheduling fact, and it is a warning so it appears in
+        # the job summary next to the number rather than in a log nobody reads.
+        print(f"::warning title=Partial suite::nothing can be claimed about "
+              f"{', '.join(summary['categories_absent'])} - that category did not "
+              f"run (quota). The rest of the report is a real measurement.")
     return 0
 
 
