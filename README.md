@@ -76,7 +76,9 @@ case in the 30-case run had figures that were in no source, and the judge still 
 ([findings](#what-measuring-found)).
 
 The second most useful finding came from the 60-case run: **the graders can be wrong while
-the judge is right.** The suite reported 75% while the judge averaged 4.43/5. The
+the judge is right.** The suite reported 75% while the judge averaged 4.43/5 — and four of
+those fifteen failures were the grader's fault, so the same 60 questions read **49/60 (81.7%)**
+once the broken checks are corrected. The
 deterministic checks were at fault — grounding applied to planning answers whose figures
 came from the request, correct answers failed on formatting, and a non-breaking hyphen
 failed a 4.75/5 answer ([findings 19–27](#-bugs-found-and-fixed)).
@@ -218,7 +220,8 @@ into CI, where it runs nightly against one commit and is diffed against the prev
 | Where it runs | by hand, 3 versions | nightly, one commit | nightly, diffed |
 
 **The score went 87% → 75% → 83.3%, and every step of that is explained — including a time
-it reported 35%.**
+it reported 35%.** The 75% is a floor, not a reading: four of its fifteen failures were the
+grader's, and with those corrected it is **81.7%** ([details](docs/EVAL_FINDINGS.md)).
 
 That 35% is the most useful number in this table, and it was **not a measurement of the
 app.** The nightly hit the free tier's token limit at case 29; the remaining 31 cases came
@@ -233,7 +236,10 @@ That is now impossible: below 90% coverage the report refuses to print a pass ra
 
 **Why 75% was too low, and why 87% was too high.** The 30-case run was small and run by
 hand on the strongest version; the 60-case suite is harder and adds `@team`, the weakest
-category. Both are true, and neither is the whole reason. The rest was the grader:
+category. Both are true, and neither is the whole reason. **Four of those fifteen failures were
+the grader's fault**, not the app's — restore them and the same 60 questions read **49/60 =
+81.7%**, with the denominator left at 60 because the claim is that the *grader* failed those
+four, not that the app passed them. The rest was the grader:
 
 - **Grounding ran on cases that never asked for sources.** A migration plan's figures come
   from the request, so "1 of 42 figures found in sources" is not a defect in a trip plan.

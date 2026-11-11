@@ -1199,3 +1199,38 @@ def test_a_judge_that_never_answers_does_not_hold_the_run():
     assert elapsed < 3.0
     assert not r["graded"], "a judge that never answered must not grade the case"
     assert "error" in r["judge"]
+
+
+def test_a_case_that_never_ran_is_not_scored_on_tool_recall():
+    """tool recall printed 0.0% on a run where the only case declaring
+    expected_tools (team-slack-bot) had been refused by the provider.
+
+    An ungraded case has no calls because it never ran, and
+    `set(expected) <= set()` is False, so it entered the recall denominator as
+    a failure -- a measurement that never happened, reported as a bad one.
+    """
+    case = {"id": "team-slack-bot", "category": "team", "prompt": "x",
+            "checks": {}, "expected_tools": ["web_search"]}
+    # ungraded: the app replied with a provider notice, so nothing was observed
+    r = run.run_case(case, use_judge=False, dsa=False, grounding_threshold=0.7,
+                     judge_threshold=3.5, timeout_s=5.0,
+                     executor=lambda p, dsa=True, timeout_s=300: {
+                         "route": "error", "reasoning": [],
+                         # the app's own notice, which is what a refused case
+                         # actually answers with (checks.PROVIDER_FAILURE_MARKERS)
+                         "answer": "I'm sorry, but so I can't answer right now."})
+    assert not r["graded"]
+    assert r["tool_recall"] is None, "an unobserved case must not be scored"
+    assert run.summarize([r])["tool_recall"] is None
+
+
+def test_a_graded_case_that_skipped_its_tools_still_counts_as_a_miss():
+    """The guard must not disarm the measurement it protects."""
+    case = {"id": "team-x", "category": "team", "prompt": "x",
+            "checks": {}, "expected_tools": ["web_search"]}
+    r = run.run_case(case, use_judge=False, dsa=False, grounding_threshold=0.7,
+                     judge_threshold=3.5, timeout_s=5.0,
+                     executor=lambda p, dsa=True, timeout_s=300: {
+                         "route": "team", "answer": "an answer", "reasoning": []})
+    assert r["graded"] and r["tool_recall"] is False
+    assert run.summarize([r])["tool_recall"] == 0.0
