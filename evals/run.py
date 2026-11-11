@@ -488,7 +488,17 @@ def summarize(results: List[Dict]) -> Dict:
         # nightly can shout instead of publishing 35%.
         "provider_failures": len(not_graded),
         "provider_failure_pct": _pct(len(not_graded), n),
-        "by_category": {c: {"cases": len(rs), "pass_rate": _pct(sum(r["passed"] for r in rs), len(rs))}
+        # Per-category rates have the same problem as the headline, one level
+        # down: on 2026-11-11 the table printed "team | 7 | 0.0" while six of
+        # those seven cases had never run. A category whose cases were starved
+        # by quota reads as "this category is broken" when the truth is "this
+        # category did not happen". Report the graded denominator beside it.
+        "by_category": {c: {"cases": len(rs),
+                            "graded": len([r for r in rs if r.get("graded", True)]),
+                            "pass_rate": _pct(sum(r["passed"] for r in rs), len(rs)),
+                            "pass_rate_graded": _pct(sum(r["passed"] for r in rs if r.get("graded", True)),
+                                                     len([r for r in rs if r.get("graded", True)]))
+                            if any(r.get("graded", True) for r in rs) else None}
                         for c, rs in sorted(by_cat.items())},
         "check_failures": dict(sorted(check_fail.items())),
         "judge_overall": round(statistics.mean(judged), 2) if judged else None,
@@ -542,7 +552,7 @@ def render_markdown(summary: Dict, results: List[Dict]) -> str:
         f"- Usage: {json.dumps(s['usage'])}", "",
         "| Category | Cases | Pass % |", "|---|---|---|",
     ]
-    lines += [f"| {c} | {v['cases']} | {v['pass_rate']} |" for c, v in s["by_category"].items()]
+    lines += [_category_row(c, v) for c, v in s["by_category"].items()]
     if s["check_failures"]:
         lines += ["", "Check failures: " + ", ".join(f"{k}={v}" for k, v in s["check_failures"].items())]
     lines += ["", "| Case | Route | Pass | Judge | Latency | Failed checks |", "|---|---|---|---|---|---|"]
@@ -565,6 +575,16 @@ def render_markdown(summary: Dict, results: List[Dict]) -> str:
         lines.append(f"| {r['id']} | {r.get('route', '-')} | {status} | {str(score)[:120]} "
                      f"| {r['latency_s']}s | {'; '.join(failed)[:160]} |")
     return "\n".join(lines)
+
+
+def _category_row(cat: str, v: Dict) -> str:
+    """One category row, saying how many of its cases actually ran."""
+    graded = v.get("graded", v["cases"])
+    if graded == v["cases"]:
+        return f"| {cat} | {v['cases']} | {v['pass_rate']} |"
+    if not graded:
+        return f"| {cat} | {v['cases']} | - (none ran) |"
+    return f"| {cat} | {v['cases']} | {v['pass_rate_graded']} (of {graded} that ran) |"
 
 
 def compare(old: Dict, new: Dict) -> Dict:
@@ -662,9 +682,22 @@ def render_compare(diff: Dict) -> str:
     lines = ["# Comparison", "", "| Metric | Old | New | Delta |", "|---|---|---|---|"]
     for k, v in diff["metrics"].items():
         lines.append(f"| {k} | {v['old']} | {v['new']} | {v['delta']} |")
-    lines += ["", "Category pass-rate delta: " + json.dumps(diff["category_pass_delta"]),
-              f"Fixed: {diff['fixed_cases'] or 'none'}",
-              f"Regressed: {diff['regressed_cases'] or 'none'}"]
+    if diff.get("incomparable"):
+        # Do not print Fixed:/Regressed: lists for a diff that is not a
+        # comparison. Run 43009590617 printed eight "Fixed" and five
+        # "Regressed" cases from a baseline graded by unknown logic, directly
+        # above the line saying the reports do not measure the same suite. A
+        # reader takes the list, not the caveat -- which is exactly how the
+        # 35% got believed. The metrics table stays: it is a fact about two
+        # reports, just not a fact about the app.
+        lines += ["",
+                  "Case-level deltas withheld -- the two runs do not measure the "
+                  "same suite, so \"fixed\" and \"regressed\" would be an artefact "
+                  "of the instrument, not the app."]
+    else:
+        lines += ["", "Category pass-rate delta: " + json.dumps(diff["category_pass_delta"]),
+                  f"Fixed: {diff['fixed_cases'] or 'none'}",
+                  f"Regressed: {diff['regressed_cases'] or 'none'}"]
     if diff.get("newly_not_graded"):
         lines.append(f"Newly NOT GRADED: {diff['newly_not_graded']}")
     if diff.get("check_failure_delta"):
