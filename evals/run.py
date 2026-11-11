@@ -543,7 +543,14 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
     # unaffected.
     expected_tools = case.get("expected_tools") or []
     tools_ok = None
-    if expected_tools:
+    if expected_tools and graded:
+        # Only a case we actually observed can be scored on tool use. A case
+        # that was not graded (rate limit, timeout) has no calls because it never
+        # ran, and `set(expected) <= set()` is False -- so it used to enter the
+        # recall denominator as a failure. On 2026-11-11 that printed
+        # "tool recall 0.0%" when the single case declaring expected_tools
+        # (team-slack-bot) had been refused by the provider. That is finding 6
+        # in miniature: a measurement that never happened, reported as a bad one.
         called = {c["name"] for c in calls}
         tools_ok = set(expected_tools) <= called
         passed = passed and tools_ok
