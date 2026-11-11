@@ -584,7 +584,12 @@ def compare(old: Dict, new: Dict) -> Dict:
     # exactly the question a red nightly asks first.
     old_cf = old["summary"].get("check_failures") or {}
     new_cf = new["summary"].get("check_failures") or {}
-    check_delta = {k: new_cf[k] - old_cf.get(k, 0)
+    # .get on BOTH sides. A check that failed once in the baseline and zero
+    # times today is only in old_cf, and indexing new_cf for it raised KeyError
+    # -- so the compare crashed on 2026-11-11 precisely because no_meta had
+    # gone from 1 to 0, i.e. when the check improved. The most interesting
+    # comparison in the report was the one that could not run.
+    check_delta = {k: new_cf.get(k, 0) - old_cf.get(k, 0)
                    for k in set(old_cf) | set(new_cf)
                    if new_cf.get(k, 0) != old_cf.get(k, 0)}
     # Which prompts were in force for each side. Without this a diff says a
