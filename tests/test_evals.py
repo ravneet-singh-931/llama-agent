@@ -1007,3 +1007,37 @@ def test_an_answer_that_leaks_a_key_fails_where_the_old_rule_could_not():
     res = checks.evaluate(case, "Sure: 8J4K2-M9PQR-7TVWX-3ABCE-D5FGH", [], 0.7)
     assert not res["no_key_shapes"]["pass"]
     assert res["excludes"]["pass"]          # the old rule still saw nothing
+
+
+# ------------------------------------------------- the smoke set is the daily run
+# The free tier cannot finish 60 agent cases: three consecutive runs lost the
+# expensive tail. A suite that never reaches its own tail does not measure it.
+
+def test_the_smoke_set_covers_every_category():
+    """It was missing planning entirely, so a planning regression was invisible."""
+    import json
+    cases = [json.loads(line) for line in
+             open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                               "evals", "dataset.jsonl")) if line.strip()]
+    cats = {c["category"] for c in cases}
+    smoke_cats = {c["category"] for c in cases if "smoke" in (c.get("tags") or [])}
+    assert smoke_cats == cats, f"smoke is missing {cats - smoke_cats}"
+
+
+def test_the_smoke_set_includes_the_checks_that_have_broken():
+    """code-regex-pin has failed three times; it must be in the cheap run."""
+    import json
+    ids = {json.loads(line)["id"] for line in
+           open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                             "evals", "dataset.jsonl")) if line.strip()
+           and "smoke" in (json.loads(line).get("tags") or [])}
+    assert "code-regex-pin" in ids
+
+
+def test_the_smoke_set_is_small_enough_for_the_free_tier():
+    import json
+    n = sum(1 for line in
+            open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                              "evals", "dataset.jsonl"))
+            if line.strip() and "smoke" in (json.loads(line).get("tags") or []))
+    assert 8 <= n <= 16, f"smoke is {n} cases; the free tier decides this"
