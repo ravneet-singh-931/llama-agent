@@ -40,8 +40,9 @@ changed and why the pass rate moved):
 | planning | 5 |
 | analysis | 4 |
 
-The fact cases include one about a prize that doesn't exist. 11 cases are tagged
-`smoke` for a quick, cheap run that still covers most categories.
+The fact cases include one about a prize that doesn't exist. 12 cases are tagged
+`smoke` for a quick run that still covers **every** category, and includes the
+checks that have broken before.
 
 A case may declare `needs_sources` — only those are checked for figure grounding,
 because a plan's budget and timeline come from the request, not from a search
@@ -74,7 +75,7 @@ notice, not a red build, because a job must not go red for reasons unrelated to 
 Run it inside the API pod. That's where the keys and the deployed code are.
 
 ```bash
-# Quick smoke run (11 cases, 8 of 9 categories, about 10-15 min on the free tier)
+# Quick smoke run (12 cases, all 9 categories, about 5 min on the free tier)
 kubectl -n llama-agent exec deploy/llama-agent-api -- \
   python -m evals.run --tags smoke --out /tmp/eval-smoke.json
 
@@ -92,6 +93,22 @@ python -m evals.run --compare baseline.json new.json --fail-on-regression
 `--pause` (default 10 s) spaces the cases out so the free tier's per-minute
 token window can refill. Free-tier **daily** token caps also apply, so prefer
 `--tags smoke` for routine checks.
+
+### Pacing decides whether a full run finishes
+
+Measured from a real run: ~5,239 input tokens per case. A 60-case run is about
+**314,000 tokens**, and the free tier allows **7,000 input tokens per minute**
+per model. Sustaining that needs **45+ minutes minimum**, so the pause between
+cases is what keeps the run under the limit:
+
+| `--pause` | total time | sustained rate |
+|---|---|---|
+| 10 s | ~35 min | 8,981/min -- **over the cap**, loses the tail to 429s |
+| 25 s | ~50 min | ~6,300/min -- comfortable |
+| 30 s | ~55 min | ~5,715/min |
+
+The nightly uses `--pause 25` and a 90-minute job timeout. A run that dies
+halfway is not measuring the app; it is measuring the provider.
 
 Note: `kubectl exec` runs in one pod, and its report lives in that pod's `/tmp`.
 Copy it out before the pod restarts.

@@ -1041,3 +1041,41 @@ def test_the_smoke_set_is_small_enough_for_the_free_tier():
                               "evals", "dataset.jsonl"))
             if line.strip() and "smoke" in (json.loads(line).get("tags") or []))
     assert 8 <= n <= 16, f"smoke is {n} cases; the free tier decides this"
+
+
+# ------------------------------------------------- pacing, not case count
+# Two full runs died at case 40-52. The cause was never "too many cases": the
+# 11:09 run sustained 7,567 tokens/min against a 7,000 ITPM cap and lost its
+# tail to 429s. The pause between cases is the only knob that fixes it.
+
+def test_the_nightly_pause_can_sustain_a_full_run():
+    """Fail if someone lowers --pause below what a 60-case run can afford."""
+    import re
+    wf = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                      ".github", "workflows", "nightly-evals.yml")
+    text = open(wf).read()
+    m = re.search(r"evals\.run[^\n]*--pause\s+(\d+)", text)
+    assert m, "the nightly no longer passes --pause; pacing is unmanaged"
+    pause = int(m.group(1))
+
+    # measured: ~5,239 input tokens per case, ~25 s of work per case
+    tokens_per_min = 5239 * 60 / (25 + pause)
+    assert tokens_per_min < 7000, (
+        f"--pause {pause} sustains {tokens_per_min:,.0f} tokens/min against a "
+        f"7,000 ITPM cap; the run will lose its tail to 429s")
+    assert pause >= 20
+
+
+def test_the_nightly_runs_the_full_suite_by_default():
+    wf = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                      ".github", "workflows", "nightly-evals.yml")
+    text = open(wf).read()
+    assert 'SCOPE="full"' in text, "the schedule should run all 60 cases"
+
+
+def test_the_job_timeout_allows_a_full_run():
+    import re
+    wf = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                      ".github", "workflows", "nightly-evals.yml")
+    m = re.search(r"timeout-minutes:\s*(\d+)", open(wf).read())
+    assert m and int(m.group(1)) >= 80
