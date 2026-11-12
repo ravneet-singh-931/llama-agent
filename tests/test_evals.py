@@ -1368,3 +1368,122 @@ def test_the_request_budget_wins_even_when_the_case_has_room_left():
     finally:
         G.case_budget_end()
     assert G.estimate_tokens(fitted) <= G.input_budget(model)
+
+
+# ------------------------------------- a category cannot call a regression on noise
+# 2026-11-12 13:15: the suite's best run ever -- pass rate 60.0 -> 76.7, judge
+# +0.10, grounding +0.225, fabrication -6.2 -- was reported as REGRESSION
+# because safety fell 12.5 and coding 8.4 while twelve of fifteen categories
+# improved. `analysis` has 4 cases, so one flip is -25 points.
+
+def _mk_result(cat, cid, passed=True, graded=True):
+    return {"id": cid, "category": cat, "prompt": "x", "route": "general",
+            "passed": passed, "graded": graded, "latency_s": 1.0,
+            "checks": {}, "judge": ({"overall": 5} if graded else None),
+            "judge_sources": "", "usage": {}, "tools": [], "tool_recall": None,
+            "steps": 0, "redundant_steps": 0, "reasoning": [], "answer": "a"}
+
+
+_EVIDENCE = {"checks": "same", "judge": "same", "dataset": "same"}
+
+
+def _mk_report(spec, failing=()):
+    """spec: {category: number_of_cases}. Built through the runner's summarize()."""
+    results = []
+    for cat, n in spec.items():
+        for i in range(n):
+            cid = f"{cat}-{i}"
+            results.append(_mk_result(cat, cid, passed=cid not in failing))
+    # `evidence` present and identical on both sides, or compare() correctly
+    # calls the diff incomparable and never reaches the category lines.
+    from evals.run import summarize
+    return {"summary": summarize(results), "results": results,
+            "evidence": dict(_EVIDENCE)}
+
+
+def _rep(pass_rate, judge, ground, fab, cats, evidence=None):
+    """A report dict with explicit summary numbers, for compare() tests."""
+    return {"summary": {"cases": 60, "graded": 57, "pass_rate": pass_rate,
+                        "judge_overall": judge, "grounding_rate": ground,
+                        "fabrication_rate": fab, "latency_p50_s": 3.0,
+                        "latency_p95_s": 90.0,
+                        "by_category": {c: {"cases": n, "pass_rate": pr}
+                                        for c, (n, pr) in cats.items()},
+                        "not_graded": [], "check_failures": {}},
+            "results": [], "evidence": evidence or dict(_EVIDENCE)}
+
+
+_CATS_GOOD = {"safety": (8, 87.5), "coding": (12, 100.0), "general": (7, 100.0),
+              "research_facts": (7, 28.6), "team": (7, 14.3), "writing": (6, 66.7),
+              "research_news": (4, 25.0), "analysis": (4, 50.0), "planning": (5, 40.0)}
+_CATS_BEST = {"safety": (8, 75.0), "coding": (12, 91.6), "general": (7, 100.0),
+              "research_facts": (7, 57.1), "team": (7, 42.9), "writing": (6, 100.0),
+              "research_news": (4, 50.0), "analysis": (4, 100.0), "planning": (5, 100.0)}
+
+
+def test_the_best_run_the_suite_ever_had_is_not_called_a_regression():
+    """2026-11-12 13:15, verbatim.
+
+    pass rate 60.0 -> 76.7, judge 4.32 -> 4.42, grounding 0.40 -> 0.625,
+    fabrication 16.7 -> 10.5, p95 119.8 -> 85.8. Twelve of fifteen categories
+    improved. The old rule (any negative category) turned that into a red build
+    on safety -12.5 and coding -8.4.
+    """
+    old = _rep(60.0, 4.32, 0.40, 16.7, _CATS_GOOD)
+    new = _rep(76.7, 4.42, 0.625, 10.5, _CATS_BEST)
+    diff = run.compare(old, new)
+    assert diff["metrics"]["pass_rate"]["delta"] > 0
+    assert diff["categories_up"] > diff["categories_down"]
+    assert any(v < 0 for v in diff["category_pass_delta"].values()), \
+        "a negative category is present -- that is what used to trip the gate"
+    assert diff["regression"] is False
+
+
+def test_a_genuine_regression_still_fails_the_build():
+    """The guard must not disarm the detector it protects."""
+    old = _rep(80.0, 4.6, 0.70, 8.0, _CATS_BEST)
+    down = {"safety": (8, 62.5), "coding": (12, 75.0), "general": (7, 85.7),
+            "research_facts": (7, 42.9), "team": (7, 28.6), "writing": (6, 66.7),
+            "research_news": (4, 25.0), "analysis": (4, 50.0), "planning": (5, 60.0)}
+    new = _rep(55.0, 3.9, 0.45, 18.0, down)
+    diff = run.compare(old, new)
+    assert diff["categories_down"] == 9
+    assert diff["regression"] is True
+
+
+def test_one_category_slipping_on_a_flat_run_is_not_a_regression():
+    """Judge variance moves a case; it does not move the app."""
+    old = _rep(80.0, 4.6, 0.70, 8.0, _CATS_BEST)
+    slip = dict(_CATS_BEST)
+    slip["safety"] = (8, 87.5)          # +12.5 is fine; the point is elsewhere
+    slip["safety"] = (8, 62.5)          # one case down
+    new = _rep(80.0, 4.6, 0.70, 8.0, slip)
+    diff = run.compare(old, new)
+    assert diff["category_pass_delta"]["safety"] == -12.5
+    assert diff["regression"] is False
+
+
+def test_a_small_category_alone_never_fails_the_build():
+    """`analysis` has 4 cases, so one flip is -25 points."""
+    cats_old = dict(_CATS_BEST)
+    cats_new = dict(_CATS_BEST)
+    cats_old["analysis"] = (4, 100.0)
+    cats_new["analysis"] = (4, 75.0)
+    diff = run.compare(_rep(80.0, 4.6, 0.70, 8.0, cats_old),
+                       _rep(80.0, 4.6, 0.70, 8.0, cats_new))
+    assert diff["category_signal"]["analysis"]["counts_as_regression"] is False
+    assert diff["regression"] is False
+
+
+def test_the_report_names_the_negative_category_it_did_not_count():
+    """A filter that silently suppresses a red build is the same failure as a
+    guard that never fires: the reader must be able to disagree."""
+    cats_old = dict(_CATS_BEST)
+    cats_new = dict(_CATS_BEST)
+    cats_old["analysis"] = (4, 100.0)
+    cats_new["analysis"] = (4, 50.0)
+    text = run.render_compare(run.compare(
+        _rep(80.0, 4.6, 0.70, 8.0, cats_old),
+        _rep(80.0, 4.6, 0.70, 8.0, cats_new)))
+    assert "NOT counted as regressions" in text
+    assert "analysis" in text
