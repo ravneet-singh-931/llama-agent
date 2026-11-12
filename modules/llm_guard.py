@@ -499,6 +499,74 @@ def _wait_for_room(window: "TokenWindow", model: str, need: int) -> float:
     return waited
 
 
+# ------------------------------------------------------- per-case token budget
+#
+# input_budget() is a PER-CALL cap: fit_messages() trims only when a single
+# request would exceed it. A team case makes ~15 calls (5 steps x ~3 tool
+# rounds) and each one sits comfortably UNDER that cap, so nothing is ever
+# trimmed and the per-call guard never fires.
+#
+# The sum is what costs money, and nothing owned the sum. Measured
+# 2026-11-12: 5 steps x 3 rounds x ~3,500 tokens = ~52,500 tokens for ONE
+# team case, and 7 team cases = ~367,000 against a 200,000/day free tier.
+# A full 60-case run needs ~314,000 -> it could never fit, so every run lost
+# its tail. See finding 11 for three earlier versions of this same mistake:
+# a guard attached one scope too low.
+#
+# This is the missing scope. A caller opens a case budget, every
+# prepare_call() inside it is accounted against that budget, and once the
+# budget is spent further calls are refused rather than silently spending
+# another 50k. Refusing is the point: a team case that cannot finish should
+# come back short and say so, not quietly cost a week of quota.
+
+_CASE_BUDGET = threading.local()
+
+
+def case_budget_start(tokens: Optional[int] = None) -> None:
+    """Open a per-case token budget for the current thread.
+
+    Default is EVAL_CASE_TOKEN_BUDGET or 9,000. Nine thousand is not a guess:
+    a 60-case run is 7 team cases plus 53 cheap ones (~2,500 each = 132,500),
+    and the free tier allows 200,000/day, so the seven expensive cases must
+    average under (200,000 - 132,500) / 7 = 9,642 tokens to fit at all. 9,000
+    leaves headroom. A case that needs more cannot be measured on this tier,
+    and it is reported as `budget` rather than silently overspending.
+    """
+    limit = tokens
+    if limit is None:
+        limit = int(os.getenv("EVAL_CASE_TOKEN_BUDGET", "9000") or 9000)
+    _CASE_BUDGET.stack = [_CASE_BUDGET.spent if hasattr(_CASE_BUDGET, "spent") else 0,
+                          int(limit)]
+
+
+def case_budget_end() -> int:
+    """Close the budget and return the tokens the case actually spent."""
+    spent = getattr(_CASE_BUDGET, "spent", 0)
+    if hasattr(_CASE_BUDGET, "stack"):
+        _CASE_BUDGET.stack = None
+    _CASE_BUDGET.spent = 0
+    return spent
+
+
+def case_budget_spent() -> int:
+    return int(getattr(_CASE_BUDGET, "spent", 0))
+
+
+class CaseBudgetExceeded(RuntimeError):
+    """Raised when a case has spent its token budget."""
+
+
+def _case_limit() -> Optional[int]:
+    stack = getattr(_CASE_BUDGET, "stack", None)
+    return stack[1] if stack else None
+
+
+def _charge_case(tokens: int) -> None:
+    if _case_limit() is None:
+        return
+    _CASE_BUDGET.spent = int(getattr(_CASE_BUDGET, "spent", 0)) + int(tokens or 0)
+
+
 def prepare_call(model: str, messages: List[Dict],
                  tools: Optional[List[Dict]] = None) -> Tuple[str, List[Dict], int]:
     """Pick the model and fit the messages before a completion call.
@@ -509,6 +577,43 @@ def prepare_call(model: str, messages: List[Dict],
     strong, fast = resolve_model("strong"), resolve_model("fast")
 
     est = estimate_tokens(messages, tools)
+
+    # Per-case budget, checked BEFORE the call is paid for. A team case that
+    # has spent its allowance must stop here rather than spend another 3.5k
+    # tokens on every remaining round. Raising is deliberate: the caller turns
+    # it into a short answer, which is honest, instead of a case that costs a
+    # week of quota and still may not be graded.
+    limit = _case_limit()
+    if limit is not None:
+        spent = case_budget_spent()
+        if spent >= limit:
+            _metric(model, "case_budget_exceeded")
+            raise CaseBudgetExceeded(
+                f"case token budget exhausted: {spent:,}/{limit:,} tokens spent")
+        if spent + est > limit:
+            # Last chance: fit this call into what is left of the case budget
+            # rather than refusing outright. A smaller final round can still
+            # finish the step, and finishing is better than truncating.
+            #
+            # No floor here. A floor would let the charge exceed the limit --
+            # the guard is supposed to bound the spend, and "it only went over
+            # by 420" is the same defect it exists to prevent. If almost
+            # nothing is left, the next call is refused instead.
+            remaining = limit - spent
+            fitted, trimmed = fit_messages(messages, remaining, tools)
+            cost = est - trimmed
+            if cost > remaining:
+                _metric(model, "case_budget_exceeded")
+                raise CaseBudgetExceeded(
+                    f"case token budget exhausted: {spent:,}/{limit:,} tokens spent")
+            _charge_case(cost)
+            if trimmed:
+                note(f"Case budget {spent + est:,}/{limit:,} - compacted this call "
+                     f"to {remaining:,} tokens")
+                _metric(model, "compacted", trimmed)
+            return model, fitted, est - trimmed
+        _charge_case(est)
+
     window = get_window()
     proactive = os.getenv("LLM_PROACTIVE_DOWNGRADE", "1") == "1"
     if proactive and model == strong and strong != fast:

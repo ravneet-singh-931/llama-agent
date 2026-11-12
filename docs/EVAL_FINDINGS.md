@@ -732,3 +732,73 @@ stick was wrong far more often than the thing being measured.
 
 **A second correction to the same family:** the posts said "11 grader bugs". The number is **15**,
 and it grew every time someone audited a disagreement instead of picking a side.
+
+---
+
+# THE BRIDGE TO THE AGENTS PART
+
+## Finding 17 — The budget was per call. The quota was per day. Nobody owned the product.
+
+This one starts with a quota problem and ends up being the best bug in the set.
+
+**The situation.** A full 60-case run needs ~314,000 input tokens. The free tier allows
+**200,000 per day** (finding 15). So every full run lost its tail, and the obvious conclusion was
+"we need a bigger tier or fewer cases."
+
+**What was actually true.** The cost was not spread evenly. **Seven `@team` cases were 57% of the
+whole budget** — 18,000–49,000 tokens each, against ~2,500 for an ordinary case.
+
+**Where the tokens went.** `llm_guard.input_budget()` returns **6,000 tokens** and
+`fit_messages()` trims a request only when it *exceeds* that. A team case is **5 steps × ~3 tool
+rounds ≈ 15 separate calls**, and each one sits at ~3,500 tokens — comfortably *under* the cap.
+
+> So the trimmer never fires. Nothing is ever trimmed. Fifteen calls of 3,500 silently add up to
+> **~52,500 tokens for one case.**
+
+I searched for anything that owned the total — `per_case`, `case_budget`, `max_total_tokens`,
+`total_budget`. **Nothing exists.** The per-call guard is real, tested, and pointed at the wrong
+thing, so the sum is unowned and free.
+
+**The fix.** A **per-case token budget** in `prepare_call()`, the funnel every model call already
+passes through. A caller opens a budget, every call inside is charged against it, the last call
+that would overshoot is compacted to what remains, and once the budget is spent further calls are
+**refused** rather than silently spending another 3,500.
+
+Refusing is the point. A case that cannot finish should come back short and say so — become a
+`budget` route, reported **not graded** — rather than quietly costing a week of quota and possibly
+not being graded anyway.
+
+**The number that justifies 9,000.** 60 cases = 7 team + 53 cheap (~2,500 each = 132,500). The tier
+allows 200,000, so the expensive seven must average under (200,000 − 132,500) ÷ 7 = **9,642**.
+9,000 leaves headroom:
+
+| | team | other | total | vs 200,000 |
+|---|---|---|---|---|
+| before | 367,500 | 132,500 | **500,000** | over by 300,000 |
+| after (9,000/case) | 63,000 | 132,500 | **195,500** | **fits** |
+
+**304,500 tokens saved per run** — a run and a half of quota recovered, from one guard at the right
+scope.
+
+**A bug I introduced and caught.** My first version left a 500-token floor on the compaction, so a
+case could spend **20,420 of 20,000** — over by 420. That is the exact defect the guard exists to
+prevent, in the guard. The floor is gone; if almost nothing remains, the next call is refused.
+
+**The pattern, now five for five.**
+
+| Finding | Guard scope | Should have been |
+|---|---|---|
+| 11a | per **future** | per level |
+| 11b | between **events** | on the call that blocks |
+| 11c | per **case**, checked too late | the blocking call |
+| tool recall | per case that **ran** | per case that was **graded** |
+| **17** | per **call** | per **case** |
+
+> **Every guard in this system was attached one level too low.** That is not five bugs. It is one
+> design habit, and it is the thread that runs from the eval part into the agents part.
+
+**Proof:** `test_a_case_can_no_longer_overspend_its_budget`,
+`test_the_budget_does_not_exceed_its_limit_by_a_rounding_slop`,
+`test_the_default_case_budget_lets_a_full_run_fit_the_daily_tier`,
+`test_a_case_that_spends_its_budget_is_not_graded`,
+`test_no_budget_means_the_old_behaviour_is_untouched` (a plain chat request is never refused).
