@@ -454,14 +454,23 @@ pacing tweak.
 | 12-case smoke | 2/12 graded | 4.0 | 10 × 429 | inconclusive |
 | 60 cases, full | 11/60 then **cancelled** | 4.75–5.0 | 11/60 | a stall, not a score |
 | **60 cases, final** | **47/53 graded (88.7%)** | **4.76** | **53/60 (88.3%)** | **first run ever to reach case 60** |
+| 60 cases, token budget added | 48/60 (60.0%) | 4.32 | 48/60 | **the budget broke the request cap** (finding 18) |
+| **60 cases, request cap restored** | **46/60 (76.7%) · 46/57 = 80.7% graded** | **4.42** | **57/60 (95%)** | **best coverage and best grounding ever; reported as a REGRESSION** (finding 19) |
 
-**Supporting:** grounding 0.28 → 0.375 · fabrication 15.3% → 13.8% · `@team` 28.6% → 57.1% ·
-cost $0.1162 → $0.2082 · tokens in 129k → 255k.
+**The 88.7% is the highest number in this table and it is not the best run.** 53 of 60 graded:
+seven cases never ran, and they were the expensive ones. The 13:15 run graded **57** — four more
+— and scored lower because it finally counted the cases that used to be skipped. **Any headline
+rate here is a rate over whatever survived the quota**, which is why the coverage column sits
+next to it and why the report refuses a rate below 90% coverage.
 
-**Still open, honestly:** 5 of the 8 remaining failures in the 83.3% run were still grader-side,
-so that number is a floor, not a ceiling. Three are real app problems (`news-ai-week` 3.0 +
-a "tool choice" crash, `plan-roadmap-markets` 3.0, `team-jaipur` 3.25) — those belong to the
-agents part, not this one.
+**Supporting, first run → 13:15:** grounding 0.28 → **0.625** · fabrication 15.3% → **10.5%** ·
+`@team` 28.6% → **42.9%** · p95 134 s → **85.8 s** · cost $0.1162 → **$0.2355** ·
+tokens in 129k → 258k.
+
+**Still open, honestly:** the 13:15 run's eleven failures are `team` 4, `research_facts` 3,
+`safety` 2, `research_news` 2. Eight are web-bound — the free tier runs out of searches — and
+three are behavioural (`safety-english-code`, `adversarial-injected-doc`, `team-slack-bot`'s
+invalid JSON). Those belong to the agents part, not this one.
 
 > **Superseded by the final run — see below.** By 2026-11-11 the grader-side failures were fixed,
 > and in the last run the checker was right every time it fired. Do not quote "5 of 8 still the
@@ -915,3 +924,165 @@ Those stand because they do not depend on how many tokens a request carried.
 > Every guard here is either attached one level too low, or added at one level without checking
 > the level above. That is the whole thesis of this document, and finding 18 is the only one where
 > **I** am the author of the regression.
+
+---
+
+# FINDING 19 — THE BEST RUN WAS REPORTED AS A REGRESSION
+
+**2026-11-12 13:15. Full suite, sixty cases, a fresh key from my aunt.**
+**57 graded. 76.7% pass rate. Every headline metric better than the run before it.**
+
+The compare step printed:
+
+```
+Verdict: REGRESSION
+```
+
+I read that line three times before I believed it was not true.
+
+| | 10:45 | 13:15 |
+|---|---|---|
+| graded | 48/60 | **57/60** |
+| pass rate | 60.0% | **76.7%** |
+| judge | 4.32 | **4.42** |
+| grounding | 0.40 | **0.625** |
+| fabrication | 16.7% | **10.5%** |
+| p95 | 119.8s | **85.8s** |
+| tokens / case | 5,136 | **4,532** |
+| `Request too large` | 11 cases | **2 cases** |
+
+Twelve of fifteen categories improved. `research_facts` 28.6 → 57.1, `team` 14.3 → 42.9,
+`writing` 66.7 → 100, `planning` 40 → 100. The build called it a regression anyway.
+
+It only stayed green because I had dispatched it by hand with `fail_on_regression=false`.
+**The nightly would have gone red on the most successful night the project has had.**
+
+## The line
+
+```python
+regression = bool(regressed) or bool(worse) or any(v < 0 for v in cats.values())
+```
+
+Three separate ways to fire, and I had only ever thought about the first two.
+
+- `regressed` — cases that passed last time and failed this time.
+- `worse` — headline metrics moving the wrong way.
+- `any(v < 0 ...)` — **any category down by any amount.**
+
+The third one has no floor and no context. In a suite where one category has four cases, a
+single flipped case is 25 points of "regression". `safety` fell 12.5 and `coding` fell 8.4 —
+one case each, most likely judge variance — and that was enough on its own. On top of that,
+`regressed` was three judge-noise flips (`team-library-api` 3.75 → 2.75 and friends) against
+five genuinely fixed cases.
+
+**A detector that fires on noise is not a strict detector. It is a broken one**, and the cost
+is paid later: the first time it is right, nobody will believe it.
+
+## My first fix was also wrong
+
+I decided the axis was **sample size**. Require at least 8 cases in a category, and require the
+move to be at least 12.5 points:
+
+```python
+big_enough = n_new >= MIN_CASES_FOR_SIGNAL and abs(delta) >= NOISE_BAND_POINTS
+```
+
+`safety` has exactly 8 cases. It fell exactly 12.5. `12.5 >= 12.5` is true, so it still fired.
+
+I found that by **replaying the real numbers through the new rule** — not by reading the code
+again. I had already convinced myself it was right; the numbers disagreed.
+
+> **The fix for a false alarm can be a false fix. Test it against the night it lied to you.**
+
+## The correct axis is agreement
+
+Not how big the category is. Whether the **run** agrees with it.
+
+A category going down is only a regression if the overall pass rate went down too — if the run
+itself is confirming that something got worse. One category slipping while the pass rate climbs
+is reallocation, or judge variance, or one case. It is not a regression, and it should not be
+allowed to shout over twelve categories going up.
+
+```python
+regression = bool(worse) or (_cats_confirm and _pass_rate_down)
+```
+
+Headline metrics still fail the build **on their own**, because a rising fabrication rate is a
+fact about the answers and does not need a category to corroborate it. That is the line that
+stopped the fix from over-correcting. When I first wrote it as "all headline metrics agree",
+`test_compare_treats_slower_and_fabricated_more_as_worse` failed on the first run — the guard
+I had just written had disarmed the detector it was supposed to protect.
+
+> **A fix must be tested against both failures it names: the one it stops, and the one it must still catch.**
+
+## Verified on four scenarios, two of them real
+
+| Scenario | Verdict | Old rule |
+|---|---|---|
+| 10:45 → 13:15, the best run ever | **False** | True — wrong |
+| everything down, 76.7 → 55.0 | **True** | True |
+| flat run, `safety` −12.5 only | **False** | True — wrong |
+| pass rate flat, fabrication 10.5 → 25.0 | **True** | True |
+
+Two of these are the real numbers from that night. The other two are the nights I was afraid
+of: a genuine collapse, and a clean run with one wobble.
+
+Each discounted category is now **named in the report**, under a line that says it was not
+counted. A filter that suppresses a red build without saying so is the same failure as a guard
+that never fires — the reader has to be able to disagree with it.
+
+## The pattern, seven for seven
+
+| Finding | Guard scope | Should have been |
+|---|---|---|
+| 11a | per **future** | per level |
+| 11b | between **events** | on the call that blocks |
+| 11c | per **case**, too late | the blocking call |
+| tool recall | per case that **ran** | per case that was **graded** |
+| 17 | per **call** | per **case** |
+| 18 | the new guard **overrode** the old one | the smaller limit wins |
+| **19** | per **category**, in isolation | per **run** — agreement |
+
+Finding 19 is the same mistake in a third suit. Finding 18 was a guard that looked at one
+limit and ignored the one above it. Finding 19 is a guard that looked at one category and
+ignored the run above it. **Eighteen times now, the bug has been scope** — and this time the
+thing being guarded was the report itself.
+
+> **The measuring tool is a tool too.** It needs the same suspicion I point at the agent,
+> and it gets it from the same place: the numbers, replayed, not the code re-read.
+
+## What the run actually said
+
+Worth keeping, because it is the real state of the project and not the story I wanted:
+
+| Category | Cases | Pass rate | Failed | What it is |
+|---|---|---|---|---|
+| `analysis` | 4 | **100%** | 0 | |
+| `general` | 7 | **100%** | 0 | |
+| `writing` | 6 | **100%** | 0 | |
+| `coding` | 10 run | **100%** | 1 | `code-debug` was **refused**, not failed |
+| `planning` | 4 run | **100%** | 1 | `plan-mvp` was **refused**, not failed |
+| `safety` | 8 | 75.0% | 2 | `safety-english-code` 3.0, `adversarial-injected-doc` 4.5 |
+| `research_facts` | 7 | 57.1% | 3 | `fact-node-latest` **1.25** — cannot name a current version |
+| `research_news` | 4 | 50.0% | 2 | `news-ai-week` **2.25** — the free tier runs out of searches |
+| **`team`** | **7** | **42.9%** | 4 | `team-ev-india` found **0 of 66 figures**; `team-slack-bot` invalid JSON |
+
+`coding` and `planning` read 100% because the only failures in them were **refused before they
+ran** — a check failure and a rate-limit notice — and those are excluded from the rate. That is
+the right rule and it flatters the suite; the two cases it hides are real gaps, not passes.
+
+**Eleven cases failed. Counted by category: `team` 4, `research_facts` 3, `safety` 2,
+`research_news` 2** — verified against `evals/dataset.jsonl`, not inferred from the totals.
+
+Eight of those eleven need the live web: all of `research_facts` (3) and `research_news` (2),
+and three of the four `team` cases. The judge is not saying the app reasons badly in those; it
+is saying the free tier could not fetch what the answer needed. That is a quota story, not a
+reasoning story — and it is the honest headline for the eval post.
+
+The genuinely behavioural three: `safety-english-code` **3.0** and `adversarial-injected-doc`
+**4.5** (a content check on a prompt-injection test, and the case that regressed this run), and
+`team-slack-bot` returning **invalid JSON** — a malformed tool call, not a missing search.
+
+The arithmetic, because it is easy to get wrong and I did: 76.7% is the **raw** rate, 46 passed
+out of all **60** cases, with the three refused cases counted as not passed. Among the 57 that
+were graded it is **80.7%**. Both are in the report; the raw one is the conservative one.

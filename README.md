@@ -61,14 +61,32 @@ on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 
 | What | Result | How it was measured |
 |---|---|---|
-| **Agent quality** | **50/60 cases passed (83.3%)**, judge average 4.56 / 5 — *5 of the 8 remaining failures are still the grader's fault, so this is a floor* ([why](#agent-eval-30-60-cases)) | 60 prompts in 9 categories: rule checks + figure grounding + LLM judge, nightly in CI |
-| **Regression detection** | every run is diffed against the previous one; CI fails on a real regression | `evals.run --compare … --fail-on-regression`, artifacts kept per run |
+| **Agent quality** | **46/60 (76.7%)** — that is **46 of 57 graded = 80.7%**; 3 cases were refused by the free tier and are reported as not graded, not as failures. Judge average 4.42 / 5 ([what still fails](#what-still-fails)) | 60 prompts in 9 categories: rule checks + figure grounding + LLM judge, nightly in CI |
+| **Regression detection** | every run is diffed against the previous one; CI fails when the run agrees something got worse | `evals.run --compare … --fail-on-regression`, artifacts kept per run ([finding 19](#-bugs-found-and-fixed): the detector used to call the best run a regression) |
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
 | **Tests** | 730 passed, 6 skipped, 17 deselected (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
-| **Cost** | $0.26 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (finding 22) |
-| **Bugs found and fixed** | 24 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
+| **Cost** | $0.24 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (row 22) |
+| **Bugs found and fixed** | 38 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
+
+### What still fails
+
+The latest full run is **not clean, and the failures are not random**. Three categories are
+web-dependent and the free tier runs out of searches before they finish:
+
+| Category | Pass rate | What it means |
+|---|---|---|
+| `research_facts` | 57.1% | `fact-node-latest` scored **1.25** — it cannot name a current version from a search that returned nothing usable |
+| `research_news` | 50.0% | `news-ai-week` **2.25** — same cause, news is the most token-hungry thing here |
+| **`team`** | **42.9%** | `team-ev-india` found **0 of 66 figures** in its sources; `team-slack-bot` returned invalid JSON |
+| `safety` | 75.0% | `safety-english-code` **3.0**, and a prompt-injection case failed its content check |
+
+By case, the eleven failures are **`team` 4, `research_facts` 3, `safety` 2, `research_news` 2**.
+Three of the `team` failures and all of `research_facts` / `research_news` are web-bound; the
+rest are real (a safety answer, an injected-document answer, malformed JSON from a tool call).
+**A higher score here would mostly mean a bigger quota, not a better agent** — and saying that
+plainly is more useful than rounding 76.7% up.
 
 The most useful finding: **the LLM judge alone misses invented numbers.** Every failed
 case in the 30-case run had figures that were in no source, and the judge still scored them
@@ -212,18 +230,31 @@ into CI, where it runs nightly against one commit and is diffed against the prev
 
 | | 30 cases, by hand (2026-10-25) | 60 cases, first nightly | **60 cases, current** |
 |---|---|---|---|
-| Passed | 26/30 (**87%**) | 45/60 (75%) → **81.7%** | **50/60 (83.3%)** |
-| Judge average | 4.88 / 5 | 4.43 / 5 | **4.56 / 5** |
-| Grounding rate | — | 0.28 | **0.375** |
-| Fabrication flagged | — | 15.3% | **13.8%** |
-| `@team` cases passing | — | 28.6% | **57.1%** |
+| Graded | 30/30 | 60/60 | **57/60** (3 refused by the free tier) |
+| Passed | 26/30 (**87%**) | 45/60 (75%) → **81.7%** | **46/60 (**76.7%**) — 46/57 = 80.7% of those graded** |
+| Judge average | 4.88 / 5 | 4.43 / 5 | **4.42 / 5** |
+| Grounding rate | — | 0.28 | **0.625** |
+| Fabrication flagged | — | 15.3% | **10.5%** |
+| `@team` cases passing | — | 28.6% | **42.9%** |
+| p95 latency | — | 134 s | **85.8 s** |
 | Where it runs | by hand, 3 versions | nightly, one commit | nightly, diffed |
 
-**The score went 87% → 75% → 83.3%, and every step of that is explained — including a time
-it reported 35%.** The 75% is a floor, not a reading: **4 of its 15 failures were the grader's**,
-not the app's. Restore them and the same 60 questions read **49/60 = 81.7%** (the denominator
-stays at 60 — the claim is that the *grader* failed those four, not that the app passed them).
-[Details](docs/EVAL_FINDINGS.md).
+**The pass rate went 87% → 75% → 76.7%, and it is lower than it looks.** The 30-case suite was
+smaller, run by hand on the strongest version, and had none of `@team`. The 57 graded here
+include harder cases, and three of them the free tier refused to run at all. The number that
+moved most is not the pass rate — it is **grounding, 0.28 → 0.625**, and **`Request too large`
+falling from 11 cases to 2** after the request cap was restored (row 39).
+
+**Every step of that is explained — including a time it reported 35%.** The 75% was a floor,
+not a reading: **4 of its 15 failures were the grader's**, not the app's, so the same 60
+questions read **49/60 = 81.7%** (the denominator stays at 60 — the claim is that the *grader*
+failed those four, not that the app passed them). [Details](docs/EVAL_FINDINGS.md).
+
+**One thing went backwards and it is worth naming:** the pass rate peaked at 83.3% on a run
+that graded all 60 cases, and this run is 76.7% on 57. The difference is not a regression in
+the app — `Request too large` fell from 11 cases to 2, grounding doubled, and p95 dropped by a
+third. It is that the earlier 83.3% came from a run where the two hardest categories were
+partly skipped. **Both numbers are honest; only one of them had all its worst cases counted.**
 
 That 35% is the most useful number in this table, and it was **not a measurement of the
 app.** The nightly hit the free tier's token limit at case 29; the remaining 31 cases came
@@ -253,14 +284,14 @@ four, not that the app passed them. The rest was the grader:
   `AGENT_STEP_TIMEOUT`s, because the timeout was applied per future instead of per level.
 
 Every one of those is fixed, each with a test that fails without the fix
-([findings 19–27](#-bugs-found-and-fixed)). **5 of the 8 remaining failures today are still
-the grader's fault**, so 83.3% remains a floor rather than a ceiling.
+([findings 19–27](#-bugs-found-and-fixed)). Those fixes are why the graded count went 48 → 57
+and grounding 0.40 → 0.625: **most of what "improved" was the measuring stick, not the app.**
 
 #### Why nightly, and why the diff matters
 
 60 cases is 120+ real model calls, so it cannot gate a pull request. It runs on a schedule,
-and the value is not the pass rate but the **delta**: one run says "83.3%"; two runs say
-"`write-essay-topic` flipped, coding dropped 8 points, fabrication up 3%". `compare()`
+and the value is not the pass rate but the **delta**: one run says "76.7%"; two runs say
+"`write-essay-topic` flipped, `research_facts` gained 28 points, fabrication down 6%". `compare()`
 reports exactly that, fails the job on a real regression, and labels a diff taken across a
 prompt edit (`prompt_changed`) so a flip cannot be blamed on the model when the prompt moved.
 
@@ -325,10 +356,12 @@ Found by running the system (evals, metrics, logs, deploys) and by review. Each 
 version that fixed it and a test or a before/after number as proof; details are in the
 [CHANGELOG](CHANGELOG.md).
 
-**Rows 19–37 are the eval work: 16 findings.** Fifteen were in the harness — the grader, the
-runner, the report, the diff — and **one was in the app** (row 21, a per-future timeout in
-`multi_agent.py`). None was in the model's behaviour, which is the point of the section: the
-measuring stick was wrong far more often than the thing being measured. The long-form write-up,
+**Rows 19–39 are the eval work: 21 findings.** Nineteen were in the harness — the grader, the
+runner, the report, the diff, the regression gate, the token budget — and **two were in the app**
+(row 21, a per-future timeout in `multi_agent.py`, and row 39, a request the guard made too large).
+None was in the model's behaviour, which is the point of the section: the measuring stick was
+wrong far more often than the thing being measured — and twice it was wrong about its **own
+verdict**, calling the best run a regression (row 19, 2026-11-12) and the worst run a pass. The long-form write-up,
 with the corrected headline figures, is in
 [docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md).
 
@@ -373,6 +406,8 @@ with the corrected headline figures, is in
 | 35 | A **fresh API key did not fix the lost tail** | Two independent problems, and only one was obvious. Quota: a full run needs ~314,330 input tokens. Pace: at a 10 s pause the run finished in ~35 min, which is **7,567–8,981 tokens/min against a 7,000 cap — 108% of the meter**. A new key gives you the budget; it does not stop you spending it faster than allowed | Pause 25 s (60 cases × 25 s ≈ 50 min ≈ 6,300/min) and the job timeout raised 60 → 90 min. A full run has a **45-minute floor** whatever else you do: 314,330 ÷ 7,000 | `test_the_nightly_pause_can_sustain_a_full_run`, `test_the_job_timeout_allows_a_full_run` (≥ 80 min) |
 | 36 | Every full run lost its tail **no matter how it was paced** | The per-minute cap was the only one measured. The other cap was inferred from a 12-case run that spent 4,313 tokens and still 429'd on 10 of 12 — impossible under a 7,000/min limit. Then a full run printed it: `tokens per day (TPD): Limit 200000, Used 198265, Requested 4506` | Recorded: **200,000 tokens/day** on the fast model, against ~314,000 for a full run. **A full run does not fit inside one day of the free tier** — the per-minute cap decides where a run *starts*, the daily cap decides where it *ends*. Reaching 60/60 graded needs a paid tier or a smaller suite, not another pacing tweak | `summarize()` reports coverage per category and refuses a headline rate below 90%, so a capped tail is named instead of averaged in — `test_a_half_run_report_is_inconclusive_not_a_pass_rate` |
 | 37 | **`tool recall 0.0%`** on a run where the only relevant case never ran | Exactly one case declares `expected_tools` (`team-slack-bot`) and the provider refused it. An ungraded case has no calls, so `set(expected) <= set()` was `False` and **the case entered the recall denominator as a failure** — a case that never executed scored against the agent | Recall only scores cases that were actually graded, so one ungraded case reports *nothing* rather than *zero*. Silencing a measurement and disarming it are different things | `test_a_case_that_never_ran_is_not_scored_on_tool_recall`, and `test_a_graded_case_that_skipped_its_tools_still_counts_as_a_miss` so the fix cannot disarm the measurement it protects |
+| 38 | **The best run in the project's history was reported as a REGRESSION** | `regression = bool(regressed) or bool(worse) or any(v < 0 for v in cats.values())` — three ways to fire, and the third has no floor. On 2026-11-12 13:15 the run posted its best numbers ever: pass rate 60.0 → **76.7%**, judge 4.32 → 4.42, grounding 0.40 → **0.625**, fabrication 16.7 → **10.5%**, p95 119.8 → **85.8 s**, twelve of fifteen categories up. `safety` fell 12.5 (one case of eight) and `coding` 8.4, and that alone turned the verdict red. It stayed green only because it was dispatched by hand with `fail_on_regression=false`; the nightly would have failed on the most successful night the project has had. **My first fix was also wrong**: I assumed the axis was sample size (≥ 8 cases, ≥ 12.5 points) but `safety` has exactly 8 cases and fell exactly 12.5, so it still fired. Found by replaying the real numbers, not by re-reading the code | The axis is **agreement**, not size: a category going down counts only when the overall pass rate went down with it. `regression = bool(worse) or (_cats_confirm and _pass_rate_down)`. Headline metrics still fail the build alone — a rising fabrication rate is a fact about the answers — which is what stopped the fix from disarming the detector it protects | `test_the_best_run_the_suite_ever_had_is_not_called_a_regression` (real 13:15 numbers: False, was True), `test_a_genuine_regression_still_fails_the_build` (True), `test_one_category_slipping_on_a_flat_run_is_not_a_regression` (False), and `test_compare_treats_slower_and_fabricated_more_as_worse` caught the over-correction on the first run |
+| 39 | A fix for the lost tail **removed the cap it was meant to protect** | The case token budget (`EVAL_CASE_TOKEN_BUDGET`, 9,000) was fitted to `limit - spent` and returned early whenever it did not fit — so it silently **overrode** the per-request ceiling of 6,000. Eleven cases were refused with `Request too large` and **not one** with `route=budget`, because that branch never refuses: it compacts and returns. The guard looked like it was working while bypassing the thing it was protecting. **110 tests did not catch it**: every one asserted the *case* budget was respected, and none asserted the *request* ceiling still was | The smaller limit wins: `remaining = min(limit - spent, input_budget(model))`. **A fix that adds a limit must be tested against the limit it sits next to** | `test_a_call_near_the_case_limit_is_still_capped_by_the_request_budget`, `test_the_request_budget_wins_even_when_the_case_has_room_left` — both fail with the bug restored. Live: `Request too large` 11 cases → **2**, `guard_compacted` fired for the first time, grounding 0.40 → 0.625 |
 
 **Operations runbook items** (no code change): a kubelet image pull that hung was fixed by
 pulling with `crictl pull` and deleting the stuck pods; Prometheus uses a ReadWriteOnce volume,
