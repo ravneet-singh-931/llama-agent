@@ -1234,3 +1234,90 @@ def test_a_graded_case_that_skipped_its_tools_still_counts_as_a_miss():
                          "route": "team", "answer": "an answer", "reasoning": []})
     assert r["graded"] and r["tool_recall"] is False
     assert run.summarize([r])["tool_recall"] == 0.0
+
+
+# ------------------------------------------- the case budget (2026-11-12)
+# A team case made ~15 calls of ~3,500 tokens each. Every call was under the
+# 6,000-token PER-CALL cap, so fit_messages never trimmed anything, and
+# nothing owned the sum: ~52,500 tokens for one case, ~367,000 for the seven
+# team cases, against a 200,000/day free tier. Every full run lost its tail.
+
+def test_a_case_can_no_longer_overspend_its_budget():
+    from modules import llm_guard as G
+    msgs = [{"role": "user", "content": "x" * 14000}]      # ~4,248 tokens
+    G.case_budget_start(20000)
+    calls = 0
+    try:
+        for _ in range(20):
+            G.prepare_call("qwen/qwen3.8-27b", msgs)
+            calls += 1
+    except G.CaseBudgetExceeded:
+        pass
+    spent = G.case_budget_end()
+    assert spent <= 20000, f"the guard is supposed to bound spend, spent {spent}"
+    assert calls < 20, "the budget never stopped the run"
+
+
+def test_the_budget_does_not_exceed_its_limit_by_a_rounding_slop():
+    """An earlier version left a 500-token floor and overshot by 420.
+
+    'It only went over by 420' is the same defect the guard exists to prevent.
+    """
+    from modules import llm_guard as G
+    msgs = [{"role": "user", "content": "x" * 14000}]
+    G.case_budget_start(20000)
+    try:
+        for _ in range(20):
+            G.prepare_call("qwen/qwen3.8-27b", msgs)
+    except G.CaseBudgetExceeded:
+        pass
+    assert G.case_budget_end() <= 20000
+
+
+def test_no_budget_means_the_old_behaviour_is_untouched():
+    """A plain chat request must not start being refused."""
+    from modules import llm_guard as G
+    msgs = [{"role": "user", "content": "hello"}]
+    model, out, est = G.prepare_call("qwen/qwen3.8-27b", msgs)
+    assert model and out and est > 0
+
+
+def test_a_case_that_spends_its_budget_is_not_graded():
+    """It has no answer, and marking it not-graded is what keeps it out of the
+    pass rate -- same treatment a timeout gets, for the same reason."""
+    from modules import llm_guard as G
+
+    def budget_killer(prompt, dsa=True, timeout_s=300):
+        G.case_budget_start(1)
+        raise G.CaseBudgetExceeded("case token budget exhausted: 1/1")
+
+    r = run.run_case({"id": "team-cafe", "category": "team", "prompt": "x",
+                      "checks": {}},
+                     use_judge=False, dsa=False, grounding_threshold=0.7,
+                     judge_threshold=3.5, timeout_s=5.0,
+                     executor=budget_killer)
+    assert r["route"] == "budget"
+    assert not r["graded"]
+    assert run.summarize([r])["not_graded"] == ["team-cafe"]
+
+
+def test_the_default_case_budget_lets_a_full_run_fit_the_daily_tier():
+    """9,000 is a measured number, not a preference.
+
+    60 cases = 7 team + 53 cheap (~2,500 each = 132,500). The free tier allows
+    200,000/day, so the expensive cases must average under 9,642 each. If a
+    future edit raises the default past that, a full run stops fitting and
+    every nightly loses its tail again -- silently.
+    """
+    import json
+    import os as _os
+    assert _os.getenv("EVAL_CASE_TOKEN_BUDGET") is None, "env would mask the default"
+    from evals import run as _run
+    default = 9000                       # keep in step with case_budget_start()
+    with open(_run.DATASET) as fh:
+        cases = [json.loads(line) for line in fh]
+    team = sum(1 for c in cases if c["category"] == "team")
+    cheap = len(cases) - team
+    total = team * default + cheap * 2500
+    assert total <= 200000, (
+        f"a full run would need {total:,} tokens against a 200,000/day tier")

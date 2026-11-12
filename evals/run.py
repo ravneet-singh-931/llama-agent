@@ -93,6 +93,8 @@ def order_by_cost(cases: List[Dict]) -> List[Dict]:
 # per case, so a generous cap costs nothing when the provider is healthy.
 _JUDGE_TIMEOUT_S = float(os.getenv("EVAL_JUDGE_TIMEOUT", "180"))
 
+_CASE_SPEND: Dict[str, int] = {}
+
 _ORIGINAL_DISPATCH = None
 
 
@@ -488,12 +490,34 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
     t0 = time.monotonic()
 
     def _run():
+        # A case is the unit that costs money, so it is the unit that gets a
+        # budget. Without this, llm_guard's per-CALL cap never fires (every
+        # call fits) and a team case spends ~52,500 tokens of a 200,000/day
+        # tier. See the finding in docs/EVAL_FINDINGS.md.
+        from modules import llm_guard as _guard
+        _guard.case_budget_start()
         with ToolRecorder() as rec:
             try:
                 return rec, executor(case["prompt"], dsa=dsa, timeout_s=timeout_s)
+            except _guard.CaseBudgetExceeded as e:
+                # The case ran out of its token allowance. That is not a crash
+                # and not a silent truncation: it is a case that could not be
+                # finished within the budget we were willing to spend on it, and
+                # the report needs to say so by name.
+                return rec, {"route": "budget", "answer": "", "reasoning": [],
+                             "error": f"case token budget exhausted: {e}"[:300]}
             except Exception as e:
                 return rec, {"route": "error", "answer": "", "reasoning": [],
                              "error": f"{type(e).__name__}: {e}"[:300]}
+            finally:
+                spent = _guard.case_budget_end()
+                if spent:
+                    # Recorded per case so the report can show what a case
+                    # actually cost, not just what the whole run cost.
+                    try:
+                        _CASE_SPEND[case["id"]] = spent
+                    except Exception:
+                        pass
 
     # One span per case. A failing nightly case used to leave only its answer
     # text and the judge's verdict in the report; the reasoning chain was
@@ -510,8 +534,9 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
     results = checks.evaluate(case, out["answer"], calls, grounding_threshold,
                               route=out.get("route"))
     verdict, graded, judge_src = None, True, ""
-    if out.get("route") == "timeout":
-        # The case was abandoned, so there is no answer to grade. Marking it
+    if out.get("route") in ("timeout", "budget"):
+        # The case produced nothing to grade: it was abandoned at its deadline,
+        # or it spent its token allowance before it could finish. Marking it
         # not-graded keeps it out of the pass rate and out of the judge, and
         # names it in the report -- the same treatment a provider notice gets,
         # for the same reason: we did not observe the app, so we do not score.
