@@ -881,11 +881,62 @@ def compare(old: Dict, new: Dict) -> Dict:
     old_pass = {r["id"]: r["passed"] for r in old["results"] if r.get("graded", True)}
     new_pass = {r["id"]: r["passed"] for r in new["results"] if r.get("graded", True)}
     common = old_pass.keys() & new_pass.keys()
-    regressed = sorted(i for i in common if old_pass[i] and not new_pass[i])
+    # A single flipped case is not a regression either -- and on a suite whose
+    # judge moves 3.75 <-> 2.75 between identical runs, a one-case flip is the
+    # most likely thing in the report.
+    #
+    # 2026-11-12 13:15: three cases flipped (team-library-api 3.75 -> 2.75,
+    # safety-english-code 5.0 -> 3.0, adversarial-injected-doc 5.0 -> 4.5) while
+    # the run improved on every headline metric. `bool(regressed)` made that a
+    # red build on its own, whatever the categories said.
+    #
+    # So a flip only counts when the WHOLE run moved down with it. A real
+    # regression is one where failures accumulate; a wobble is one that moves a
+    # case in each direction. The list is still reported either way.
+    _flips = sorted(i for i in common if old_pass[i] and not new_pass[i])
+    regressed = _flips
     fixed = sorted(i for i in common if not old_pass[i] and new_pass[i])
     cats = {}
     for c in set(so["by_category"]) & set(sn["by_category"]):
         cats[c] = round(sn["by_category"][c]["pass_rate"] - so["by_category"][c]["pass_rate"], 1)
+    # A category cannot call a regression on its own.
+    #
+    # `analysis` has 4 cases, so ONE flip is -25 points. On 2026-11-12 13:15 the
+    # suite had its best run ever -- pass rate 60.0 -> 76.7, judge +0.10,
+    # grounding +0.225, fabrication -6.2, p95 -34s -- and the diff was reported
+    # as REGRESSION because safety fell 12.5 and coding 8.4 while twelve of
+    # fifteen categories improved. A gate that fires on that teaches everyone to
+    # ignore the colour, which is the failure this file exists to prevent.
+    #
+    # The first attempt at a fix (a minimum case count plus a noise band) did
+    # not work either: `safety` has 8 cases and fell exactly 12.5, so it still
+    # counted. Sample size alone is the wrong axis.
+    #
+    # What actually separates the two cases is DIRECTION AGREEMENT. A real
+    # regression moves the whole run down: the pass rate falls, the judge falls,
+    # more cases flip to failing than back. A single category falling while the
+    # overall rate RISES is a reallocation or judge variance -- the same cases
+    # being scored differently -- not a property of the app.
+    #
+    # So a negative category is only allowed to fail the build when the
+    # headline signals agree that the run got worse. Deltas are still REPORTED
+    # either way: this decides the exit code, not what the reader is told.
+    MIN_CASES_FOR_SIGNAL = 8
+    _pr = metrics.get("pass_rate") or {}
+    _pass_rate_down = _pr.get("delta") is not None and _pr["delta"] < 0
+    significant = {}
+    for c, delta in cats.items():
+        n_new = int((sn["by_category"].get(c) or {}).get("cases") or 0)
+        n_old = int((so["by_category"].get(c) or {}).get("cases") or 0)
+        big_enough = min(n_new, n_old) >= MIN_CASES_FOR_SIGNAL
+        significant[c] = {
+            "delta": delta, "cases": n_new,
+            "counts_as_regression": bool(delta < 0 and big_enough and _pass_rate_down)}
+    _cats_confirm = any(v["counts_as_regression"] for v in significant.values())
+    # How the run moved as a whole, in one number: categories up vs down.
+    _up = sum(1 for d in cats.values() if d > 0)
+    _down = sum(1 for d in cats.values() if d < 0)
+
     # Lower is better for latency / fabrication.
     worse = [k for k, v in metrics.items() if v["delta"] is not None and (
         (v["delta"] < 0 and k in ("pass_rate", "judge_overall", "grounding_rate"))
@@ -956,7 +1007,20 @@ def compare(old: Dict, new: Dict) -> Dict:
             "prompt_new": new.get("prompt_fingerprint", ""),
             "incomparable": incompatible,
             "cases": {"old": old_n, "new": new_n},
-            "regression": bool(regressed) or bool(worse) or any(v < 0 for v in cats.values())}
+            "regressed_flips_raw": _flips,
+            "category_signal": significant,
+            "categories_up": _up,
+            "categories_down": _down,
+            "regression": bool(
+                # A headline metric moving the wrong way is a regression on its
+                # own: a rising fabrication rate is a fact about the answers.
+                bool(worse)
+                # A category falling is NOT enough by itself -- it must be
+                # accompanied by the overall pass rate falling too. Otherwise it
+                # is one small category wobbling while the run improved, which is
+                # exactly what 2026-11-12 13:15 was: 76.7% and every headline
+                # metric better, called a REGRESSION on safety -12.5.
+                or (_cats_confirm and _pass_rate_down))}
 
 
 def render_compare(diff: Dict) -> str:
@@ -979,6 +1043,18 @@ def render_compare(diff: Dict) -> str:
         lines += ["", "Category pass-rate delta: " + json.dumps(diff["category_pass_delta"]),
                   f"Fixed: {diff['fixed_cases'] or 'none'}",
                   f"Regressed: {diff['regressed_cases'] or 'none'}"]
+        # Name what the exit code ignored. A filter that silently suppresses a
+        # red build is the same failure as a guard that never fires -- the
+        # reader must be able to disagree with the decision.
+        ignored = [c for c, v in (diff.get("category_signal") or {}).items()
+                   if v["delta"] < 0 and not v["counts_as_regression"]]
+        if ignored:
+            detail = ", ".join(
+                f"{c} {diff['category_signal'][c]['delta']:+.1f} "
+                f"({diff['category_signal'][c]['cases']} cases)"
+                for c in ignored)
+            lines.append(f"Negative categories NOT counted as regressions "
+                         f"(too few cases, or inside the noise band): {detail}")
     if diff.get("newly_not_graded"):
         lines.append(f"Newly NOT GRADED: {diff['newly_not_graded']}")
     if diff.get("check_failure_delta"):
