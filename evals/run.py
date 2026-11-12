@@ -1144,6 +1144,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--fail-on-regression", action="store_true")
     ap.add_argument("--selftest", action="store_true",
                     help="exercise every check against synthetic answers, no API calls")
+    ap.add_argument("--record", metavar="DIR",
+                    help="record every model and tool call to DIR (spends quota once)")
+    ap.add_argument("--replay", metavar="DIR",
+                    help="replay a recorded run from DIR: no provider calls, no quota")
     args = ap.parse_args(argv)
 
     if args.compare:
@@ -1169,6 +1173,33 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not cases:
         print("No cases selected.")
         return 2
+
+    # Record or replay. Both are opt-in, so the nightly path is untouched.
+    #
+    # A replay spends no tokens and answers from evals/recordings/, which is
+    # the only way a run of this suite can be reproduced by someone who is not
+    # the author: a full run needs ~314,330 input tokens and the free tier
+    # allows 200,000 a day, so it cannot be re-run from scratch at all.
+    rec = None
+    if args.record or args.replay:
+        from modules import recording as _rec
+        if args.record and args.replay:
+            print("--record and --replay are mutually exclusive.")
+            return 2
+        if args.replay:
+            if not os.path.isdir(args.replay):
+                print(f"No recording at {args.replay}.")
+                return 2
+            # Set before any agent module is imported: llama_agent1 exits at
+            # import time without a key, and a replay has no use for one.
+            os.environ["EVAL_RECORD_MODE"] = "replay"
+            rec = _rec.Recording.begin(args.replay, "replay")
+            print(f"Replaying {args.replay} - no provider calls, no quota.")
+        else:
+            os.environ["EVAL_RECORD_MODE"] = "record"
+            rec = _rec.Recording.begin(args.record, "record")
+            print(f"Recording to {args.record} - this run spends quota once.")
+
     print(f"Running {len(cases)} case(s)...", flush=True)
     results = []
     for i, case in enumerate(cases, 1):
@@ -1180,8 +1211,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         status = "PASS" if r["passed"] else ("NOT GRADED" if not r["graded"] else "FAIL")
         print(f"[{i}/{len(cases)}] {r['id']:<22} {r['route']:<16} "
               f"{status}  judge={j}  {r['latency_s']}s", flush=True)
-        if i < len(cases) and args.pause > 0:
+        # The pause exists to let the free-tier token window refill. A replay
+        # spends no tokens, so it would add 25 s per case to nothing: 60 cases
+        # of pure waiting on a run that takes seconds.
+        if i < len(cases) and args.pause > 0 and not args.replay:
             time.sleep(args.pause)
+
+    replay_stats = None
+    if rec is not None:
+        replay_stats = rec.stats()
+        rec._save_manifest()
+        rec.__class__.stop()
 
     summary = summarize(results)
     report = {"created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1193,6 +1233,12 @@ def main(argv: Optional[List[str]] = None) -> int:
               # delta a regression when this differs between the two reports.
               "evidence": evidence_fingerprint(),
               "args": vars(args),
+              # Which container served these answers: "provider" means the
+              # model really ran, "replay" means they came from a recording.
+              # A replayed report must never be mistaken for a live one.
+              "served_by": ("replay" if args.replay
+                            else "recorded" if args.record else "provider"),
+              "replay_stats": replay_stats,
               "summary": summary, "results": results}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:

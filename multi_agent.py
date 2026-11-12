@@ -318,9 +318,19 @@ class InstrumentedGroqClient:
 
             # LLMOps guard: route around the per-minute token limit and
             # compact the request to fit the model's input budget.
-            from modules import llm_guard
-            model, messages, est = llm_guard.prepare_call(
-                model, list(kwargs.get("messages", [])), kwargs.get("tools"))
+            from modules import llm_guard, recording
+            # During an eval *replay* the guard is skipped on purpose. It picks
+            # the model and rewrites the messages from the LIVE rate-limit
+            # window, so two replays of the same recording would hash
+            # differently and miss every key. The guard exists to protect
+            # quota; a replay spends none.
+            replaying = recording.replaying()
+            if replaying:
+                messages = list(kwargs.get("messages", []))
+                est = 0
+            else:
+                model, messages, est = llm_guard.prepare_call(
+                    model, list(kwargs.get("messages", [])), kwargs.get("tools"))
             llm = self._llm(model)
 
             def _call(msgs):
@@ -358,12 +368,50 @@ class InstrumentedGroqClient:
                 yield first
                 yield from rest
 
+            # The identity of this call, for record/replay. Everything that
+            # can change the answer is in here: the model, the exact messages
+            # (date pinned, see modules/recording.py), the tool schema and the
+            # sampling parameters. Anything omitted would let two different
+            # requests share a key.
+            identity = {
+                "model": model,
+                "messages": messages,
+                "tools": kwargs.get("tools"),
+                "max_tokens": kwargs.get("max_tokens"),
+                "stream": bool(kwargs.get("stream")),
+                "tool_choice": kwargs.get("tool_choice"),
+            }
+
+            def _dispatch_call():
+                """Perform the real request, capturing a stream in full.
+
+                A stream has to be drained to be recorded, and draining it here
+                would consume the caller's generator. So in record mode the
+                chunks are collected into a list, saved, and then replayed from
+                that list - the caller still receives a generator, and what it
+                receives is exactly what the model produced.
+                """
+                if not kwargs.get("stream"):
+                    return recording.encode_response(_call(messages))
+                try:
+                    gen = _call_streaming(messages)
+                except StopIteration:
+                    return []                  # empty stream: nothing to replay
+                return recording.encode_stream(list(gen))
+
             try:
+                if replaying or recording.mode() == "record":
+                    payload = recording.llm_call(identity, _dispatch_call)
+                    if not replaying:
+                        recording.stamp_date()
+                    if kwargs.get("stream"):
+                        return recording.decode_stream(payload)
+                    return recording.decode_response(payload)
                 result = _call_streaming(messages) if kwargs.get("stream") else _call(messages)
             except StopIteration:
                 result = iter(())              # empty stream, nothing to replay
             except Exception as e:
-                if not llm_guard.is_request_too_large(e):
+                if replaying or not llm_guard.is_request_too_large(e):
                     raise
                 messages, est = llm_guard.shrink_for_retry(
                     model, messages, kwargs.get("tools"))

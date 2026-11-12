@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- **Eval record/replay (`modules/recording.py`).** A full 60-case run needs
+  ~314,330 input tokens and the free tier allows 200,000 a day, so the suite
+  could not be reproduced by anyone who did not have the CI logs. Every model
+  reply and every tool result is now recorded once and replayed for zero
+  tokens:
+
+      python evals/run.py --record evals/recordings/<run>   # once
+      python evals/run.py --replay evals/recordings/<run>   # free, no API key
+
+  Three things had to be captured, not one. The model replies (both the
+  streaming and non-streaming paths), the tool results - a replay that called
+  Tavily would spend quota and return a different answer - and **the date**.
+  `today_str()` is injected into every system prompt, so a recording made on
+  Tuesday replayed on Wednesday would hash differently and miss every key;
+  the date is stored in `manifest.json` and pinned during replay.
+
+  Two guards on the guard, because a replay that silently falls back to the
+  provider is worse than no replay at all: a missing key raises
+  `RecordingMiss` rather than hitting the network, and a replay runs with no
+  API key at all - refusing to import without one would defeat the purpose of
+  ever having a recording. `EVAL_RECORD_MODE=off` is the default and a pure
+  no-op, so the nightly is unchanged.
+
+  The LLM guard is skipped during replay on purpose: `prepare_call()` picks a
+  model and rewrites the messages from the **live** rate-limit window, so two
+  replays of one recording would hash differently. The guard protects quota;
+  a replay spends none.
+
+### Added
 - **A ceiling on what one user can spend.** `llm_guard` has always bounded
   tokens per *minute*, globally — nothing bounded a single tenant across runs,
   so one client looping a `@team` request could consume the whole organisation

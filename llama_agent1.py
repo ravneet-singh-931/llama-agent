@@ -176,7 +176,15 @@ if _groq_key:
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    raise SystemExit("GROQ_API_KEY not set. Add it to your environment or a .env file.")
+    # An eval replay serves every model reply and tool result from disk, so it
+    # needs no key at all. Refusing to start without one would mean the one
+    # thing a recording is for -- letting someone reproduce this suite without
+    # a Groq account -- was impossible. Any other mode still requires the key.
+    if (os.getenv("EVAL_RECORD_MODE", "") or "").strip().lower() == "replay":
+        GROQ_API_KEY = "replay-no-key-needed"
+        os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+    else:
+        raise SystemExit("GROQ_API_KEY not set. Add it to your environment or a .env file.")
 
 # Initialize modules
 memory = ConversationMemory()
