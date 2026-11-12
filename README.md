@@ -228,6 +228,22 @@ The suite started at 30 cases, run by hand, split across three app versions beca
 free tier's daily cap runs out after ~15 graded cases. It then doubled to 60 and moved
 into CI, where it runs nightly against one commit and is diffed against the previous run.
 
+**Replay, so the numbers below can be checked by someone else.** A full run needs
+~314,330 input tokens against a 200,000/day limit, so it cannot be reproduced from
+scratch at all — the figures lived only in CI logs. Now every model reply and tool
+result is recorded once, and a replay serves them in seconds for no tokens:
+
+```bash
+python evals/run.py --record evals/recordings/2026-11-12-full   # once, spends quota
+python evals/run.py --replay evals/recordings/2026-11-12-full   # free, no API key needed
+```
+
+A replay never calls the provider and never runs a real tool; a missing key raises
+instead of falling through to the network, because a replay that quietly spends quota
+and returns a different answer is worse than no replay. It proves the **grading** is
+deterministic, not that the agent answers well today — that is still the nightly's job.
+See [`evals/recordings/README.md`](evals/recordings/README.md).
+
 | | 30 cases, by hand (2026-10-25) | 60 cases, first nightly | **60 cases, current** |
 |---|---|---|---|
 | Graded | 30/30 | 60/60 | **57/60** (3 refused by the free tier) |

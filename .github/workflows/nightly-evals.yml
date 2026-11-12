@@ -30,9 +30,9 @@ on:
         type: boolean
         default: true
       scope:
-        description: "full = all 60 (~50 min) | smoke = 12 cases, all 9 categories (~5 min)"
+        description: "full = all 60 (~50 min) | smoke = 12 cases, all 9 categories (~5 min) | record = full + save a replayable recording"
         type: choice
-        options: [full, smoke]
+        options: [full, smoke, record]
         default: full
 
 permissions:
@@ -121,6 +121,12 @@ jobs:
           if [ -z "$SCOPE" ]; then SCOPE="full"; fi   # schedule has no inputs
           ARGS=""
           if [ "$SCOPE" = "smoke" ]; then ARGS="--tags smoke"; fi
+          # `record` runs the full suite AND writes a recording, so the run can
+          # be replayed later for no tokens by anyone - which is the only way
+          # these numbers are reproducible at all. See evals/recordings/README.md.
+          if [ "$SCOPE" = "record" ]; then
+            ARGS="--record evals/recordings/$(date -u +%Y-%m-%d)-full"
+          fi
           echo "Running scope: $SCOPE ($ARGS)"
           set +e
           python -m evals.run $ARGS --out eval-today.json --pause 25
@@ -130,6 +136,15 @@ jobs:
             exit 0
           fi
           exit "$STATUS"
+
+      - name: "💾 Upload the recording (replayable, no quota)"
+        if: steps.key.outputs.have_key == 'true' && inputs.scope == 'record'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-recording-${{ github.run_id }}
+          path: evals/recordings/
+          retention-days: 90
+          if-no-files-found: warn
 
       - name: "📤 Upload today's report"
         if: steps.key.outputs.have_key == 'true'

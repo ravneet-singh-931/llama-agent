@@ -27,6 +27,7 @@ import re
 import time
 from typing import Dict, List, Optional, Tuple
 
+from modules import recording
 from modules.web_tools import web_search, WEB_SEARCH_TOOL
 
 logger = logging.getLogger(__name__)
@@ -223,7 +224,12 @@ def dispatch_tool(name: str, arguments: dict) -> str:
     t0 = time.monotonic()
     ok, detail = True, ""
     try:
-        result = _cap(_dispatch(name, arguments))
+        # An eval replay serves the tool's recorded result instead of running
+        # it. Calling the real tool would go to the network, spend quota and
+        # return a different answer - which is not a replay. See
+        # modules/recording.py.
+        result = _cap(recording.tool_call(
+            name, arguments, lambda: _dispatch(name, arguments)))
         # _dispatch never raises for tools: failures come back as strings
         # ("Tool 'x' failed: ...", "Unknown tool: x"). An audit line that
         # reported SUCCESS for an unknown tool would be worse than none.

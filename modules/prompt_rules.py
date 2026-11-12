@@ -15,7 +15,20 @@ from datetime import datetime, timezone
 def today_str() -> str:
     """Today's date in APP_TIMEZONE (default Asia/Kolkata), e.g.
     'Friday, 23 October 2026 (Asia/Kolkata)'. Falls back to UTC when the
-    zone database is unavailable in the container image."""
+    zone database is unavailable in the container image.
+
+    During an eval *replay* the date comes from the recording instead of the
+    wall clock. Every system prompt carries this string, so a recording made
+    on Tuesday replayed on Wednesday would hash differently and miss every
+    single recorded reply. Pinning the clock is what makes replay possible at
+    all, not a convenience."""
+    try:
+        from modules.recording import today_override
+        pinned = today_override()
+    except Exception:                                  # recording must never break a prompt
+        pinned = None
+    if pinned:
+        return pinned
     tz_name = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
     try:
         from zoneinfo import ZoneInfo
