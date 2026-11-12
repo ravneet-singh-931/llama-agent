@@ -1067,10 +1067,31 @@ def test_the_nightly_pause_can_sustain_a_full_run():
 
 
 def test_the_nightly_runs_the_full_suite_by_default():
+    """The schedule must run all 60 cases, not the 12-case smoke set.
+
+    This guard exists because shrinking the nightly to `smoke` would make the
+    build green while measuring a fifth of the suite. It originally asserted
+    the literal string SCOPE="full" -- which fired when the schedule was
+    changed to `record`, a change that still runs all 60 (the record scope
+    passes --record but no --tags filter). An assertion on the wrong axis
+    tests the spelling instead of the behaviour, so the scope default is read
+    and the two subsets are distinguished by what they select.
+    """
+    import re
     wf = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                       ".github", "workflows", "nightly-evals.yml")
     text = open(wf).read()
-    assert 'SCOPE="full"' in text, "the schedule should run all 60 cases"
+
+    m = re.search(r'if \[ -z "\$SCOPE" \]; then SCOPE="([a-z]+)"', text)
+    assert m, "the schedule's default scope is no longer decidable from the workflow"
+    default = m.group(1)
+    assert default in ("full", "record"), (
+        f"the schedule runs scope={default!r}; only full and record run all 60 cases")
+
+    # And prove the default really selects everything: neither branch adds a
+    # --tags filter for it.
+    assert not re.search(r'"\$SCOPE" =\s*"(full|record)".*--tags', text), \
+        "the default scope filters cases, so it is not the full suite"
 
 
 def test_the_job_timeout_allows_a_full_run():

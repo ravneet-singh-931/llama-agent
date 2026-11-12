@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Changed
+
+- **The scheduled nightly records, and asks whether it can finish first.** The
+  cron runs `scope=record` (all 60 cases, plus a replayable artefact) instead
+  of `full`. Both run the whole suite; only one leaves something a stranger can
+  re-run. The guard that asserts the nightly is not silently shrunk to `smoke`
+  now reads the scope default and what it selects, rather than grepping for the
+  literal `SCOPE="full"` — it fired on this change, which was correct
+  behaviour on the wrong axis.
+
+- **`run.py --preflight`, before a token is spent.** A full run needs ~195,500
+  input tokens after the per-case budget and the cap is 200,000 **per model,
+  per day** — 2.2% headroom. That number was being discovered at case 55.
+  The estimate is category-aware (7 @team × 9,000 + 53 × 2,500), because a
+  flat average reproduces the pre-budget figure and predicts a failure that no
+  longer happens. A run that cannot fit now exits 4 with the arithmetic and
+  three options; `--force` overrides. Under 10% headroom it prints a warning
+  rather than letting a green "fits" imply the run is comfortable.
+
+- **A partial recording is usable.** If the run dies at case 55 the previous
+  behaviour left `llm.jsonl` with content and **no manifest** — and without the
+  recorded date every reply in it is unreplayable, because the date is part of
+  every system prompt. The manifest is now written as soon as the date is
+  stamped, carries `"complete": false`, and the upload step runs on `always()`
+  so a capped night still produces an artefact.
 
 - **Eval record/replay (`modules/recording.py`).** A full 60-case run needs
   ~314,330 input tokens and the free tier allows 200,000 a day, so the suite

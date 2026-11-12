@@ -103,13 +103,18 @@ jobs:
           # token limit; without it the judge starts returning 429s halfway
           # through and the second half of the report is noise.
           #
-          # SCOPE. The free tier cannot finish 60 agent cases in one window.
-          # Three consecutive runs proved it: 52/60, then 40/60, with the
-          # expensive categories starved every time. A suite that never
-          # reaches its own tail does not measure the tail -- so the nightly
-          # now runs the `smoke` set (12 cases, all 9 categories, the checks
-          # that have historically broken) and keeps the full 60 for runs
-          # that can afford them. Coverage matters less than reaching the end.
+          # SCOPE. The scheduled run does the full 60 and records it. The
+          # `smoke` set (12 cases, all 9 categories) is for a manual run when
+          # the day's quota is already partly spent -- which is most evenings,
+          # as the 2026-11-12 20:xx smoke run showed: it spent 54,817 tokens
+          # and still 429'd, because openai/gpt-oss-20b was at 197,342/200,000
+          # from the afternoon.
+          #
+          # The daily cap is per MODEL, not per account, and a full run after
+          # the per-case token budget needs ~195,500 input tokens against
+          # 200,000 -- 2.2% headroom. run.py's preflight now computes that
+          # before the first token is spent and refuses (exit 4) rather than
+          # discovering it at case 55.
           #
           # PAUSE 25, not 10. Measured on the 11:09 run: 5,239 tokens per case
           # over 36 minutes is 7,567 tokens/min against a 7,000 ITPM cap -- 108%
@@ -118,7 +123,11 @@ jobs:
           # so the pause has to carry it: 25s gives ~50 min and ~6,300/min.
           # The old value was not too few cases. It was too much traffic.
           SCOPE="${{ inputs.scope }}"
-          if [ -z "$SCOPE" ]; then SCOPE="full"; fi   # schedule has no inputs
+          # The scheduled run records. It is the one run a day with a whole
+          # day's quota behind it, and a report nobody can reproduce is worth
+          # less than a recording that anyone can replay for free. A manual
+          # `full` run stays unrecorded for when the artefact is not wanted.
+          if [ -z "$SCOPE" ]; then SCOPE="record"; fi   # schedule has no inputs -- see the cron
           ARGS=""
           if [ "$SCOPE" = "smoke" ]; then ARGS="--tags smoke"; fi
           # `record` runs the full suite AND writes a recording, so the run can
@@ -135,10 +144,21 @@ jobs:
             echo "::warning title=Incomplete run::Too few cases were graded for a pass rate to mean anything (provider limits). The report says so; do not quote the pass rate."
             exit 0
           fi
+          # 4 = the preflight refused: the selection cannot fit in one day's
+          # quota, so nothing was spent. That is not a failed build either --
+          # it is an honest answer to "will this finish", given before the hour
+          # and the quota were spent. Warn, do not fail.
+          if [ "$STATUS" -eq 4 ]; then
+            echo "::warning title=Preflight refused::This selection cannot finish inside one day's quota, so nothing was spent. Use the smoke scope or run after the daily reset."
+            exit 0
+          fi
           exit "$STATUS"
 
+      # always(): a run that hits the daily cap at case 55 still leaves a
+      # usable partial recording (manifest says "complete": false). Uploading
+      # only on success would throw away everything the night bought.
       - name: "💾 Upload the recording (replayable, no quota)"
-        if: steps.key.outputs.have_key == 'true' && inputs.scope == 'record'
+        if: always() && steps.key.outputs.have_key == 'true' && (inputs.scope == 'record' || github.event_name == 'schedule')
         uses: actions/upload-artifact@v4
         with:
           name: eval-recording-${{ github.run_id }}
