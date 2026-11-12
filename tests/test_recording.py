@@ -256,7 +256,7 @@ def test_a_recorded_stream_keeps_every_chunk_in_order():
 def test_a_replay_can_start_without_an_api_key(tmp_path, monkeypatch):
     """A recording exists so the suite can be reproduced by someone with no
     Groq account. Refusing to import without a key would defeat that."""
-    import subprocess, sys
+    import subprocess, sys  # nosec B404 - spawns the current interpreter only, fixed argv, no shell
     d = str(tmp_path / "rec")
     Recording.begin(d, "record")
     Recording.stop()
@@ -268,8 +268,9 @@ def test_a_replay_can_start_without_an_api_key(tmp_path, monkeypatch):
         "import llama_agent1; "
         "print('imported with key:', llama_agent1.GROQ_API_KEY)"
     )
-    proc = subprocess.run([sys.executable, "-c", code], env=env,
-                          capture_output=True, text=True, cwd=env["PYTHONPATH"])
+    proc = subprocess.run(  # nosec B603 - fixed argv, sys.executable, no shell
+        [sys.executable, "-c", code], env=env,
+        capture_output=True, text=True, cwd=env["PYTHONPATH"])
     assert proc.returncode == 0, proc.stderr[-800:]
     assert "replay-no-key-needed" in proc.stdout
 
@@ -277,12 +278,12 @@ def test_a_replay_can_start_without_an_api_key(tmp_path, monkeypatch):
 def test_a_normal_run_still_requires_a_key(tmp_path):
     """The exemption is scoped to replay. Everything else must still fail
     loudly rather than start with no credentials."""
-    import subprocess, sys
+    import subprocess, sys  # nosec B404 - spawns the current interpreter only, fixed argv, no shell
     env = {k: v for k, v in os.environ.items() if k != "GROQ_API_KEY"}
     env.pop("EVAL_RECORD_MODE", None)
     env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    proc = subprocess.run([sys.executable, "-c", "import llama_agent1"],
-                          env=env, capture_output=True, text=True,
-                          cwd=env["PYTHONPATH"])
+    proc = subprocess.run(  # nosec B603 - fixed argv, sys.executable, no shell
+        [sys.executable, "-c", "import llama_agent1"], env=env,
+        capture_output=True, text=True, cwd=env["PYTHONPATH"])
     assert proc.returncode != 0
     assert "GROQ_API_KEY not set" in (proc.stderr + proc.stdout)
