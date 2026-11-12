@@ -1321,3 +1321,50 @@ def test_the_default_case_budget_lets_a_full_run_fit_the_daily_tier():
     total = team * default + cheap * 2500
     assert total <= 200000, (
         f"a full run would need {total:,} tokens against a 200,000/day tier")
+
+
+def test_a_call_near_the_case_limit_is_still_capped_by_the_request_budget():
+    """The bug that broke the 2026-11-12 run.
+
+    The case budget (9,000) was allowed to override the per-REQUEST ceiling
+    (input_budget, 6,000): the last-chance branch fitted to "what is left of
+    the case" and returned EARLY, above the normal fit_messages(input_budget)
+    call. So on exactly the calls nearest the limit we sent requests bigger
+    than our own ceiling, and the provider answered
+
+        429 Request too large for model `qwen/qwen3.8-27b`
+
+    11 cases died that way. The old tests asserted the CASE budget was
+    respected; none asserted the per-request cap still was.
+    """
+    from modules import llm_guard as G
+
+    # A single message far larger than the per-request ceiling (6,000 tokens
+    # is ~24,000 chars).
+    big = [{"role": "user", "content": "x" * 60000}]
+
+    G.case_budget_start(9000)
+    try:
+        model, fitted, est = G.prepare_call("qwen/qwen3.8-27b", big)
+    finally:
+        G.case_budget_end()
+
+    ceiling = G.input_budget(model)
+    sent = G.estimate_tokens(fitted)
+    assert sent <= ceiling, (
+        f"sent a {sent:,}-token request against a {ceiling:,}-token ceiling; "
+        "this is what produced the 429 Request too large failures")
+
+
+def test_the_request_budget_wins_even_when_the_case_has_room_left():
+    """With most of the case budget unspent, the request cap must still bind."""
+    from modules import llm_guard as G
+    big = [{"role": "user", "content": "x" * 60000}]
+    G.case_budget_start(9000)
+    try:
+        # spend a little first so the case still has ~8,000 left
+        G.prepare_call("qwen/qwen3.8-27b", [{"role": "user", "content": "y" * 4000}])
+        model, fitted, est = G.prepare_call("qwen/qwen3.8-27b", big)
+    finally:
+        G.case_budget_end()
+    assert G.estimate_tokens(fitted) <= G.input_budget(model)

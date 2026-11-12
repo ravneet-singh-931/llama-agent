@@ -599,10 +599,22 @@ def prepare_call(model: str, messages: List[Dict],
             # the guard is supposed to bound the spend, and "it only went over
             # by 420" is the same defect it exists to prevent. If almost
             # nothing is left, the next call is refused instead.
-            remaining = limit - spent
+            # TWO limits apply to this request, and the smaller one wins:
+            #   * what is left of the CASE budget, and
+            #   * the per-REQUEST ceiling input_budget() (6,000).
+            #
+            # An earlier version fitted to `remaining` alone and returned
+            # early, above the fit_messages(input_budget(model)) call below --
+            # so it silently raised the per-request cap on exactly the calls
+            # closest to the limit. On 2026-11-12 a fresh-quota run failed 11
+            # cases with "429 Request too large for qwen/qwen3.8-27b": our own
+            # request was bigger than our own ceiling, because the case budget
+            # (9,000) was allowed to override it. Two guards, and only the new
+            # one was tested.
+            remaining = min(limit - spent, input_budget(model))
             fitted, trimmed = fit_messages(messages, remaining, tools)
             cost = est - trimmed
-            if cost > remaining:
+            if cost > remaining or cost > input_budget(model):
                 _metric(model, "case_budget_exceeded")
                 raise CaseBudgetExceeded(
                     f"case token budget exhausted: {spent:,}/{limit:,} tokens spent")
@@ -611,7 +623,7 @@ def prepare_call(model: str, messages: List[Dict],
                 note(f"Case budget {spent + est:,}/{limit:,} - compacted this call "
                      f"to {remaining:,} tokens")
                 _metric(model, "compacted", trimmed)
-            return model, fitted, est - trimmed
+            return model, fitted, cost
         _charge_case(est)
 
     window = get_window()
