@@ -356,12 +356,21 @@ Found by running the system (evals, metrics, logs, deploys) and by review. Each 
 version that fixed it and a test or a before/after number as proof; details are in the
 [CHANGELOG](CHANGELOG.md).
 
-**Rows 19–39 are the eval work: 21 findings.** Nineteen were in the harness — the grader, the
-runner, the report, the diff, the regression gate, the token budget — and **two were in the app**
-(row 21, a per-future timeout in `multi_agent.py`, and row 39, a request the guard made too large).
-None was in the model's behaviour, which is the point of the section: the measuring stick was
-wrong far more often than the thing being measured — and twice it was wrong about its **own
-verdict**, calling the best run a regression (row 19, 2026-11-12) and the worst run a pass. The long-form write-up,
+**Rows 19–39 are the eval work: 21 rows, and they are not all eval bugs.** Being precise about
+this matters, because the section's whole claim rests on the count:
+
+- **18 are findings about the measurement** — the grader, the runner, the report, the diff, the
+  regression gate, the token budget.
+- **2 are in the app**: row 21 (a per-future timeout in `multi_agent.py`) and row 39 (a request
+  the guard made too large).
+- **2 are neither**: rows 22 and 23, the cost-tracking bugs — a duplicated spend record and a
+  missing `import os` that priced every call at $0.
+
+Of the 18 measurement findings, **16 are in the harness itself**. The other two (rows 21, 39) are
+app bugs the eval *found*. None was in the model's behaviour, which is the point of the section:
+the measuring stick was wrong far more often than the thing being measured — and twice it was
+wrong about its **own verdict**, calling the best run a regression (row 38, 2026-11-12) and the
+worst run a pass. The long-form write-up,
 with the corrected headline figures, is in
 [docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md).
 

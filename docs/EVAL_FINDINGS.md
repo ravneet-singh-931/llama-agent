@@ -454,7 +454,7 @@ pacing tweak.
 | 12-case smoke | 2/12 graded | 4.0 | 10 × 429 | inconclusive |
 | 60 cases, full | 11/60 then **cancelled** | 4.75–5.0 | 11/60 | a stall, not a score |
 | **60 cases, final** | **47/53 graded (88.7%)** | **4.76** | **53/60 (88.3%)** | **first run ever to reach case 60** |
-| 60 cases, token budget added | 48/60 (60.0%) | 4.32 | 48/60 | **the budget broke the request cap** (finding 18) |
+| 60 cases, token budget added | 36/60 (60.0%) · 36/48 = 75.0% graded | 4.32 | 48/60 | **the budget broke the request cap** (finding 18). The first draft of this row said "48/60 (60.0%)", which is impossible — 48/60 is 80%, and two numbers on one row disagreed with each other for two commits |
 | **60 cases, request cap restored** | **46/60 (76.7%) · 46/57 = 80.7% graded** | **4.42** | **57/60 (95%)** | **best coverage and best grounding ever; reported as a REGRESSION** (finding 19) |
 
 **The 88.7% is the highest number in this table and it is not the best run.** 53 of 60 graded:
