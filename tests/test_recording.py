@@ -287,3 +287,95 @@ def test_a_normal_run_still_requires_a_key(tmp_path):
         capture_output=True, text=True, cwd=env["PYTHONPATH"])
     assert proc.returncode != 0
     assert "GROQ_API_KEY not set" in (proc.stderr + proc.stdout)
+
+
+# ------------------------------------------------- partial / interrupted runs
+
+def test_a_run_that_dies_keeps_a_usable_recording(tmp_path):
+    """The nightly can hit the daily cap at case 55. What it recorded up to
+    that point has to remain replayable - otherwise every capped night is a
+    wasted night, which is the problem this module exists to solve."""
+    d = str(tmp_path / "rec")
+    rec = Recording.begin(d, "record")
+    rec.stamp_date()
+    for i in (1, 2):
+        recording.llm_call({"model": "m", "messages": [{"role": "user", "content": f"Q{i}"}]},
+                           lambda i=i: {"choices": [{"message": {"content": f"A{i}"}}]})
+    # The process exits here, without finish(): emulate by dropping the session.
+    Recording._current = None
+
+    rec2 = Recording.begin(d, "replay")
+    assert rec2.llm({"model": "m", "messages": [{"role": "user", "content": "Q1"}]},
+                    lambda: pytest.fail("missed"))["choices"][0]["message"]["content"] == "A1"
+
+
+def test_an_interrupted_run_still_records_its_date(tmp_path):
+    """Without a date every reply is unreplayable, because the date is part of
+    every system prompt. A partial recording with a date is an artefact; one
+    without is scrap."""
+    import json
+    d = str(tmp_path / "rec")
+    rec = Recording.begin(d, "record")
+    rec.stamp_date()
+    Recording._current = None                        # abrupt exit, no finish()
+
+    manifest = json.load(open(os.path.join(d, recording.MANIFEST_NAME)))
+    assert manifest["run_date"]                      # the date survived
+    assert manifest["complete"] is False             # and it says the run did not finish
+
+
+def test_a_finished_run_is_marked_complete(tmp_path):
+    import json
+    d = str(tmp_path / "rec")
+    rec = Recording.begin(d, "record")
+    rec.stamp_date()
+    rec.finish()
+    manifest = json.load(open(os.path.join(d, recording.MANIFEST_NAME)))
+    assert manifest["complete"] is True
+
+
+def test_a_partial_recording_does_not_claim_the_missing_cases(tmp_path):
+    """The flag protects against a partial run being read as a full one."""
+    d = str(tmp_path / "rec")
+    rec = Recording.begin(d, "record")
+    rec.stamp_date()
+    recording.llm_call({"model": "m", "messages": [{"role": "user", "content": "Q1"}]},
+                       lambda: {"choices": [{"message": {"content": "A1"}}]})
+    rec._save_manifest()                             # still complete=False
+
+    Recording._current = None
+    Recording.begin(d, "replay")
+    with pytest.raises(RecordingMiss):
+        recording.llm_call({"model": "m", "messages": [{"role": "user", "content": "never ran"}]},
+                           lambda: pytest.fail("fell through"))
+    Recording.stop()
+
+
+# ------------------------------------------------------------------ preflight
+
+def test_preflight_uses_the_post_budget_estimate_not_the_old_one():
+    """A flat per-case average reproduces the pre-budget number and predicts a
+    failure that no longer happens: 60 cases after the token budget need
+    ~195,500, not ~272,000."""
+    from evals.run import preflight
+    cases = [{"category": "team"}] * 7 + [{"category": "coding"}] * 53
+    pf = preflight(cases)
+    assert pf["estimated_tokens"] == 195_500     # 7*9000 + 53*2500
+    assert pf["fits"] is True
+
+
+def test_preflight_refuses_a_full_run_on_a_spent_day():
+    from evals.run import preflight
+    cases = [{"category": "team"}] * 7 + [{"category": "coding"}] * 53
+    pf = preflight(cases, already_used=197_342)   # the smoke run's measured spend
+    assert pf["fits"] is False
+
+
+def test_preflight_counts_team_cases_separately():
+    """@team cases cost 3.6x a normal one after the budget. Treating them as
+    ordinary understates a run that is heavy in them - which is exactly the
+    shape of the full suite."""
+    from evals.run import preflight
+    all_team = preflight([{"category": "team"}] * 7)
+    all_other = preflight([{"category": "coding"}] * 7)
+    assert all_team["estimated_tokens"] > all_other["estimated_tokens"] * 3

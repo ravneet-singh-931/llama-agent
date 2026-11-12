@@ -1123,6 +1123,67 @@ def _selftest(cases: List[Dict]) -> int:
     return 1 if problems else 0
 
 
+# ------------------------------------------------------------------ preflight
+#
+# A full run is ~314,330 input tokens against a 200,000/day cap, and the cap is
+# **per model**, not per account. Two runs proved that the expensive way:
+# 2026-11-12T13:15 spent 258,344 input tokens and finished; the smoke run the
+# same evening spent 54,817 and still 429'd, because openai/gpt-oss-20b was
+# already at 197,342/200,000 from the earlier run.
+#
+# So the question "will this run finish?" has an arithmetic answer, and it is
+# worth computing BEFORE spending an hour and a day's quota finding out. A run
+# that stops at case 55 leaves a report nobody can quote and, until now, no
+# recording either.
+#
+# This is a warning, not a gate: `--force` and the default both proceed. A
+# refused run tells you nothing at all, and the coverage gate in summarize()
+# already refuses to publish a pass rate from a partial run.
+
+DAILY_TOKEN_CAP = int(os.getenv("EVAL_DAILY_TOKEN_CAP", "200000") or 200000)
+
+
+def preflight(cases: List[Dict], already_used: int = 0) -> Dict:
+    """Estimate whether the selected cases can finish inside one day's quota.
+
+    Returns a dict rather than printing, so the caller decides and tests can
+    assert on it. The estimate is deliberately crude: it is here to stop an
+    obviously impossible run, not to predict a number to four figures.
+    """
+    # The estimate has to be category-aware, because the per-case token budget
+    # (finding 18) is what changed the arithmetic in the first place. A flat
+    # per-case average reproduces the OLD number and predicts the old failure:
+    # it says 60 cases need ~272,000, which is roughly the pre-budget 258,344
+    # plus drift, when after the budget they need ~195,500.
+    #
+    # docs/EVAL_FINDINGS.md, "the number that justifies 9,000":
+    #   7 @team cases  at 9,000 each          =  63,000
+    #   53 other cases at ~2,500 each         = 132,500
+    #                                          ---------
+    #                                            195,500
+    TEAM_TOKENS = 9000          # EVAL_CASE_TOKEN_BUDGET's default, per case
+    OTHER_TOKENS = 2500
+
+    team = sum(1 for c in cases if c.get("category") == "team")
+    other = len(cases) - team
+    estimate = team * TEAM_TOKENS + other * OTHER_TOKENS
+
+    available = max(0, DAILY_TOKEN_CAP - already_used)
+    return {
+        "cases": len(cases),
+        "team_cases": team,
+        "estimated_tokens": estimate,
+        "daily_cap": DAILY_TOKEN_CAP,
+        "already_used": already_used,
+        "available": available,
+        "fits": estimate <= available,
+        # How much of the day is left after this run, as a percentage. A run
+        # that "fits" at 199,000 of 200,000 fits, and is also one retry away
+        # from not fitting - which is worth saying out loud.
+        "headroom_pct": round(100.0 * (available - estimate) / DAILY_TOKEN_CAP, 1),
+    }
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Run the Llama Agent evaluation suite.")
     ap.add_argument("--dataset", default=DATASET)
@@ -1144,6 +1205,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--fail-on-regression", action="store_true")
     ap.add_argument("--selftest", action="store_true",
                     help="exercise every check against synthetic answers, no API calls")
+    ap.add_argument("--force", action="store_true",
+                    help="run even when the preflight says the quota cannot cover it")
     ap.add_argument("--record", metavar="DIR",
                     help="record every model and tool call to DIR (spends quota once)")
     ap.add_argument("--replay", metavar="DIR",
@@ -1173,6 +1236,41 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not cases:
         print("No cases selected.")
         return 2
+
+    # Does the selection fit in what is left of today's quota? Asked before a
+    # single token is spent. A run that dies at case 55 costs an hour, a day's
+    # quota and produces a report nobody can quote.
+    if not args.replay:
+        pf = preflight(cases)
+        print(f"Preflight: {pf['cases']} cases ({pf['team_cases']} @team) "
+              f"~{pf['estimated_tokens']:,} tokens against a "
+              f"{pf['daily_cap']:,}/day cap -> "
+              f"{'fits' if pf['fits'] else 'DOES NOT FIT'} "
+              f"(headroom {pf['headroom_pct']}%)", flush=True)
+        # "Fits" is not the same as "safe". At 2.2% headroom one retry, one
+        # longer answer or a model change is enough to lose the tail, and the
+        # tail is where the @team cases live. Say so rather than letting a
+        # green line imply the run is comfortable.
+        if pf["fits"] and pf["headroom_pct"] < 10:
+            print(f"  NOTE: {pf['headroom_pct']}% headroom is thin. One retry or a "
+                  f"longer answer can lose the tail, and the tail is the @team "
+                  f"cases. A partial run reports INCONCLUSIVE, not a pass rate.",
+                  flush=True)
+        if not pf["fits"] and not args.force:
+            print("\nThis run cannot finish inside one day's quota. That is not a "
+                  "guess: a full run needs ~195,500 input tokens after the "
+                  "per-case budget (docs/EVAL_FINDINGS.md) and the cap is 200,000 "
+                  "per model, per day.\n"
+                  "  * use --tags smoke for a 12-case run that fits,\n"
+                  "  * wait for the daily reset, or\n"
+                  "  * pass --force to spend the quota and accept a partial run.\n"
+                  "A partial run reports INCONCLUSIVE and refuses a pass rate, "
+                  "which is deliberate.", flush=True)
+            # 4, not 3. Exit 3 already means "the run happened and covered too
+            # little", which the workflow downgrades to a warning. This is a
+            # different thing - nothing ran at all - and it should not be
+            # mistaken for a capped run in a log or a dashboard.
+            return 4
 
     # Record or replay. Both are opt-in, so the nightly path is untouched.
     #
@@ -1220,7 +1318,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     replay_stats = None
     if rec is not None:
         replay_stats = rec.stats()
-        rec._save_manifest()
+        rec.finish()          # marks the recording complete before it is stored
         rec.__class__.stop()
 
     summary = summarize(results)

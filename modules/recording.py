@@ -101,6 +101,8 @@ class Recording:
         self._hits = 0
         self._misses = 0
         self._writes = 0
+        #: set True by finish(); stays False if the run died part-way.
+        self.complete = False
         os.makedirs(directory, exist_ok=True)
 
     # ---------------------------------------------------------------- setup
@@ -178,12 +180,29 @@ class Recording:
             "run_date": self.run_date,
             "llm_calls": len(self._llm),
             "tool_calls": len(self._tools),
+            # Complete is False when the process never reached the end of the
+            # suite -- a quota cap, a crash, a killed job. A partial recording
+            # is still worth keeping: every case it does contain replays for
+            # free, which is the difference between a wasted night and a
+            # usable artefact. It must not be presented as a full run, though,
+            # so the flag is recorded rather than assumed.
+            "complete": self.complete,
         }
         try:
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, indent=2, ensure_ascii=False)
         except OSError as e:                      # a manifest is not worth a crash
             _log.warning("recording: could not write manifest: %s", e)
+
+    def finish(self) -> None:
+        """Mark the run complete and write the manifest.
+
+        Called by the runner after the last case. Anything that ends the
+        process earlier (an unhandled 429, the job timeout) leaves the flag
+        False, and the manifest says so.
+        """
+        self.complete = True
+        self._save_manifest()
 
     # ------------------------------------------------------------- model path
 
@@ -264,10 +283,19 @@ class Recording:
         return None
 
     def stamp_date(self) -> None:
-        """Remember today's date so a replay tomorrow finds the same key."""
+        """Remember today's date so a replay tomorrow finds the same key.
+
+        The manifest is written immediately, not only at the end of the run.
+        A run that dies at case 55 (a quota cap, a killed job) never reaches
+        finish(), and without a manifest the recorded date is lost - which
+        makes every reply in it unreplayable, because the date is part of
+        every prompt. A partial recording with a date is worth keeping; a
+        partial recording without one is scrap.
+        """
         if self.mode == "record" and not self.run_date:
             from modules.prompt_rules import today_str
             self.run_date = today_str()
+            self._save_manifest()
 
     # ----------------------------------------------------------------- stats
 
