@@ -153,6 +153,7 @@ prices for these Groq models; spend is tracked in Prometheus (panels above).
 | [docs/AGENT_FINDINGS.md](docs/AGENT_FINDINGS.md) | 4 agent findings fixed, 5 open — what the agents get wrong and why |
 | [docs/RAG_FINDINGS.md](docs/RAG_FINDINGS.md) | 6 RAG findings — a reranker that was keyword overlap, and the CI gate that could not see it |
 | [docs/SECURITY_FINDINGS.md](docs/SECURITY_FINDINGS.md) | 4 security findings — the safety claim described the wrong path, and citations are filenames, not evidence |
+| [docs/DARK_MODULES.md](docs/DARK_MODULES.md) | 11 modules, 2,928 lines — 23 of 61 public names unreachable, 13 of those untested |
 | [docs/OBSERVABILITY_FINDINGS.md](docs/OBSERVABILITY_FINDINGS.md) | 4 findings — a 2.0 s stream measured as 0.002 s, and the one claim that had no number behind it |
 | [docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md) | 5 checks against a live cluster, with runnable commands |
 | [docs/SLO.md](docs/SLO.md) | Chat SLOs per route, and what "failed" means for a streamed answer |

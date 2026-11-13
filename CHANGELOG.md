@@ -152,6 +152,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because a tight timing bound on shared CI is flaky and a flaky timing test gets
   deleted. One test pins **drop-not-block**.
 
+- **`docs/DARK_MODULES.md` — and a correction to its own premise.** Eleven modules
+  (2,928 lines) had zero mentions in any findings document, and the conclusion *"2,928
+  lines nobody has looked at"* was reasonable and **false**: every one is imported by
+  live application code. The dark-module count was built by grepping prose and reported
+  as if it measured exposure. **"No document mentions it" is not "nothing uses it."**
+
+  The narrower finding that survived: of **61 public names**, **23 are never referenced
+  outside their own file** (38%), and **13 of those have no test either**. Largest
+  block is `database_improvements`, where 546 of 678 lines are dead — migrations,
+  backups, a connection pool and a query optimiser for an application that uses
+  SQLAlchemy and managed Postgres. `cicd_improvements` carries an A/B test manager and
+  a deployment manager that nothing constructs. `citations` is three quarters dead,
+  which adds a detail security finding S4 did not have: *the checks that never ran were
+  not failing silently — they were never wired up.*
+
+  Deliberately **not deleted** in a docs commit: 546 lines of unreachable code is a
+  code change, not a triage, and deleting plausible planned work is the owner's call.
+  What changed is that every dead name is now listed instead of assumed absent.
+
 - **`docs/CASE_STUDIES.md` — the index the project was missing.** Four parts, four
   findings documents, one headline number each, and the through-line that connects
   them. The README now links it first, because until now a visitor had to find the
