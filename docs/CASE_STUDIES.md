@@ -20,7 +20,8 @@ different kinds of wrong.
 | **2. The agents** | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | 4 fixed, 5 open | a team step hung for **309 s** against a 300 s limit |
 | **3. Observability** | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | 3 | a 2.0 s stream measured as **0.002 s** |
 | **4. RAG** | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | the "cross-encoder reranker" was keyword overlap |
-| **5. The cluster** | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 5 checks | a nightly backup failed **3 nights** because the PC is off at 02:00 |
+| **5. Security** | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | 4 | the safeguard was on the endpoint nobody uses |
+| **6. The cluster** | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 5 checks | a nightly backup failed **3 nights** because the PC is off at 02:00 |
 
 ---
 
@@ -127,6 +128,7 @@ configured, and the configuration was wrong.**
 | Agents | agents answering without the input they needed |
 | Observability | the instrument reporting a true number about the wrong thing |
 | RAG | quality features that reported success while doing nothing |
+| Security | a claim that was true about the function and false about the posture |
 | Cluster | correct configuration for the wrong assumption |
 
 Four different surfaces, and in all four the system was **not** failing loudly. It was
@@ -144,8 +146,10 @@ answer** — and the only defence is measuring the thing twice.
 4. [`RAG_FINDINGS.md`](RAG_FINDINGS.md) — six findings, and five of them were
    features that reported success while doing nothing — including the CI gate
    that was supposed to catch the first one.
-5. [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) — three bugs, one pattern.
-6. [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) — runnable commands, live cluster.
+5. [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) — four questions, zero exploits,
+   four wrong beliefs.
+6. [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) — three bugs, one pattern.
+7. [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) — runnable commands, live cluster.
 
 The README's [bugs table](../README.md#-bugs-found-and-fixed) is the flat list of all 39
 findings across every part, with the fix and the proof for each.

@@ -152,6 +152,7 @@ prices for these Groq models; spend is tracked in Prometheus (panels above).
 | [docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md) | 18 findings from building the eval harness — the suite reported 35% when the real figure was 72.4% |
 | [docs/AGENT_FINDINGS.md](docs/AGENT_FINDINGS.md) | 4 agent findings fixed, 5 open — what the agents get wrong and why |
 | [docs/RAG_FINDINGS.md](docs/RAG_FINDINGS.md) | 6 RAG findings — a reranker that was keyword overlap, and the CI gate that could not see it |
+| [docs/SECURITY_FINDINGS.md](docs/SECURITY_FINDINGS.md) | 4 security findings — the safety claim described the wrong path, and citations are filenames, not evidence |
 | [docs/OBSERVABILITY_FINDINGS.md](docs/OBSERVABILITY_FINDINGS.md) | 3 findings — a 2.0 s stream measured as 0.002 s, and two more like it |
 | [docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md) | 5 checks against a live cluster, with runnable commands |
 | [docs/SLO.md](docs/SLO.md) | Chat SLOs per route, and what "failed" means for a streamed answer |
@@ -725,7 +726,7 @@ Both keep ChromaDB cluster-internal (no published host port).
 | 🚦 **Rate Limiting** | Per-IP/per-user limits with configurable thresholds | `test_security.py::TestRateLimiting` |
 | 🛡️ **Brute-Force Protection** | Automatic IP/username lockout after repeated failures | `test_enterprise.py::test_brute_force_lockout` |
 | 🛡️ **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options | `test_enterprise.py::test_security_headers_present` |
-| 🧼 **Input Sanitization** | Regex sanitizer (script tags, event handlers, null bytes) + a prompt-injection heuristic, applied on non-streaming `/chat` only, not on `/chat/stream` | `test_security.py::TestXSS`, `::TestSQLInjection`; agent eval `safety-injection` passed (system prompt not printed) |
+| 🧼 **Input Sanitization & Injection Defence** | **Containment is on both paths**: `PROMPT_INJECTION_GUARD` in the system prompt + `<<UNTRUSTED_DATA>>` delimiters around the message, history, facts, tool results and every `@team`/`@research` task — `/chat` via `run_agent`, `/chat/stream` via `run_agent_stream`, and `agent_tools` wraps web/tool output on both. The browser-boundary scrubber and the injection **detector** run on `/chat` only, so `/chat/stream` — the only path the UI uses — loses **audit coverage, not containment** (see below) | `test_security.py::TestXSS`, `::TestSQLInjection`; agent eval `safety-injection` passed (system prompt not printed) |
 | 🛡️ **CSRF Protection** | `SameSite=Lax` HttpOnly auth cookies + same-origin API | design (no dedicated test) |
 | 🌐 **CORS** | Fixed origin list when `ENVIRONMENT=production` (set in k8s and Compose) | `test_security.py::TestCORS` |
 | 📊 **Internal `/metrics`** | Refuses requests that came through a proxy (404) | `test_multitenancy.py::test_prometheus_metrics_hidden_behind_proxy` |
@@ -1159,12 +1160,16 @@ Three known problems, none blocking, listed so they are not discovered by a read
 - **Eval reports record `git_sha` and a `prompt_fingerprint`** (a hash of the prompts in
   force); `GIT_SHA` is set by the workflow, so a report can be traced to a commit *and* to
   the prompts. Prompt edits are still not versioned beyond that hash.
-- **`/chat/stream` still skips the input sanitizer and the in-app business/SLA metrics**
-  (see below); request metrics and Phoenix traces do cover it.
+- **`/chat/stream` skips the injection detector and the in-app business/SLA metrics**
+  (see below); request metrics and Phoenix traces do cover it. Containment is not
+  skipped — the guard and the delimiters are on both paths.
 - **No alert delivery.** Prometheus alert rules exist, but no Alertmanager is deployed.
-- **`/chat/stream` reads no input sanitizer.** The main UI path skips the
-  prompt-injection heuristic that `/chat` applies; output-side PII redaction *is* applied to
-  both.
+- **`/chat/stream` writes no injection audit entry.** The main UI path skips the
+  non-blocking detector that `/chat` applies, so an injection attempt against the path
+  that carries web and document content leaves no trace in the audit log. Containment
+  (guard + delimiters) and output-side PII redaction apply to **both** paths. This is
+  an audit blind spot, not a containment gap — see
+  [`docs/SECURITY_FINDINGS.md`](docs/SECURITY_FINDINGS.md) S1.
 - **Pod Security:** only the 4 app Deployments pass the `restricted` level. Postgres, Redis, Chroma, Phoenix, Grafana, Loki, Prometheus, Promtail and node-exporter don't (Grafana, Loki and Prometheus run as root on purpose; node-exporter and Promtail need host access). Container filesystems are not read-only: local Chroma and the memory files write inside `/app`.
 - **`replicas: 2` in `k8s/api.yaml`:** every `kubectl apply` resets the API pod count until the HPA corrects it.
 - **The Next.js UI doesn't use the WebSocket endpoint:** the API serves `/ws/ticket` → `/ws/x` (user-id handling is tested in `test_multitenancy.py`), but the UI chats over SSE and `getWsUrl` in `frontend/src/lib/api.ts` has no callers.

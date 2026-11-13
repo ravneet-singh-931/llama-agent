@@ -63,6 +63,14 @@ lines, still with zero findings** — against a 2,717-line eval harness that pro
 | `fact-node-latest` | Needs a date-grounding rule | no |
 | `llm_guard._tier_of` | Latent, unexercised | no |
 
+### From the eval part — found 2026-11-13, **held deliberately**
+
+| Item | What | Blocking? |
+|---|---|---|
+| **Nightly `compare` fails a run the report calls unquotable** | Ungraded case → counted as not-passed → `pass_rate` falls → `pass_rate` is a "headline metric moving the wrong way" → `regression=True` → red build. `newly_not_graded` is **computed and printed by `compare()` and then never used in the verdict** — the diagnosis exists one field away from the decision and is never consulted. Runs **43362383328** (35/60 graded) and **43151721574** (41/60), both at "Compare against yesterday"; manual runs pass, scheduled runs fail. Same class as eval rows 8–9 and RAG R6: *the check fires on a number it has already declared meaningless.* | **yes** — but not first. Scheduled **third**, after security and `code-intervals`, because it adds a new instance of a known class while security is an entire unwritten part. **Do not move it to last.** |
+
+**Workaround until fixed:** the nightly verdict is **not trustworthy below 90% coverage** — read the report, not the badge. A red scheduled run since 2026-11-12 is this, not the app.
+
 ### From observability
 
 | Item | What | Blocking? |
@@ -88,8 +96,9 @@ lines, still with zero findings** — against a 2,717-line eval harness that pro
 | Step | Work | Why here |
 |---|---|---|
 | ~~1~~ | ~~`RAG_FINDINGS.md`~~ | ✅ **DONE.** 5 findings, the retrieval table with its three negative results, and a "what is not measured" section. |
-| **2** | `code-intervals` | The only live quality failure. Free to reproduce. Becomes agent finding #5. |
-| **3** | `SECURITY_FINDINGS.md` | Investigate the four questions above; at minimum fix the `/chat/stream` sanitizer gap. |
+| ~~2~~ | ~~`SECURITY_FINDINGS.md`~~ | ✅ **DONE.** Four questions answered; S1 corrected the README in three places (containment is on both paths; what the main path loses is the *audit trail*). S2 closed. S3 has a stated DNS caveat. S4 open and stated. |
+| **3** | `code-intervals` | The only live quality failure. Free to reproduce. Becomes agent finding #5. |
+| **3½** | **Nightly `compare` fix** | The live red above. Third, **not last** — see the note in that row. |
 | **4** | Tracing overhead measurement | One number. Closes the observability gap. |
 | **5** | Dark-module triage | The largest is now covered (`rag_optimizations`). The rest: test it, or delete it, or state that it is unexercised. **Do not leave "nobody knows" as the answer.** |
 | **6** | Publish posts 1–4 | The actual goal. Do not let this stay last forever. |
