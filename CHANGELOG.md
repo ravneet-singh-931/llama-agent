@@ -55,6 +55,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   That is the eval part's lesson moved down a layer: the system was confident and wrong,
   not broken and loud.
 
+- **v3.6.0 — the RAG gate could actually be blind, and now it says so.** `main.yml`
+  gated retrieval on `hit@6` alone, and `hit@6` is 35/38 in all three setups in the
+  README table — so the gate passed identically with the reranker installed and with
+  it silently fallen back to keyword overlap, reproducing R1 one level up in CI.
+  Three floors now: `hit@6 >= 0.89` (reachability), `hit@1 >= 0.75` and
+  `MRR >= 0.82` (ranking, the numbers the reranker moves), plus `--require-reranker`
+  failing the run unless the live backend is ONNX. `gate_sensitivity()` re-runs the
+  gate for each setup as if it were deployed and the job summary prints which setups
+  would pass — a gate that is blind now reports its own blindness in every run.
+  `evals/rag_eval.py`, `.github/workflows/main.yml`, `tests/test_rag_eval.py`
+  (**29 passed**, six new, one of which reproduces the old gate's blindness).
+
 - **`docs/CASE_STUDIES.md` — the index the project was missing.** Four parts, four
   findings documents, one headline number each, and the through-line that connects
   them. The README now links it first, because until now a visitor had to find the

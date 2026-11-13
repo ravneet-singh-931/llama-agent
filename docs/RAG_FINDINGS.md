@@ -14,7 +14,7 @@ most: upload a document, ask a question, get a grounded answer.
 | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | the agents | 4 fixed, 5 open |
 | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | dashboards and traces | 3 |
 | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | the cluster | 5 checks |
-| **this file** | **retrieval, ranking, caching, memory** | **5** |
+| **this file** | **retrieval, ranking, caching, memory, the gate** | **6** |
 
 **The through-line, and it is the sharpest one in the project:**
 
@@ -213,7 +213,110 @@ finding wearing a RAG costume.
 
 ---
 
-## The pattern, five for five
+## R6. The CI gate could not see the reranker either
+
+**Symptom.** Nothing. The gate was green, and it had been green every run. This
+finding was found by reading the gate *after* writing R1, not by seeing it fail.
+
+**Story.** R1 says a reranker was silently replaced by keyword overlap and nobody
+noticed for months. The natural next question — the one this project asks of every
+other component — is *what would have noticed?*
+
+The answer was `main.yml`, which ran:
+
+```yaml
+python -m evals.rag_eval retrieval --min-hit6 0.89 --out rag-retrieval.json
+```
+
+`hit@6` is the fraction of questions whose answer chunk appears anywhere in the six
+excerpts the model is given. From the table at the top of this document:
+
+| Setup | top 6 |
+|---|---|
+| Vector only | 35/38 |
+| Hybrid | 35/38 |
+| **Hybrid + reranker (deployed)** | **35/38** |
+
+**All three are identical.** `hit@6` is the one number the reranker does not move —
+that is the honest negative result published above, and it was quietly the *only*
+floor the gate had. **The gate would have passed on the day the reranker fell back
+to keyword overlap.** It would have passed if the reranker had been deleted.
+
+This is R1's own failure mode, one level up: a guard attached to "is the answer
+findable" when the thing being protected is "is it ranked first". The document
+describing the bug and the CI enforcing the bug were in the same repository, and
+the second one was green.
+
+**Fix — three floors and a printed blind spot**, v3.6.0:
+
+| Floor | Vector | Hybrid | **Deployed** | Slack |
+|---|---|---|---|---|
+| `hit@6 ≥ 0.89` | 35/38 | 35/38 | 35/38 | 1 question — *reachability* |
+| `hit@1 ≥ 0.75` | 27/38 | 28/38 | **31/38** | 2 questions — *ranking* |
+| `MRR ≥ 0.82` | 0.79 | 0.80 | **0.86** | margin 0.04 |
+| `--require-reranker` | — | — | backend must be `onnx` | exact |
+
+`hit@6` stays, because "the answer is reachable" is a real question. The two new
+floors are the ones the reranker actually moves. `--require-reranker` closes the
+door completely: if the live backend is keyword overlap, the run fails no matter
+how good the scores are.
+
+**The part that is the actual fix.** The gate now measures *itself*:
+`gate_sensitivity()` re-runs the pass/fail decision for **each setup as if it were
+the deployed one**, and the job summary prints the verdicts.
+
+```
+**Gate sensitivity** — would the gate pass this setup alone?
+
+| Setup | Gate verdict |
+|---|---|
+| vector ← correctly rejected | FAIL |
+| hybrid ← correctly rejected | FAIL |
+| hybrid+rerank (deployed) ← deployed | PASS |
+
+Gate discriminates the reranker: **YES**
+```
+
+Under the old `hit@6`-only floor the same table reads:
+
+```
+| vector ← PASSES WITHOUT THE RERANKER | PASS |
+| hybrid ← PASSES WITHOUT THE RERANKER | PASS |
+Gate discriminates the reranker: **NO**
+```
+
+That is the fix. Not "add a floor" — **make a gate that cannot see its own component
+say so out loud, in every run, in the summary a reviewer reads.** A gate that is
+blind and silent is R1. A gate that is blind and announces it is a bug report.
+
+**Proof.** Six tests in `tests/test_rag_eval.py`, and one of them is the bug:
+
+- `test_hit6_alone_cannot_see_the_reranker` — reproduces the old gate, asserts it
+  passes with **no reranker at all**, and asserts `discriminates is False`
+- `test_hit1_and_mrr_floors_can_see_the_reranker` — same table, new floors, asserts
+  both no-reranker setups **fail** and the deployed one passes
+- `test_vector_only_setup_fails_the_deployed_gate` — the day-after-R1 scenario
+- `test_require_reranker_rejects_a_keyword_fallback` — a perfect score with a
+  keyword backend still fails
+- `test_gate_sensitivity_is_printed_in_the_summary` — the blind spot reaches the
+  job summary, not just the exit code
+- `test_leaks_and_broken_labels_still_fail_any_gate` — the old guarantees hold
+
+`tests/test_rag_eval.py`: **29 passed**.
+
+**The lesson.** *A gate is a measuring instrument, and it needs the same suspicion
+as a test suite.* R1's lesson was that a fallback chain that always succeeds cannot
+be noticed; R6's is that the check meant to notice it was measuring a property that
+does not change when the thing breaks. **The metric was real, the number was driven
+from a real run, and it was measuring the wrong thing** — the observability part's
+through-line, arrived at again from a different direction.
+
+**Cost of finding it.** One question: *"what would have noticed?"* Asked of a green
+check, not a red one. Worth asking of every other gate.
+
+---
+
+## The pattern, six for six
 
 | # | What was claimed | What was true |
 |---|---|---|
@@ -222,9 +325,10 @@ finding wearing a RAG costume.
 | R3 | the cache serves equivalent questions | it served different questions |
 | R4 | contextual summaries improve chunks | 6 of 7 were empty strings |
 | R5 | the upload failed | a question asked earlier had reserved the memory |
+| R6 | CI gates retrieval quality | the gate could not detect the reranker disappearing |
 
-**Four of the five are features that reported success while doing nothing, or doing
-something else.** None threw an error. None looked wrong in code review. Each was found
+**Five of the six are features that reported success while doing nothing, doing
+something else, or refusing to look.** None threw an error. None looked wrong in code review. Each was found
 by measuring an output rather than a code path — the ranking position, the rejection
 count, the wrong answer, the summary length, the memory high-water mark.
 

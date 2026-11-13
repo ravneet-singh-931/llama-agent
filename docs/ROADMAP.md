@@ -18,7 +18,7 @@ proves the fix.
 | 1 | **Eval harness** (2,717 lines) | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | 18 | ✅ **DONE** — plus record/replay, so a run is reproducible for 0 tokens |
 | 2 | **Agents** (5 specialists + team) | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | 4 fixed, **5 open** | 🟡 **PARTIAL** — the open five are real, listed below |
 | 3 | **Observability** (Prometheus/Grafana/Phoenix) | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | 3 | 🟡 **PARTIAL** — tracing overhead never measured |
-| 4 | **RAG** (`rag_optimizations` 1,703 lines — largest module) | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 5 | ✅ **DONE** — including the retrieval table with its three negative results |
+| 4 | **RAG** (`rag_optimizations` 1,703 lines — largest module) | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | ✅ **DONE** — retrieval table with three negative results, plus R6: the CI gate could not see the reranker |
 | 5 | **Security & multi-tenancy** (~1,900 lines, 5 modules) | *none* | 0 | ❌ **NEVER EXPLORED** |
 | 6 | **Dark modules** (4,629 lines, 12 files) | *none* | 0 | ❌ **NEVER EXPLORED** |
 | 7 | **k8s / Docker** (31 manifests, 14 services) | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 5 checks | ✅ **DONE** — user's instruction: revisit at the very end |

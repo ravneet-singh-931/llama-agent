@@ -238,3 +238,96 @@ def test_run_answers_plumbing(index, monkeypatch):
     assert by_id["api-rate-team"]["checks"]["pass"]
     assert not by_id["no-graphql"]["checks"]["pass"]  # answered instead of "not found"
     assert rep["summary"]["questions"] == 2 and rep["summary"]["pass_rate"] == 0.5
+
+
+# --------------------------------------------------- gate sensitivity (v3.6.0)
+#
+# The gate that shipped until v3.6.0 asserted hit@6 alone. Every setup in the
+# README table scores 35/38 on hit@6, so that gate could not tell the deployed
+# reranker from no reranker at all -- the same "the metric never measured it"
+# shape as R1 in docs/RAG_FINDINGS.md, one level up in CI.
+
+# The measured numbers, README 2026-10-25 (38 answerable questions).
+_README_SETUPS = {
+    "vector": {"hit@1": 27 / 38, "hit@3": 32 / 38, "hit@6": 35 / 38, "mrr": 0.79},
+    "hybrid": {"hit@1": 28 / 38, "hit@3": 31 / 38, "hit@6": 35 / 38, "mrr": 0.80},
+    "hybrid+rerank (deployed)": {"hit@1": 31 / 38, "hit@3": 34 / 38,
+                                 "hit@6": 35 / 38, "mrr": 0.86},
+}
+
+
+def _rep(setups=None, reranker="onnx:ms-marco-MiniLM-L-6"):
+    return {"setups": dict(setups or _README_SETUPS), "leaks": [], "unreachable": [],
+            "reranker": reranker, "k": 6, "questions": 38, "documents": 6,
+            "chunks": 40, "per_question": {}}
+
+
+def test_hit6_alone_cannot_see_the_reranker_the_old_gate_was_blind():
+    """The bug this change fixes, stated as an assertion.
+
+    hit@6 is 35/38 for all three setups. A gate on hit@6 alone therefore returns
+    the same verdict whether the reranker is installed or not.
+    """
+    rep = _rep()
+    hit6_only = {"min_hit6": 0.89}
+    verdicts = rag_eval.gate_verdicts(rep, **hit6_only)
+    assert verdicts["vector"] is True            # no reranker...
+    assert verdicts["hybrid"] is True            # ...still no reranker...
+    assert verdicts["hybrid+rerank (deployed)"] is True
+    sens = rag_eval.gate_sensitivity(rep, **hit6_only)
+    assert sens["discriminates"] is False, "hit@6 only: gate is blind to the reranker"
+    assert set(sens["would_pass_without_reranker"]) == {"vector", "hybrid"}
+
+
+def test_hit1_and_mrr_floors_can_see_the_reranker():
+    """The fix: gate on the numbers the reranker actually moves."""
+    rep = _rep()
+    floors = {"min_hit6": 0.89, "min_hit1": 0.75, "min_mrr": 0.82}
+    verdicts = rag_eval.gate_verdicts(rep, **floors)
+    assert verdicts["vector"] is False
+    assert verdicts["hybrid"] is False
+    assert verdicts["hybrid+rerank (deployed)"] is True
+    sens = rag_eval.gate_sensitivity(rep, **floors)
+    assert sens["discriminates"] is True
+    assert sens["would_pass_without_reranker"] == []
+
+
+def test_vector_only_setup_fails_the_deployed_gate():
+    """What would happen to CI on the day the reranker silently fell back to
+    keyword overlap: the deployed row becomes the vector row, and the gate fails."""
+    degraded = {"vector": _README_SETUPS["vector"], "hybrid": _README_SETUPS["hybrid"],
+                "hybrid+rerank (deployed)": _README_SETUPS["vector"]}
+    rep = _rep(degraded, reranker="keyword-overlap")
+    assert not rag_eval.retrieval_ok(rep, min_hit6=0.89, min_hit1=0.75, min_mrr=0.82)
+
+
+def test_require_reranker_rejects_a_keyword_fallback():
+    rep = _rep(reranker="keyword-overlap:1")           # a perfect score...
+    assert rag_eval.retrieval_ok(rep, min_hit6=0.89, min_hit1=0.75, min_mrr=0.82)
+    assert not rag_eval.retrieval_ok(rep, min_hit6=0.89, min_hit1=0.75, min_mrr=0.82,
+                                     require_reranker=True)  # ...still fails
+    assert rag_eval.retrieval_ok(_rep(reranker="onnx:ms-marco-MiniLM-L-6"),
+                                 require_reranker=True)
+
+
+def test_gate_sensitivity_is_printed_in_the_summary():
+    """A blind gate must say so in the job summary, not only in the exit code."""
+    rep = _rep()
+    rep["gate"] = rag_eval.gate_sensitivity(rep, min_hit6=0.89)
+    md = rag_eval.render_retrieval(rep)
+    assert "Gate sensitivity" in md
+    assert "PASSES WITHOUT THE RERANKER" in md
+    assert "Gate discriminates the reranker: **NO**" in md
+
+    rep["gate"] = rag_eval.gate_sensitivity(rep, min_hit6=0.89, min_hit1=0.75, min_mrr=0.82)
+    md = rag_eval.render_retrieval(rep)
+    assert "Gate discriminates the reranker: **YES**" in md
+
+
+def test_leaks_and_broken_labels_still_fail_any_gate():
+    rep = _rep()
+    rep["leaks"] = [{"setup": "x", "question": "q", "file": "f.txt"}]
+    assert not rag_eval.retrieval_ok(rep)
+    rep = _rep()
+    rep["unreachable"] = ["q7"]
+    assert not rag_eval.retrieval_ok(rep)
