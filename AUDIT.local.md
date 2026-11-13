@@ -307,7 +307,7 @@ means a broken citation path would be **invisible**.
 |---|---|
 | Mutable default arguments | **0** |
 | Unused imports (`F401`) | **0** |
-| Unused variables (`F841`) | **0** |
+| Unused variables (`F841`) | ~~**0**~~ → **WRONG, see PART 17** — 31 exist |
 | Duplicate imports (`F811`) | **0** |
 | Broken test imports | **0** (29 flagged, all submodule imports) |
 | Eval checks unwired | **0** (5 flagged, all dispatched by `evaluate()`) |
@@ -454,7 +454,7 @@ are worse than 1 flag that works.
 | Check | Result |
 |---|---|
 | `F401` unused imports | **0** |
-| `F841` unused variables | **0** |
+| `F841` unused variables | ~~**0**~~ → **WRONG, see PART 17** — 31 exist |
 | `F811` duplicate imports | **0** (fixed in #47) |
 | Mutable default arguments | **0** |
 | Blocking I/O in async (other than 5.1) | **0** found |
@@ -628,3 +628,134 @@ alongside the correction.*
 `arena/8a7490b4-llama-agent` purely so the findings survive between sessions. When the
 fixes in PART 13 are done, delete it with `git rm AUDIT.local.md`. It is **not** a findings
 document for the project and must not be referenced from `README.md` or `docs/`.
+
+---
+
+# PART 16 — What was actually fixed (2026-11-13)
+
+Everything in this section is committed on this branch. Numbers below are from the run
+after the fixes, not before.
+
+## Fixed, with the proof each one can fail
+
+| # | Fix | Proof it can fail |
+|---|---|---|
+| 1 | CI `integration` job → `pip install -r requirements.txt` | it also dropped the unused standalone `fastmcp` package; `test_version_and_deps.py` guards the dependency set |
+| 2 | `test_cors_headers_present` now asserts | sabotaging `add_middleware(CORSMiddleware, ...)` gives `assert []` — previously the same sabotage left it green |
+| 3 | 7 unread feature flags deleted from `config/feature_flags.json` | `test_every_shipped_flag_is_actually_read` fails with `flags configured but never read by any code: ['enable_beta_features']` when one is added back |
+| 4 | `modules/services.py` + `broadcast_message` + `get_online_count` + `reload_config` deleted | `test_dead_service_locator_stays_deleted` |
+| 5 | `validate_fact_key` / `validate_fact_value` wired into `FactMemory.remember()` | `TestFactInputLimits`, 5 tests |
+
+Plus one **found during the fixes**, not on any earlier list:
+
+| # | Fix | Proof |
+|---|---|---|
+| 6 | **CORS reflected any origin with credentials** — dev ran `allow_origins=["*"]` + `allow_credentials=True`; Starlette reflects the caller, so `Origin: https://evil.example` came back as that origin **with** credentials. Fixed in `api.py`; both environments now list origins explicitly. | before/after `curl`: header reflected → absent |
+
+## Numbers after
+
+- **839 passed, 6 skipped, 17 deselected** (was 833)
+- `config/feature_flags.json`: **8 flags → 1** (`enable_mcp_agents`)
+- `modules/`: **36 files → 35** (`services.py` gone)
+- README: tests 833→839, bugs 39→44, cluster checks 8→**9**, CORS row rewritten
+
+## Where each part's document was updated
+
+| Document | What was appended |
+|---|---|
+| `docs/SECURITY_FINDINGS.md` | **S5** (CORS reflected origin) and **S6** (fact limits enforced nowhere) |
+| `docs/DARK_MODULES.md` | Addendum: `services.py` deleted, 7 flags deleted, `reload_config` deleted, `validate_fact_*` wired instead of deleted; **dated correction** to the `websocket`/`services.py` row |
+| `docs/KUBERNETES_CHECKS.md` | **Check 9** — the integration job did not install what the image installs |
+| `README.md` | CORS row, tests count, bugs count 39→44, cluster checks 8→9, incident rows **40–44** |
+| `CHANGELOG.md` | `[Unreleased] → Fixed (maintenance audit, 2026-11-13)` |
+
+**No new findings document was created**, per PART 14 — each fix went into the existing
+document whose theme it matches.
+
+## Corrections to my own audit record
+
+| Claim in this file | Truth |
+|---|---|
+| "`validate_fact_key` / `validate_fact_value` are dead — delete them" | **Wrong call.** They were uncalled, but they were the only statement of the limits. Deleting them would have removed a guard. **Wired instead.** |
+| "`POST /remember` accepts arbitrarily long keys and values" (my first fix) | **Wrong.** `RememberRequest` already caps at 100/1000 via Pydantic and returns 422. The real hole was the six *chat-message* call sites. Reverted the endpoint change, fixed `FactMemory.remember()` instead. |
+| "`fastmcp` is needed by the integration job" (my first CI edit) | **Wrong.** Nothing imports it; the MCP server uses `mcp.server.fastmcp`, a submodule of `mcp`. My first edit re-added it; corrected to drop it. |
+
+That is **3 more wrong first attempts** in this round, all caught by running the thing
+rather than reading it. The pattern from PART 11 held: every claim needed a second,
+different check, and the second check is what found the real defect both times.
+
+## Still open (not done)
+
+- 546 unreachable lines in `database_improvements` — **not deleted**
+- 76 undocumented env vars — **not documented**
+- Two UIs (Next.js + Streamlit) — **undecided**
+- Three monitoring modules — **not merged**
+- `api.py` split — **not started**
+- Code coverage floor in CI — **not added**
+
+---
+
+# PART 17 — A claim of mine that was wrong, found while verifying the fixes
+
+## "F401 = 0, F841 = 0" was wrong
+
+PART 5.3 and PART 10 both recorded unused variables as **0**. Running flake8 on the whole
+repository:
+
+```
+$ flake8 --select=F841 --count .
+31
+```
+
+**31 unused local variables:**
+
+| File | Count |
+|---|---|
+| `api.py` | 21 |
+| `app.py` | 4 |
+| `modules/security.py` | 2 |
+| `llama_agent1.py`, `modules/rag.py`, `modules/rag_optimizations.py`, `modules/websocket.py` | 1 each |
+
+They are all the same shape — `except Exception as e:` where `e` is never used and the
+handler raises a generic 500. Harmless in isolation, but the count is not zero and the
+record said it was.
+
+### Why I got it wrong
+
+I never ran flake8. I ran a narrower AST query and treated a partial result as the full
+one — the same mistake as the 75-vs-111 env-var undercount, in the same direction:
+**reporting a clean number without running the check that would have produced it.**
+
+Two of the 31 are worth naming because they are in code I touched:
+
+- `modules/security.py:361` — `cutoff_hour` assigned, never used
+- `modules/websocket.py:248` — `connection_id` assigned, never used
+
+Neither is a bug. Both are evidence that the "0" was never measured.
+
+### What is true
+
+- CI does **not** run F841. `.github/workflows/main.yml:229` runs
+  `flake8 . --select=E9,F63,F7,F82` — syntax errors and undefined names only.
+- So 31 unused variables have been invisible to CI for the life of the repo, and my
+  audit reproduced that blindness by not running the tool.
+- **I introduced zero new ones**: 21 in `api.py` before the fixes, 21 after.
+
+### Bandit, measured properly this time
+
+Run with the project's own skip-list, before and after the fixes:
+
+```
+before: 55 issues     after: 55 issues     new issue types introduced: 0
+```
+
+Four are Medium-severity. **None were introduced by this work**, and none are on a line
+this work changed.
+
+### The rule this record should have followed from the start
+
+> Never write "0" for a check you did not run.
+
+Every "clean" row in PART 10 should be read as *"checked with this specific command"*.
+The ones where I actually ran the command (`F401`, mutable defaults, dead imports) hold.
+The ones where I reasoned instead of running (`F841`) did not.
