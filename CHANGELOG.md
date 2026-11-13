@@ -33,6 +33,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stamped, carries `"complete": false`, and the upload step runs on `always()`
   so a capped night still produces an artefact.
 
+- **`docs/RAG_FINDINGS.md` — the largest module finally has findings.** `rag_optimizations.py`
+  is 1,703 lines, the biggest file in the project, and had zero recorded findings while
+  holding the best before/after numbers in the repo. Five findings, each traced to code:
+
+  * the "cross-encoder reranker" was keyword overlap — a three-deep backend fallback where
+    the last entry always succeeds, so PyTorch never being installed was invisible;
+  * Corrective RAG never rejected anything: a 5-token verifier budget spent on hidden
+    reasoning returned an empty string, which parsed as "supported". The same 100-token
+    bug emptied the contextual chunk summaries for 6 of 7 documents;
+  * the semantic cache served answers to different questions at cosine distance 0.3 —
+    "Team plan cost" got the Team plan rate limit. Now 0.05 plus matching numbers;
+  * a 65 KB upload returned 502 because a *question asked earlier* made the reranker
+    reserve ~940 MB that onnxruntime never gave back.
+
+  It also publishes the retrieval table with its three negative results: hybrid search
+  adds nothing measurable over vector search on this corpus, and the reranker does not
+  change whether the right passage is in the top 6 — only its position.
+
+  Four of the five findings are features that reported success while doing nothing.
+  That is the eval part's lesson moved down a layer: the system was confident and wrong,
+  not broken and loud.
+
 - **`docs/CASE_STUDIES.md` — the index the project was missing.** Four parts, four
   findings documents, one headline number each, and the through-line that connects
   them. The README now links it first, because until now a visitor had to find the
