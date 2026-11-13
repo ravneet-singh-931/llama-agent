@@ -1053,6 +1053,7 @@ that never fires — the reader has to be able to disagree with it.
 | 17 | per **call** | per **case** |
 | 18 | the new guard **overrode** the old one | the smaller limit wins |
 | **19** | per **category**, in isolation | per **run** — agreement |
+| **20** | the number, not its **provenance** | the run it came from |
 
 Finding 19 is the same mistake in a third suit. Finding 18 was a guard that looked at one
 limit and ignored the one above it. Finding 19 is a guard that looked at one category and
@@ -1061,6 +1062,96 @@ thing being guarded was the report itself.
 
 > **The measuring tool is a tool too.** It needs the same suspicion I point at the agent,
 > and it gets it from the same place: the numbers, replayed, not the code re-read.
+
+## Finding 20 — the nightly failed on the number it had already refused to publish
+
+**Symptom.** The scheduled nightly went **red two nights running** and nobody had
+noticed, because manual runs passed. Run **43362383328** (2026-11-13, 35/60 graded)
+and run **43151721574** (2026-11-12, 41/60). Both failed at the same step:
+*"Compare against yesterday."*
+
+**Story.** Both nights, the free tier ran out. The suite handles this carefully and
+correctly — `summarize()` refuses to present the raw rate as a quality score:
+
+> *"Incomplete run — only 35/60 cases were graded (58.3%); the raw pass rate 55.0 is
+> NOT a quality score. Among cases that ran: 94.3%"*
+
+and writes `status: "inconclusive"` into the report, plus the per-category coverage
+that says `team` did not run at all.
+
+Then `compare()` ran. It computed `pass_rate`, saw it fall, and applied the rule
+written in the code:
+
+```python
+worse = [k for k, v in metrics.items() if v["delta"] is not None and (
+    (v["delta"] < 0 and k in ("pass_rate", "judge_overall", "grounding_rate"))
+    or (v["delta"] > 0 and k == "fabrication_rate"))]
+...
+"regression": bool(bool(worse) or ...)
+```
+
+**A headline metric moving the wrong way is a regression on its own.** So the
+nightly failed on a number that the report, three functions earlier, had explicitly
+told the reader not to use.
+
+**The diagnosis was present and unread.** `compare()` computes `newly_not_graded`
+— the exact cases that stopped running — and prints it in the diff. It is not in
+the verdict. Zero references. And the summary's `status` field, the one written for
+this purpose, is **never read by `compare()` at all**: grep returns 0 occurrences
+inside its body.
+
+So the function whose entire job is to draw a conclusion ignored the field that
+says *"do not draw one."* The information was one attribute away from the decision
+and never consulted — which is finding 19's shape again, and finding 11's, and the
+RAG part's `hit@6` gate, and the 5-token CRAG verifier.
+
+**Why this one is worse than the others.** The suite published "35%" and "not graded:
+31" on the same page, and the fix for *that* was a headline that refuses to publish
+a pass rate below threshold. The fix worked. Then the **gate** consumed the number
+anyway, downstream, where the headline is not visible. **An instrument corrected at
+one end and read raw at the other.**
+
+**Fix — coverage beats a pass-rate drop**, v3.8.0:
+
+- `compare()` now reads `summary["status"]` from **both** sides. If either run is
+  `inconclusive`, `regression` is `False` — a missing answer is not a wrong answer,
+  and "the provider rate-limited us" is not a property of the app.
+- the verdict line says **`Verdict: inconclusive (coverage) - not failing the job`**,
+  the same treatment `incomparable` already got. The rule existed for *"the
+  instrument changed"*; it now also covers *"the run was cut short."*
+- the CLI returns **0** for it, through the same branch `incomparable` uses.
+- the diff **prints what it suppressed**: the old and new status, both graded pass
+  rates, and how many cases ran yesterday but not today. A filter that hides a red
+  build without saying so is the same failure as a guard that never fires.
+
+**Proof.** Seven tests in `tests/test_evals.py`, and the first one is the bug.
+Verified against the production shape — 60 graded at 71.7%, then 35 graded:
+
+| Scenario | `regression` | Correct? |
+|---|---|---|
+| 72% → 33%, only 35/60 ran (the production case) | **False** | ✅ |
+| 72% → 50%, both 60/60 graded | **True** | ✅ still catches real ones |
+| same rate, judge 4.5 → 3.5, full coverage | **True** | ✅ |
+| old side inconclusive, new side fine | **False** | ✅ either side protects |
+| report has no `status` field (pre-v3.8 artefact) | **True** | ✅ absent ≠ inconclusive |
+
+The last row matters: an old artefact must keep its old meaning, so a missing field
+is treated as `ok`, not as `inconclusive`. **Absent means unknown — but here the
+conservative reading is the one that preserves existing behaviour**, because
+guessing `inconclusive` would silence genuinely red builds from stored baselines.
+
+`tests/test_evals.py`: **130 passed**. Whole suite: **825 passed**, 6 skipped, 0 failed.
+The workflow needed no change: it already propagates the CLI's exit code, so
+correcting the code was enough.
+
+**The lesson, and it is the sharpest version of this project's thesis.**
+
+> **The report said "do not quote this number." The gate quoted it.**
+
+Six parts of this project have now found the same shape, and this is the one that
+makes it unavoidable: **the diagnosis is almost always already written down.** It is
+in a field, a warning, a comment, a `status` string, a headline. The failure is not
+that nobody knew. It is that the *decision point* never looked.
 
 ## What the run actually said
 
