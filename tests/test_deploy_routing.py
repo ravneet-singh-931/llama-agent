@@ -89,14 +89,14 @@ def test_workflow_rolls_out_once_per_deploy():
     wf = _read(".github/workflows/main.yml")
     assert "set image" not in wf
     assert wf.count('bash k8s/apply-app.sh "${{ github.sha }}" llama-agent') == 2
-    for name in ("api", "mcp-server", "web", "frontend"):
+    for name in ("api", "mcp-server", "frontend"):
         assert f"kubectl apply -f k8s/{name}.yaml" not in wf
 
 
 def test_apply_app_pins_every_app_image():
     script = _read("k8s/apply-app.sh")
     expr = re.search(r'sed -E "([^"]+)"', script).group(1).replace("${TAG}", "abc123")
-    for name, repo in (("api", "llama-agent"), ("web", "llama-agent"),
+    for name, repo in (("api", "llama-agent"),
                        ("mcp-server", "llama-agent-mcp-server"),
                        ("frontend", "llama-agent-frontend")):
         out = subprocess.run(  # nosec B603 B607
@@ -107,7 +107,7 @@ def test_apply_app_pins_every_app_image():
 
 
 @pytest.mark.parametrize("name,surge,unavailable", [
-    ("api", 0, 1), ("frontend", 0, 1), ("web", 1, 0), ("mcp-server", 1, 0),
+    ("api", 0, 1), ("frontend", 0, 1), ("mcp-server", 1, 0),
 ])
 def test_rollout_strategy_fits_single_node(name, surge, unavailable):
     yaml = pytest.importorskip("yaml")

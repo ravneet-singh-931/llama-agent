@@ -189,7 +189,6 @@ class AppConfig:
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     ws_port: int = 8765
-    streamlit_port: int = 8501
 
     @classmethod
     def from_env(cls) -> "AppConfig":

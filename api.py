@@ -662,7 +662,6 @@ if _environment == "production":
     cors_origins = [
         "http://localhost:80",      # Nginx HTTP
         "http://localhost:443",     # Nginx HTTPS
-        "http://localhost:8501",    # Streamlit direct
         "http://localhost:3000",    # Next.js frontend
         "http://localhost:3001",    # Next.js frontend (alt)
         # Add your production domain here:
@@ -684,9 +683,7 @@ else:
     cors_origins = [
         "http://localhost:3000",    # Next.js frontend
         "http://localhost:3001",    # Next.js frontend (alt)
-        "http://localhost:8501",    # Streamlit legacy UI
         "http://127.0.0.1:3000",
-        "http://127.0.0.1:8501",
     ]
 
 app.add_middleware(

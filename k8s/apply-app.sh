@@ -23,12 +23,12 @@ if [[ ! "$TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 1
 fi
 
-for f in api mcp-server web frontend; do
+for f in api mcp-server frontend; do
   # ravneet231/llama-agent[-mcp-server|-frontend]:<anything> -> :<TAG>
   sed -E "s#(image: ravneet231/llama-agent(-mcp-server|-frontend)?):[A-Za-z0-9._-]+#\1:${TAG}#" \
     "$DIR/$f.yaml" | kubectl apply -f -
 done
 
 echo "Pinned images:"
-kubectl -n "$NS" get deploy llama-agent-api llama-agent-mcp-server llama-agent-web llama-agent-frontend \
+kubectl -n "$NS" get deploy llama-agent-api llama-agent-mcp-server llama-agent-frontend \
   -o custom-columns=DEPLOYMENT:.metadata.name,IMAGE:.spec.template.spec.containers[0].image

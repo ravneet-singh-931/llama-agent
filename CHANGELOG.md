@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed (maintenance audit, 2026-11-13)
+
+- **The Streamlit legacy UI, and everything that existed only for it. ~1,900 lines.**
+  `app.py` (1,202), `mcp_client_helper.py` (230 — the stdio MCP client, whose only
+  consumer was `app.py`), `k8s/web.yaml` (Deployment + Service on 8501), the compose `web:`
+  service, the `streamlit==1.66.1` requirement, `AppConfig.streamlit_port`, nginx's
+  `web_backend` upstream and `/streamlit/` location, the k8s ingress `/streamlit` path, the
+  networkpolicy rule for 8501, and the tests that covered the deleted client.
+
+  Next.js is the only UI. The two MCP clients were never duplicates — one is SSE over the
+  network (`modules/mcp_client.py`, used by `api.py`, kept) and the other is stdio spawning
+  a subprocess (`mcp_client_helper.py`, used only by `app.py`, deleted) — so removing the UI
+  settled that question too.
+
+  **Coverage 78.63% → 81.81%**: deleting untested code raises the ratio.
+
+  Three tests failed correctly on the deletion (`test_deploy_routing.py` pinned images for
+  the `web` workload, `test_rollout_strategy_fits_single_node[web-1-0]`,
+  `test_nonroot.py` read `web.yaml`) and were updated to the three remaining workloads. The
+  env-var test added earlier the same day caught `APP_CHAT_MAX`, `MCP_CALL_TIMEOUT` and
+  `POSTGRES_HOST` becoming unread — three `.env.example` entries that were live an hour
+  earlier.
+
+  Also deleted: `TestClientToolMapping`, which hardcoded the agent-name mapping and
+  asserted against its own copy — changing the real mapping would not have failed it.
+
 ### Fixed (maintenance audit, 2026-11-13)
 
 - **31 unused local variables, 7 of them real dead assignments.** CI lints with

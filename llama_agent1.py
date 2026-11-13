@@ -732,7 +732,7 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
                      user_id: str = "guest", conversation_id: str = "default"):
     """
     Stream agent response token by token.
-    Yields text chunks for st.write_stream() in Streamlit.
+    Yields text chunks for the streaming client.
     """
     mem = memory if memory is not None else globals().get("memory")
     fact_store = facts if facts is not None else globals().get("facts")

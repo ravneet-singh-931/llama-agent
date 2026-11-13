@@ -82,7 +82,6 @@ We expect all contributors to:
 | --- | --- |
 | Main UI (Next.js, via Nginx) | https://localhost |
 | Next.js (direct) | http://localhost:3001 |
-| Streamlit (legacy UI) | http://localhost:8501 |
 | API docs (Swagger) | http://localhost:8000/docs |
 | Grafana (admin / password in `secrets/grafana_admin_password.txt`) | http://localhost:3002 |
 | Prometheus | http://localhost:9090 |
@@ -294,7 +293,6 @@ from modules.rag_optimizations import SemanticCache
 ```
 llama-agent/
 ├── api.py                    # FastAPI REST API (REST + SSE + WebSocket + MCP proxy)
-├── app.py                    # Legacy Streamlit application
 ├── mcp_agents_server.py      # MCP agent server (SSE, multi-agent routing)
 ├── mcp_client_helper.py      # MCP client helper
 ├── multi_agent.py            # Multi-agent orchestration (Groq)

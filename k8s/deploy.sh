@@ -184,14 +184,13 @@ kubectl apply -f k8s/phoenix.yaml
 # ---------------------------------------------------------------------------
 # 5. Application
 # ---------------------------------------------------------------------------
-echo "🤖 Deploying API, MCP server, Streamlit, Next.js frontend..."
+echo "🤖 Deploying API, MCP server, Next.js frontend..."
 # IMAGE_TAG=<git sha> pins every app image in one apply (one rollout).
 bash k8s/apply-app.sh "${IMAGE_TAG:-v7}" "$NAMESPACE"
 
 echo "⏳ Waiting for application rollouts..."
 kubectl -n "$NAMESPACE" rollout status deployment/llama-agent-api --timeout=1200s
 kubectl -n "$NAMESPACE" rollout status deployment/llama-agent-mcp-server --timeout=180s
-kubectl -n "$NAMESPACE" rollout status deployment/llama-agent-web --timeout=180s
 kubectl -n "$NAMESPACE" rollout status deployment/llama-agent-frontend --timeout=180s
 
 if kubectl get pvc uploads-pvc -n "$NAMESPACE" >/dev/null 2>&1; then
@@ -200,7 +199,7 @@ if kubectl get pvc uploads-pvc -n "$NAMESPACE" >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Ingress (API/frontend + passthrough ingress for /ws and /streamlit)
+# 6. Ingress (API/frontend + passthrough ingress for /ws)
 # ---------------------------------------------------------------------------
 echo "🌐 Setting up Ingress..."
 kubectl apply -f k8s/ingress.yaml
@@ -286,9 +285,8 @@ echo ""
 echo "📊 Check status:  kubectl get pods -n $NAMESPACE"
 echo "📋 API logs:      kubectl logs -f deployment/llama-agent-api -n $NAMESPACE"
 echo "📋 MCP logs:      kubectl logs -f deployment/llama-agent-mcp-server -n $NAMESPACE"
-echo "📋 Web logs:      kubectl logs -f deployment/llama-agent-web -n $NAMESPACE"
 echo "📋 Frontend logs: kubectl logs -f deployment/llama-agent-frontend -n $NAMESPACE"
-echo "🔗 App URL:       https://llama-agent.local   (Streamlit: /streamlit/)"
+echo "🔗 App URL:       https://llama-agent.local"
 echo "🔭 Phoenix:       https://phoenix.llama-agent.local"
 echo "📊 Grafana:       https://grafana.llama-agent.local (admin / secrets/grafana_admin_password.txt)"
 echo "📈 Prometheus:    https://prometheus.llama-agent.local"

@@ -35,8 +35,11 @@ openinference-instrumentation-llama-index==4.4.5
 # --- Data Processing ---
 pandas==2.3.3
 
-# --- Web Interface ---
-streamlit==1.66.1  # allows pillow 13
+# --- Image processing (transitive, pinned for CVEs) ---
+# pillow is not imported directly; llama-index-core requires pillow>=9. Pinned here
+# because 13.0.0 fixes 35 CVEs. It used to be capped at <14 by streamlit's own
+# requirement (streamlit removed 2026-11-13 with the legacy UI), so this pin can
+# now move to whatever 14.x ships without waiting on that.
 pillow>=13.0.0  # 35 CVEs fixed in 13.0.0 (needs Python >= 3.11)
 
 # --- REST API ---

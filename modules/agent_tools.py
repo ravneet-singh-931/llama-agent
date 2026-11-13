@@ -76,7 +76,7 @@ def _current_store():
 
     if _document_store is not None:
         return scoped(_document_store, get_owner())
-    # No store bound (e.g. tests / streamlit): use an empty one.
+    # No store bound (e.g. in tests): use an empty one.
     from modules.rag import SimpleRAG
     return SimpleRAG()
 

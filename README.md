@@ -5,7 +5,6 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009639.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Next.js](https://img.shields.io/badge/Next.js-16+-000000.svg?logo=nextdotjs)](https://nextjs.org/)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.40+-FF4B4B.svg?logo=streamlit)](https://streamlit.io/)
 [![Groq](https://img.shields.io/badge/Groq-API-00F5A8.svg?logo=groq)](https://groq.com/)
 [![Phoenix](https://img.shields.io/badge/Phoenix-Observability-43B58B.svg)](https://arize.com/phoenix/)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-000000.svg?logo=opentelemetry)](https://opentelemetry.io/)
@@ -578,7 +577,6 @@ cd llama-agent
    |---------|-----|
    | **Main App (Next.js)** | https://llama-agent.local/ |
    | **API Docs (Swagger)** | https://llama-agent.local/api/docs |
-   | **Streamlit UI (legacy)** | https://llama-agent.local/streamlit/ |
 
 #### 🐳 Docker Compose (alternative — not running by default here)
 1. **Add your secrets** (never committed):
@@ -608,7 +606,6 @@ cd llama-agent
    |---------|-----|
    | **Main App (Next.js)** | http://localhost:3001 |
    | **API Docs (Swagger)** | http://localhost:8000/docs |
-   | **Streamlit UI (legacy)** | http://localhost:8501/streamlit/ |
    | **Nginx (SSL/LB)** | https://localhost (self-signed cert generated on first start; put real certs in `config/nginx/ssl/`) |
 
 ### 3️⃣ Create an account
@@ -621,14 +618,14 @@ cd llama-agent
 ## 🛡️ Secure-by-default
 
 The committed `docker-compose.yml` publishes the user-facing ports
-(`3001`, `8000`, `8501`, `80/443`). The monitoring UIs are bound to **localhost only**
+(`3001`, `8000`, `80/443`). The monitoring UIs are bound to **localhost only**
 (`127.0.0.1`), so you can open them on your own machine but nobody else can:
 Grafana http://localhost:3002, Prometheus http://localhost:9090,
 Phoenix http://localhost:6006. Postgres, Redis, Loki, node-exporter and the MCP server
 are **internal to the Docker network**.
 
 The Kubernetes deployment is locked down the same way: the ingress exposes only the
-app routes (`/`, `/api`, `/ws`, `/streamlit`). The MCP server is internal-only,
+app routes (`/`, `/api`, `/ws`). The MCP server is internal-only,
 `/metrics` refuses proxied requests, and the observability UIs sit behind basic-auth
 (or SSO with `OIDC_ENABLED=true`).
 
@@ -648,11 +645,11 @@ app routes (`/`, `/api`, `/ws`, `/streamlit`). The MCP server is internal-only,
         │              │              │
         ▼              ▼              ▼
 ┌──────────────┐ ┌─────────────┐ ┌───────────────────────┐
-│ Next.js UI   │ │ Streamlit   │ │ FastAPI (8000)        │
-│ :3001        │ │ UI :8501    │ │ /chat /chat/stream    │
-│              │ │ (legacy)    │ │ /ws /auth /documents  │
-└──────────────┘ └─────────────┘ │ /monitoring /metrics  │
-                                 └───────┬───────────────┘
+│ Next.js UI   │ │ FastAPI (8000)                        │
+│ :3001        │ │ /chat /chat/stream                    │
+│              │ │ /ws /auth /documents                  │
+└──────────────┘ │ /monitoring /metrics                  │
+                 └───────┬───────────────────────────────┘
         ┌───────────────────────────────┬┘───────────┬────────────┐
         ▼                               ▼            ▼            ▼
 ┌──────────────┐ ┌──────────────────┐ ┌─────────────┐ ┌─────────────┐
@@ -713,7 +710,7 @@ Both keep ChromaDB cluster-internal (no published host port).
 
 | Layer | Technology |
 |-------|-----------|
-| **Frontend** | Next.js 16 (main UI), Streamlit (legacy) |
+| **Frontend** | Next.js 16 |
 | **Backend** | FastAPI, Python 3.11, asyncpg |
 | **Database** | PostgreSQL 15, Redis 7, ChromaDB |
 | **AI/ML** | Groq (`qwen/qwen3.8-27b` strong, `openai/gpt-oss-20b` fast), LlamaIndex, onnxruntime (reranker) |
@@ -734,7 +731,6 @@ Both keep ChromaDB cluster-internal (no published host port).
 | `llama-agent-chromadb` | `chromadb` | Shared ChromaDB vector store (all API replicas) | internal |
 | `llama-agent-api` | `api` | FastAPI REST + WebSocket + SSE chat | **8000** |
 | `llama-agent-mcp` | `mcp-server` | MCP agent server (SSE, 5 agents) | internal |
-| `llama-agent-web` | `web` | Streamlit UI (legacy) | **8501** |
 | `llama-agent-frontend` | `frontend` | Next.js 16 UI | **3001** |
 | `llama-agent-nginx` | `nginx` | SSL + Load Balancer + security headers | **80, 443** |
 | `llama-agent-prometheus` | `prometheus` | Metrics collection + alert rules | 127.0.0.1:9090 |
@@ -951,7 +947,6 @@ llama-agent/
 ├── llama_agent1.py           # GroqLLM llama-index wrapper + streaming agent
 ├── multi_agent.py            # Multi-agent orchestrator (5 agents) + Phoenix-aware client
 ├── mcp_agents_server.py      # MCP agent server (SSE, 5 specialized agents)
-├── app.py                    # Streamlit application (legacy UI)
 ├── frontend/                 # Next.js 16 main UI
 ├── modules/
 │   ├── auth.py               # JWT authentication
@@ -1019,7 +1014,7 @@ app → ingress → monitoring → backups/HPA/PDB → NetworkPolicies.
 
 > **Note:** add `llama-agent.local` → ingress IP to your `hosts` file. Ingress routes
 > `/` → Next.js, `/api/*` → API (prefix stripped), `/ws/*` → API WebSocket,
-> `/streamlit/*` → Streamlit. MCP stays internal.
+> MCP stays internal.
 > Images come from Docker Hub (`ravneet231/llama-agent*`). CI pushes `:latest`, `:v7` and an
 > immutable `:<git sha>`; the CD job renders `:<sha>` into the manifests (`k8s/apply-app.sh`)
 > so every deploy is one rollout (and `kubectl rollout undo` works).

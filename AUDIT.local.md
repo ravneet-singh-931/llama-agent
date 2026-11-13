@@ -28,16 +28,16 @@ in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/a
 | 10 | 546 unreachable lines in `database_improvements` (29% coverage) | `modules/database_improvements.py` | 🟢 **DONE** | 678 → **103 lines**. 5 of 6 classes deleted (0 refs). **Also removed an import-time side effect:** its singletons ran `os.makedirs()` so importing created `backups/` + `migrations/`. Coverage 29% → 74%; repo 68% → **70%** |
 | 11 | 74 of 111 env vars absent from `.env.example` (76 absent from README) | `.env.example` | 🟢 **DONE** | **111 → 120 documented, 0 missing.** Extracted from source, not a hand list. Found 9 more read via name-indirection + `SSL_CN` in a shell script. `test_env_documented.py` fails in both directions |
 | 12 | No coverage floor in CI — the suite reported coverage but never gated on it | `.github/workflows/main.yml` | 🟢 **DONE** | `--cov-fail-under=74`, set 4 points under the measured **78.61%** on CI's `--cov=.` scope. A ratchet, with the scope written into the comment |
-| 13 | Two full UIs (Next.js + Streamlit "legacy") | `frontend/`, `app.py` | 🔴 **OPEN** | decision needed |
+| 13 | Two full UIs (Next.js + Streamlit "legacy") | `frontend/`, `app.py` | 🟢 **DONE** | **Streamlit deleted entirely** — see PART 20 |
 | 14 | Three monitoring modules, 1,348 lines | `monitoring.py`, `advanced_monitoring.py`, `prometheus_metrics.py` | 🔴 **OPEN** | 2–3 h |
 | 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🔴 **OPEN** | days; do last |
 | 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🔴 **OPEN** | days |
-| 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🔴 **OPEN** | 1 h |
+| 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🟢 **DONE** | stdio client (230 lines) deleted with the UI; only the SSE client ships |
 | 18 | 32 `except Exception: pass` in live paths | mostly `prometheus_metrics.py` | 🔴 **OPEN** | 1 h |
 | 19 | 31 unused local variables (`F841`) — invisible to CI | repo-wide | 🟢 **DONE** | **31 → 0.** 24 were `except … as e` bindings; **7 were real dead assignments**, two of which changed what the rate limiter's hour window means. F401 unchanged at 29, none introduced |
 | 20 | Metrics counted twice; 3 ways to view them | `api.py`, `prometheus_metrics.py` | 🔴 **OPEN** | duplication, low |
 
-**13 DONE, 7 OPEN.** Every 🟢 row has a test that fails when the fix is reverted, or a
+**15 DONE, 5 OPEN.** Every 🟢 row has a test that fails when the fix is reverted, or a
 measured before/after. Every 🔴 row has an effort estimate and a reason for its position.
 
 ---
@@ -961,3 +961,94 @@ check that was run was narrower than the claim.**
 The fix in CI is a `--cov-fail-under=74` ratchet, set 4 points below the measured 78.61%,
 with the scope written into the comment so the next person cannot compare it to the
 narrower number.
+
+---
+
+# PART 20 — Streamlit deleted (problems 13 and 17)
+
+**Decision: the user's.** *"delete streamlit all things its files and connections with only
+because we donot need streamlit now we can use only nextjs."* Recorded here so the reasoning
+is not re-litigated later.
+
+## What was deleted
+
+| Thing | Size | Why it went with Streamlit |
+|---|---|---|
+| `app.py` | **1,202 lines** | the Streamlit UI itself |
+| `mcp_client_helper.py` | **230 lines** | the **stdio** MCP client — `app.py` was its only consumer |
+| `k8s/web.yaml` | ~210 lines | Deployment + Service for Streamlit on 8501 |
+| `docker-compose.yml` `web:` service | ~39 lines | same, for compose |
+| `streamlit==1.66.1` | 1 requirement | nothing else imported it |
+| `streamlit_port` in `AppConfig` | 1 field | read by nothing |
+| nginx `web_backend` upstream | 4 lines | pointed at `web:8501` |
+| nginx `/streamlit/` location | 13 lines | proxied that upstream |
+| k8s ingress `/streamlit` path | 7 lines | routed to the deleted Service |
+| networkpolicy port 8501 | 1 rule | allowed traffic to a dead Service |
+| `TestClientToolMapping`, `TestClientInitialState`, 4 mcp classes | ~215 lines | tested the deleted stdio client |
+| `APP_CHAT_MAX` from `.env.example` | 1 entry | `app.py` was its only reader |
+
+**~1,900 lines removed.** Coverage went **78.63% → 81.81%** — deleting untested code does
+that.
+
+## The MCP question answered itself
+
+Problem 17 asked whether the two MCP clients should be merged. They were **not duplicates**:
+
+| | `modules/mcp_client.py` | `mcp_client_helper.py` |
+|---|---|---|
+| Transport | SSE over the network | **stdio**, spawns a subprocess |
+| Consumer | `api.py` | `app.py` only |
+| After this | **kept** | **deleted** |
+
+Deleting the UI deleted the client, and the question with it. This is why 13 and 17 were
+listed as one decision rather than two.
+
+## A vacuous test found on the way out
+
+`TestClientToolMapping` in `tests/test_mcp.py` looked like it tested the client's agent-name
+mapping. It did not:
+
+```python
+def _get_mapping(self):
+    """Import the tool mapping from the client source."""
+    # The mapping is inside call_agent; we replicate it here for testing
+    return {"research": "research_agent", "coder": "coder_agent", ...}
+
+def test_all_agent_types_mapped(self):
+    mapping = self._get_mapping()
+    assert "research" in mapping
+```
+
+It hardcodes the mapping and asserts against the hardcoded copy. **Change the real mapping
+and this test still passes.** It is the CORS test in a different shape — the second
+instance of that defect found in this audit.
+
+## What the tests caught that I would not have
+
+Three tests failed after the deletion and each was correct to fail:
+
+- `test_deploy_routing.py` pinned images for `api`, `mcp-server`, **`web`**, `frontend`
+- `test_rollout_strategy_fits_single_node[web-1-0]` read `k8s/web.yaml`
+- `test_nonroot.py` checked the security context of `web.yaml`
+
+They were reading the file I had deleted. Updated to the three remaining workloads.
+
+And the env-var test from problem 11 caught `APP_CHAT_MAX`, `MCP_CALL_TIMEOUT` and
+`POSTGRES_HOST` becoming unread — three `.env.example` entries that were live an hour
+earlier. **That is the test doing exactly what it was written for, one commit after being
+written.**
+
+## A correction to my own record
+
+Before this work I reported: *"Streamlit ships in compose but appears in no k8s manifest —
+the cluster runs API + Next.js only."* That was **wrong**. `k8s/web.yaml` existed and ran a
+real Streamlit Deployment with probes, a Service and an ingress path.
+
+I made the error by running
+`grep -rn "streamlit" k8s/ | head -3` — which returned matches only in comments — and
+`head -5 k8s/web.yaml`, which showed the LEARNER GUIDE header and not the `command:` line
+at 102. I read truncated output as an absence and stated it as a finding.
+
+The correct version: **Streamlit was deployed in both compose and the cluster.** It is
+deleted from both now. Recorded here because "I checked and it wasn't there" is the exact
+failure mode this whole audit is about, and I did it again.
