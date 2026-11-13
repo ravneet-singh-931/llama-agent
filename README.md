@@ -66,7 +66,7 @@ on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 839 passed, 6 skipped, 17 deselected (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 842 passed, 6 skipped, 17 deselected (LLM stubbed); **78.6% coverage** on CI's `--cov=.` scope, gated at 74% | `pytest tests/ -q -m "not mcp" --cov=.` |
 | **Cost** | $0.24 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (row 22) |
 | **Bugs found and fixed** | 44 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
 
@@ -84,7 +84,7 @@ proof type, the row does not belong here.
 | 3 | **Observability** | [`OBSERVABILITY_FINDINGS.md`](docs/OBSERVABILITY_FINDINGS.md) | 4 | a 2.0 s stream recorded as 0.002 s → 2.008 s; tracing cost measured at ~5 µs/span across 5 points |
 | 4 | **RAG** | [`RAG_FINDINGS.md`](docs/RAG_FINDINGS.md) | 6 | a retrieval table with three *negative* results published; 0 cross-user leaks across every run |
 | 5 | **Security** | [`SECURITY_FINDINGS.md`](docs/SECURITY_FINDINGS.md) | 4 | four questions answered in both directions; containment verified on both chat paths |
-| 6 | **The dark modules** | [`DARK_MODULES.md`](docs/DARK_MODULES.md) | 23 dead names | 61 public names checked by reference, not by line count; 13 also untested |
+| 6 | **The dark modules** | [`DARK_MODULES.md`](docs/DARK_MODULES.md) | 23 dead names | 61 public names checked by reference, not by line count; 13 also untested. Since then `services.py` (84 lines), `database_improvements` (546 of 678 lines), 3 dead functions and 7 unread feature flags have been **deleted**, not just counted |
 | 7 | **The cluster** | [`KUBERNETES_CHECKS.md`](docs/KUBERNETES_CHECKS.md) | 9 checks | live-cluster commands; re-audited against all 31 manifests, which caught one wrong claim; check 8 boots the app with no key |
 
 **What that adds up to:** 44 fixed bugs, 23 dead public names, 7 findings documents, and
@@ -992,7 +992,7 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status:** 839 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
+**Current status:** 842 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
 39 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
@@ -1126,7 +1126,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 839 passed, 6 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 842 passed, 6 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89

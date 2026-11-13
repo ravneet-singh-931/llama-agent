@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (maintenance audit, 2026-11-13)
 
+- **111 environment variables the code reads, 37 documented — now 120 and 120.**
+  Extracted every `os.getenv` / `os.environ` read from the source rather than from a
+  hand-kept list: `.env.example` named 37 of the 111, so 74 live knobs —
+  `AGENT_PARALLEL`, `AGENT_REFLECT`, `AGENT_LATENCY_BUDGET`, `MCP_TIMEOUT`,
+  `STREAM_MAX_DURATION`, `RATE_LIMIT_RPM`, `LLM_PROVIDER_CHAIN` among them — changed
+  runtime behaviour and appeared in no file a user would look at. Every one is now in
+  `.env.example` with its call-site default, and grouped by subsystem.
+  Nine more are read through a variable-name indirection that a `getenv` grep cannot
+  see (`model_tiers.py` maps a provider to its env-var *names*; `multi_agent.py` builds
+  the name in a local variable), and `SSL_CN` is read by
+  `config/nginx/ensure-cert.sh` rather than Python — all documented.
+  `tests/test_env_documented.py` fails in **both** directions now: a variable added to
+  the code without a `.env.example` line, and a `.env.example` line nothing reads.
+
+- **`database_improvements` 678 lines → 103, and an import-time side effect with it.**
+  `MigrationManager`, `BackupManager`, `ConnectionPool`, `QueryOptimizer` and
+  `create_initial_migrations` had **zero** references in any non-test file; only
+  `DatabaseHealthCheck` is wired (`api.py:457`, from `/health`). Three of them had
+  module-level singletons that ran `os.makedirs()` in `__init__`, so merely importing the
+  module created `backups/` and `migrations/` in the working directory — on every process
+  start, in every container. Verified before and after in a fresh temp directory. A test
+  now imports the module with a temporary cwd and requires it to create nothing.
+  File coverage 29% → 74%, repo total 68% → 70%.
+
 - **CVE-2026-126360 in `opentelemetry-api` 1.45.1.** The Security Scan went red on a
   dependency `requirements.txt` never named — `opentelemetry-api` arrived transitively
   through `opentelemetry-instrumentation-fastapi`, which is how it drifted to a

@@ -307,3 +307,62 @@ comment; a guard that something calls is a limit.
 `get_online_count`, `reload_config` and the whole `services` module are now deleted
 rather than documented. The 546 unreachable lines in `database_improvements` are
 unchanged — that deletion is still open.
+
+
+---
+
+## Addendum 2026-11-13 (second) — `database_improvements`: 678 lines → 103
+
+This document already recorded the 546 unreachable lines here. They are now deleted, and
+the reason is worth recording because a count is not the same as a defect.
+
+### What was unreachable
+
+| Symbol | External references |
+|---|---|
+| `MigrationManager` | **0** |
+| `BackupManager` | **0** |
+| `ConnectionPool` | **0** |
+| `QueryOptimizer` | **0** |
+| `create_initial_migrations` | **0** |
+| `DatabaseHealthCheck` | 1 (`api.py:457`, from `/health`) |
+
+Only `DatabaseHealthCheck` was wired. The other five existed, had tests, had docstrings
+listing features, and were called by nothing.
+
+### The part that was an actual defect, not just unused code
+
+Three of them had module-level singletons that ran `os.makedirs()` in `__init__`:
+
+```python
+migration_manager = MigrationManager()   # os.makedirs("migrations")
+backup_manager    = BackupManager()      # os.makedirs("backups")
+```
+
+So **importing the module had a side effect** — it created two directories in the working
+directory. Verified before the fix:
+
+```
+$ cd /tmp/empty && python -c "import modules.database_improvements"
+$ ls
+backups   migrations
+```
+
+Dead code that is never called is untidy. Dead code that runs at import is different: it
+executes on every process start, in every container, and nothing asked it to. After the
+deletion, importing creates nothing — and a test asserts that by importing the module in a
+fresh temporary directory and requiring the directory to stay empty.
+
+### What is left
+
+```
+$ wc -l modules/database_improvements.py
+103 modules/database_improvements.py
+```
+
+`DatabaseHealthCheck` and the `db_health_check` singleton. The module's own docstring now
+says what it is for and what was removed, so the next reader does not assume the other
+five are somewhere else.
+
+Coverage of the file went **29% → 74%**; repo total **68% → 70%** — the second number moved
+2 points for reasons that have nothing to do with new tests.

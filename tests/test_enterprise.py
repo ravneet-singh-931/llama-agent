@@ -438,13 +438,43 @@ class TestEnterpriseModules:
         assert result["status"] == "unhealthy"
         assert result["checks"]["connection"]["status"] == "unhealthy"
 
-    def test_migration_manager_status(self, tmp_path):
-        from modules.database_improvements import MigrationManager
+    def test_dead_database_managers_stay_deleted(self):
+        """`database_improvements` was 678 lines; 546 of them were unreachable.
 
-        manager = MigrationManager(migrations_dir=str(tmp_path / "migrations"))
-        status = manager.get_status()
-        assert "applied" in status
-        assert "pending" in status
+        MigrationManager, BackupManager, ConnectionPool, QueryOptimizer and
+        create_initial_migrations had zero references in any non-test file. Three
+        of them had module-level singletons that called os.makedirs() at import,
+        so importing the module silently created `backups/` and `migrations/`.
+        Only DatabaseHealthCheck is wired (api.py:457, from /health). This pins
+        that the dead four do not come back as a second way to do migrations or
+        pooling, and that importing the module still has no side effects.
+        """
+        import importlib
+        import os
+        import sys
+
+        import modules.database_improvements as db
+
+        for gone in ("MigrationManager", "BackupManager",
+                     "ConnectionPool", "QueryOptimizer",
+                     "create_initial_migrations"):
+            assert not hasattr(db, gone), f"{gone} was dead code and must stay deleted"
+        assert hasattr(db, "db_health_check")
+
+        # Re-import in a fresh working directory: the module used to run
+        # os.makedirs() from module-level singletons, so importing it created
+        # `backups/` and `migrations/` wherever the process happened to be.
+        original = os.getcwd()
+        with __import__("tempfile").TemporaryDirectory() as tmpdir:
+            try:
+                os.chdir(tmpdir)
+                sys.modules.pop("modules.database_improvements", None)
+                fresh = importlib.import_module("modules.database_improvements")
+                assert fresh.db_health_check is not None
+                created = sorted(os.listdir(tmpdir))
+            finally:
+                os.chdir(original)
+        assert created == [], f"importing the module must create nothing, got {created}"
 
 
 if __name__ == "__main__":
