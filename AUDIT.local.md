@@ -6,6 +6,43 @@
 
 # Complete audit — over-engineering + deep logic/wiring/correctness
 
+# 📋 STATUS BOARD — every problem, and whether it is DONE or OPEN
+
+**Read this first.** Everything below is a problem this audit found. 🟢 DONE means fixed
+in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/after.
+🔴 OPEN means still present in the repo, with the effort estimated.
+
+**Last updated:** after PR #50 reached 7/7 CI green.
+
+| # | Problem | Where | Status | Proof / note |
+|---|---|---|---|---|
+| 1 | CORS reflected **any** origin while sending credentials | `api.py:663` | 🟢 **DONE** | before/after curl: header reflected → absent. `SECURITY_FINDINGS.md` S5 |
+| 2 | `test_cors_headers_present` asserted nothing (README cited it) | `tests/test_security.py:402` | 🟢 **DONE** | sabotaging `add_middleware` now fails it with `assert []` |
+| 3 | CI `integration` job installed unpinned deps — tested a different `mcp` than ships | `.github/workflows/main.yml:275` | 🟢 **DONE** | now `pip install -r requirements.txt`; also dropped the unused `fastmcp`. `KUBERNETES_CHECKS.md` check 9 |
+| 4 | 7 of 8 shipped feature flags were read by **no code** | `config/feature_flags.json` | 🟢 **DONE** | 8 flags → 1. `test_every_shipped_flag_is_actually_read` |
+| 5 | `validate_fact_key`/`validate_fact_value` called from nowhere — a 10,000-char chat message became a 10,000-char fact | `modules/security.py` → `modules/memory.py` | 🟢 **DONE** | wired into `FactMemory.remember()`, 5 tests |
+| 6 | `modules/services.py` — 84 lines kept alive only by a test that imported it | `modules/services.py` | 🟢 **DONE** | deleted; `test_dead_service_locator_stays_deleted` |
+| 7 | `broadcast_message`, `get_online_count`, `reload_config` — 0 references | `websocket.py`, `config.py` | 🟢 **DONE** | deleted |
+| 8 | `upload_document` blocked the event loop with a sync write | `api.py:3027` | 🟢 **DONE** | now `await asyncio.to_thread(...)` |
+| 9 | **CVE-2026-126360** in `opentelemetry-api` 1.45.1 | `requirements.txt` | 🟢 **DONE** | three packages bumped to 1.45.2 / 0.66b2; `pip-audit` clean |
+| 10 | 546 unreachable lines in `database_improvements` (29% coverage) | `modules/database_improvements.py` | 🟢 **DONE** | 678 → **103 lines**. 5 of 6 classes deleted (0 refs). **Also removed an import-time side effect:** its singletons ran `os.makedirs()` so importing created `backups/` + `migrations/`. Coverage 29% → 74%; repo 68% → **70%** |
+| 11 | 74 of 111 env vars absent from `.env.example` (76 absent from README) | `.env.example` | 🟢 **DONE** | **111 → 120 documented, 0 missing.** Extracted from source, not a hand list. Found 9 more read via name-indirection + `SSL_CN` in a shell script. `test_env_documented.py` fails in both directions |
+| 12 | No coverage floor in CI — the suite reported coverage but never gated on it | `.github/workflows/main.yml` | 🟢 **DONE** | `--cov-fail-under=74`, set 4 points under the measured **78.61%** on CI's `--cov=.` scope. A ratchet, with the scope written into the comment |
+| 13 | Two full UIs (Next.js + Streamlit "legacy") | `frontend/`, `app.py` | 🔴 **OPEN** | decision needed |
+| 14 | Three monitoring modules, 1,348 lines | `monitoring.py`, `advanced_monitoring.py`, `prometheus_metrics.py` | 🔴 **OPEN** | 2–3 h |
+| 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🔴 **OPEN** | days; do last |
+| 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🔴 **OPEN** | days |
+| 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🔴 **OPEN** | 1 h |
+| 18 | 32 `except Exception: pass` in live paths | mostly `prometheus_metrics.py` | 🔴 **OPEN** | 1 h |
+| 19 | 31 unused local variables (`F841`) — invisible to CI | repo-wide | 🔴 **OPEN** | CI runs only `--select=E9,F63,F7,F82` |
+| 20 | Metrics counted twice; 3 ways to view them | `api.py`, `prometheus_metrics.py` | 🔴 **OPEN** | duplication, low |
+
+**12 DONE, 8 OPEN.** Every 🟢 row has a test that fails when the fix is reverted, or a
+measured before/after. Every 🔴 row has an effort estimate and a reason for its position.
+
+---
+
+
 **Audited:** 2026-11-13 against `69f8f42`. **Read-only — nothing changed.**
 **Method:** AST parsing, import-graph analysis, env-var reconciliation, full coverage run,
 Prometheus-rule validation, plus manual reading of every path that carries traffic.
@@ -94,7 +131,12 @@ class is not a complete loss — but the test the README points at is decoration
 
 ---
 
-# PART 2 — Code coverage is 68%, and the holes are the important ones
+# PART 2 — Code coverage is 68% on `modules/`+`api.py`; the repo is 79%
+
+> **Scope, stated up front (corrected in PART 19):** this section measured
+> `--cov=modules --cov=api`. **The repo total on CI's wider `--cov=.` scope is 79%**
+> (78.61% measured after the dead-code deletion). Both are true; do not compare
+> them. The per-file numbers below are unaffected.
 
 First time this has ever been measured. Full suite with `--cov=modules --cov=api`:
 
@@ -841,3 +883,81 @@ answered by **running the failing command against `main` itself** rather than re
 diff — five minutes, and it turns a guess into a fact.
 
 > A red job is a claim. Check whose.
+
+---
+
+# PART 19 — Problem 11 (env vars), and a scope error that changed a headline number
+
+## 11. 74 of 111 environment variables were undocumented
+
+`README.md` documented 35 of them. `.env.example` listed 37. That left **74 live knobs**
+— `AGENT_PARALLEL`, `AGENT_REFLECT`, `AGENT_CRITIQUE`, `AGENT_LATENCY_BUDGET`,
+`MCP_TIMEOUT`, `STREAM_MAX_DURATION`, `RATE_LIMIT_RPM`, `LLM_PROVIDER_CHAIN` among them —
+that changed runtime behaviour and appeared in no file a user would open.
+
+### Fixed by extracting from the source, not from a list
+
+Every row was pulled from an actual `os.getenv()` / `os.environ.get()` call, with the
+literal default from the same call site. That makes the table unable to claim a variable
+the code does not read.
+
+Final: **111 statically read + 9 read by name-indirection = 120, all documented.**
+
+Three kinds were invisible to the obvious scan, which is why this needed more than a grep:
+
+| Kind | Example | Why a `getenv("X")` grep misses it |
+|---|---|---|
+| name built in a variable | `_max_tokens_env = "AGENT_MAX_TOKENS"; os.getenv(_max_tokens_env)` | the string is not the argument |
+| provider map lookup | `_PROVIDER_ENV = {"groq": ("GROQ_MODEL_STRONG", ...)}` | read by resolved name |
+| not Python at all | `SSL_CN` in `config/nginx/ensure-cert.sh:15` | the consumer is a shell script |
+
+### The reverse direction, which found something
+
+A second test asserts `.env.example` does not document variables nothing reads. It failed
+first time with 9 names. Eight were false positives — they are the name-indirection cases
+above, read through `multi_agent.py` and `model_tiers.py`. **`SSL_CN` was real**: read by
+the nginx cert script, not Python. The test was wrong, not the file; it now scans `.sh`,
+`.yml`, `.yaml` and `.conf` too.
+
+**Proof it can fail:** adding `os.getenv("MY_UNDOCUMENTED_KNOB")` to `modules/config.py`
+fails it with `environment variables read by the code but absent from .env.example:
+MY_UNDOCUMENTED_KNOB`.
+
+---
+
+## Scope error: "68% coverage" and "79% coverage" are both true
+
+This is a correction to the headline in PART 2, and it is the kind that matters.
+
+My audit measured coverage with:
+
+```
+--cov=modules --cov=api        ->  TOTAL 7057  2087 missed  70%
+```
+
+CI measures it with:
+
+```
+--cov=.                        ->  TOTAL 17593  3764 missed  78.61%
+```
+
+`--cov=.` includes `evals/`, `app.py`, `multi_agent.py` and `llama_agent1.py`, which the
+narrow scope skips. **Both numbers are correct. They measure different things.**
+
+The audit quoted 68% (the pre-deletion figure under the narrow scope) as if it were *the*
+project's coverage. It is the coverage of `modules/` + `api.py`. **The repository total,
+on the scope CI actually uses, is 79%.**
+
+That does not weaken the finding — `api.py` at 51% and `auth.py` at 53% are unchanged and
+are still the point. But the sentence "the project is 68% covered" was wrong, and the
+correct one is "`modules/` + `api.py` are 70% covered; the repo is 79%."
+
+### Why this is the same mistake as the audit itself kept finding
+
+A number was quoted without naming its scope. That is exactly the shape of the CORS test,
+the CI dependency list, and the eval coverage gate: **the claim was checkable, and the
+check that was run was narrower than the claim.**
+
+The fix in CI is a `--cov-fail-under=74` ratchet, set 4 points below the measured 78.61%,
+with the scope written into the comment so the next person cannot compare it to the
+narrower number.
