@@ -4,6 +4,11 @@ The project in four parts, each with the document that proves it and the numbers
 back it. If you read one file to judge whether this repo is worth your time, read this
 one — it is an index, and every claim in it links to the evidence.
 
+> **Where the work stands right now:** [`ROADMAP.md`](ROADMAP.md) tracks every part,
+> what is done, what is open, and the order the rest will be done in. This file
+> describes the four parts that are finished; the roadmap is honest about the ones
+> that are not.
+
 **The organising idea:** the interesting thing about this project is not that it has
 five agents, a RAG pipeline and a Kubernetes deployment. It is that **every part of it
 was measured, and the measurement was wrong at first**. Four separate parts, four
