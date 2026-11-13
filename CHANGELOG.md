@@ -171,6 +171,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code change, not a triage, and deleting plausible planned work is the owner's call.
   What changed is that every dead name is now listed instead of assumed absent.
 
+- **`docs/KUBERNETES_CHECKS.md` re-audited — and one of its own claims was wrong.**
+  No cluster is available here, so all 31 manifests (89 resources) were parsed and every
+  statically-checkable claim re-verified. **Six of seven checks stand**; the header, which
+  still said "the third of three findings documents", was three documents out of date and
+  is rebuilt with the real table and the seven-part count.
+
+  The claim that did not survive: `## Still open` said *"the backups are on the same disk
+  as the database (losing the disk loses both)."* **False as a statement about layout**,
+  and it contradicted the manifest it described — `postgres-backup-cronjob.yaml:157` says
+  the opposite in a comment written at the time. Two PVCs, 5Gi and 10Gi.
+
+  What *is* true is narrower and worse-shaped: one node, all seven PVCs `ReadWriteOnce`,
+  no StorageClass in the repo — so a *volume* failure loses only the backups as designed,
+  but **losing the node's disk loses both and neither volume can move**. The old sentence
+  had the right conclusion and the wrong evidence, which is the failure this project has
+  spent six documents on.
+
+  Two smaller corrections, one in the project's favour: six workloads run non-root
+  (`api`/`web`/`mcp` at 1000, `frontend` at 1001, `metrics-server` 1000, `node-exporter`
+  65534), not the four the text implied. And **eleven of thirteen images are pinned by
+  tag, not digest** — only Chroma and Phoenix are digest-pinned, which matters before
+  claiming "pinned images."
+
+  The four checks that need `kubectl` could not be re-run and are marked as such. Reading
+  a YAML file is not re-running a cluster.
+
 - **`docs/CASE_STUDIES.md` — the index the project was missing.** Four parts, four
   findings documents, one headline number each, and the through-line that connects
   them. The README now links it first, because until now a visitor had to find the

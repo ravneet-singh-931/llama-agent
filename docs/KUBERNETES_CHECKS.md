@@ -1,16 +1,24 @@
-# Kubernetes checks (live cluster, 2026-10-26)
+# Kubernetes checks (live cluster, 2026-10-26; audited 2026-11-13)
 
 Checked on the running cluster (Docker Desktop, kind, 1 node, Kubernetes v1.36.1): what was
 wrong, what was fixed, and the proof. The commands are safe to rerun.
 
-**This is the third of three findings documents**, and the only one written against a
-running cluster rather than a test suite:
+**Status, stated up front.** The seven checks below were run against a live cluster on
+2026-10-26. On **2026-11-13** every claim that can be verified from the manifests alone was
+re-verified by parsing all 31 files (89 resources) — and **one claim in this document was
+wrong**. See *"What the audit found"* at the end. The four checks that need a running
+cluster (`kubectl`) could not be re-executed here and are marked as such; they are not
+being re-asserted as freshly true.
 
 | Document | Surface | Findings |
 |---|---|---|
-| [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | the measuring stick | 18 |
-| [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | Prometheus / Grafana / Phoenix | 3 |
-| **this file** | the cluster itself | 5 checks |
+| [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | the measuring stick | 20 |
+| [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | the agents | 5 fixed, 4 open |
+| [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | Prometheus / Grafana / Phoenix | 4 |
+| [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | retrieval, ranking, the gate | 6 |
+| [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | the browser boundary | 4 |
+| [`DARK_MODULES.md`](DARK_MODULES.md) | 11 modules, 2,928 lines | 23 dead names |
+| **this file** | **the cluster itself** | **7 checks** |
 
 **The through-line here is different again.** The eval findings were guards attached one
 level too low; the agent findings were agents answering without the input they needed.
@@ -125,10 +133,79 @@ mcp-server, web, frontend) are not in the list.
 
 Memory per pod: `process_resident_memory_bytes{job="llama-agent-api"}` in Prometheus.
 
+## What the audit found (2026-11-13)
+
+All 31 manifests were parsed and every claim above that can be checked statically was
+checked. Result: **six of seven checks stand, one sentence did not.**
+
+### Verified against the manifests
+
+| Check | Claim | Verified how | Result |
+|---|---|---|---|
+| 1 | CronJob waits up to 5 min for Postgres | `k8s/postgres-backup-cronjob.yaml:107` — `for i in $(seq 1 60)` with `pg_isready`, `sleep 5` | ✅ present |
+| 3 | HPA on the api | `k8s/api-hpa.yaml` | ✅ `llama-agent-api-hpa`, min 2 / max 10, CPU 70%, scale-down stabilised 300 s |
+| 3 | HPA on the mcp server | same file | ✅ `llama-agent-mcp-hpa`, min 1 / max 4, CPU 70% |
+| 4 | NetworkPolicy includes a default deny | `k8s/networkpolicy.yaml` | ✅ `default-deny-ingress` **and** `default-deny-egress`, both `podSelector: {}` |
+| 4 | Only specific pods accept ingress | same | ✅ `allow-from-ingress-nginx` scoped to 7 components |
+| 5 | Chroma and Phoenix pinned by digest | all 13 Deployments parsed | ✅ both `@sha256:`; the other 11 use **tags**, not digests (see below) |
+| 6 | The 4 app Deployments do not run as root | all 16 workloads parsed | ✅ api/web/mcp `1000`, frontend `1001` |
+| 6 | Grafana, Loki, Prometheus run as root | same | ✅ all three `container.securityContext.runAsUser: 0` |
+
+### A number the manifest pass disagrees with, in the flattering direction
+
+Check 6 says *"the 4 app Deployments (api, mcp-server, web, frontend) are not in the
+[restricted-violation] list"* — true, and it implies everything else fails. The parse says
+it is better than that: `metrics-server` runs as `1000` and `node-exporter` as `65534`, so
+**six** workloads are non-root, not four. Nine are unset (image default) or root.
+
+That is a small correction in the project's favour, recorded because the paragraph that
+says "nine pods would be rejected" is doing work in the argument and should be right.
+
+### The sentence that was wrong
+
+`## Still open` used to say:
+
+> *"the backups are on the same disk as the database (losing the disk loses both)."*
+
+**That is false as a statement about storage layout, and it contradicted the manifest it
+was describing.** `k8s/postgres-backup-cronjob.yaml:157` says the opposite, in a comment
+written at the time:
+
+> `# Separate from postgres-pvc so a disk failure on data volume doesn't also destroy backups.`
+
+Two PVCs, `postgres-pvc` (5Gi) and `postgres-backup-pvc` (10Gi), both `ReadWriteOnce`, both
+on the cluster default StorageClass.
+
+**What is actually true**, and it is a narrower and worse-shaped thing:
+
+> There is one node. All seven PVCs are `ReadWriteOnce`, and with no StorageClass manifest
+> in this repo they bind to whatever the cluster default provides — on a single-node Docker
+> Desktop cluster that is local storage on that node. So a *volume* failure loses only the
+> backups or only the data, as designed. **Losing the node's disk loses both**, and
+> `ReadWriteOnce` means neither volume can move to another node anyway.
+
+The original sentence had the right conclusion (this is not durable) and the wrong reason
+(layout), and the wrong reason is the one a reader would check and find false. That is the
+same failure this project has spent six documents on: **a true worry attached to the wrong
+evidence.** Corrected above with the reason that holds.
+
+### What could not be re-verified
+
+Checks 1 (result), 2, 3 (the `cpu: <unknown>` → `3%/70%` reading), 4 (cross-namespace
+blocked / in-namespace allowed) and 7 (the memory numbers) need a live cluster. **No
+`kubectl` is available in this environment**, so they are unchanged from 2026-10-26 and are
+not being re-asserted. The commands to reproduce them are in each section and are still
+accurate. Saying so is the point: re-reading a YAML file is not re-running a cluster.
+
 ## Still open
 
 - Grafana, Loki and Prometheus set `runAsUser: 0`.
-- One node. Postgres, Redis and Chroma are single-replica Deployments, and the backups are on
-  the same disk as the database (losing the disk loses both).
+- **One node, all `ReadWriteOnce`, no StorageClass in the repo** — losing the node's disk
+  loses data and backups together, and neither volume can move to another node. (Corrected
+  2026-11-13; this bullet used to give the wrong reason.)
+- Only the two app Deployments have an HPA. Postgres, Redis and Chroma are single-replica.
+- The other eleven images are pinned by **tag**, not digest (`v7`, `15-alpine`,
+  `7-alpine`, `10.4.0`, `2.9.6`, `v2.51.0`, `v0.9.0`, `v7.6.0`). A tag can be re-pushed;
+  only Chroma and Phoenix are digest-pinned. Worth knowing before claiming "pinned images."
 - cert-manager, External Secrets and OIDC are not installed in this cluster (the manifests
   exist, but their `deploy.sh` flags default to off).
