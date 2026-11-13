@@ -100,7 +100,7 @@ lines, still with zero findings** — against a 2,717-line eval harness that pro
 | ~~**4**~~ | ~~Tracing overhead measurement~~ | ✅ **DONE** — observability finding #4: ~5 µs/span, 0.003% of a 2 s answer, and a dead collector drops spans instead of blocking. |
 | ~~**5**~~ | ~~Dark-module triage~~ | ✅ **DONE** — [`DARK_MODULES.md`](DARK_MODULES.md). The premise was wrong: all 11 are imported by live code. What IS true: 23 of 61 public names unreachable, 13 of those also untested. |
 | **6** | Publish posts 1–4 | The actual goal. Do not let this stay last forever. |
-| **7** | k8s revisit | Instructed last. Already documented; verify the numbers still hold. |
+| ~~**7**~~ | ~~k8s revisit~~ | ✅ **DONE** — 31 manifests / 89 resources parsed against all 7 checks. One claim was wrong (backups "on the same disk" — two separate PVCs); corrected with the reason that does hold. Four cluster-only checks could not be re-run and say so. |
 | **8** | **Close** | Rewrite README from this file. Delete `ROADMAP.md`. Tag a release. |
 
 ---
