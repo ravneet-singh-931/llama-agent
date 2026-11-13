@@ -114,6 +114,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cases still carry no `reference` note for the judge, and code without doctests is
   still only syntax-checked.
 
+- **v3.8.0 — the nightly no longer fails on a number it already refused to publish.**
+  Scheduled runs 43362383328 (35/60 graded) and 43151721574 (41/60) both went red at
+  "Compare against yesterday" while manual runs passed. `summarize()` had correctly
+  marked those reports `status: "inconclusive"` and printed *"the raw pass rate 55.0
+  is NOT a quality score"* — and `compare()` never read the field. Ungraded cases
+  count as not-passed, the pass rate fell, and *"pass_rate is a headline metric
+  moving the wrong way"* turned it into a regression.
+
+  `compare()` now reads `status` from **both** sides and returns `regression: False`
+  when either run is inconclusive, printing `Verdict: inconclusive (coverage)` and
+  the graded rates it refused to use. The CLI exits 0 through the same branch
+  `incomparable` already used. Seven tests, the first of which is the bug; a real
+  regression at full coverage is still caught, and a pre-v3.8 report with no `status`
+  field keeps its old meaning.
+
+  `docs/EVAL_FINDINGS.md` finding **20**, and one new row in the scope table.
+
 - **`docs/CASE_STUDIES.md` — the index the project was missing.** Four parts, four
   findings documents, one headline number each, and the through-line that connects
   them. The README now links it first, because until now a visitor had to find the

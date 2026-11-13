@@ -16,7 +16,7 @@ different kinds of wrong.
 
 | Part | Document | Findings | The headline number |
 |---|---|---|---|
-| **1. Measurement** | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | 18 | the suite published **35%** when the real figure was **72.4%** |
+| **1. Measurement** | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | 20 | the suite published **35%** when the real figure was **72.4%** |
 | **2. The agents** | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | 4 fixed, 5 open | a team step hung for **309 s** against a 300 s limit |
 | **3. Observability** | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | 3 | a 2.0 s stream measured as **0.002 s** |
 | **4. RAG** | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | the "cross-encoder reranker" was keyword overlap |

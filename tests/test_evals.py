@@ -1602,3 +1602,101 @@ def test_doctests_run_only_for_python_blocks():
     from evals.checks import check_code
     js = '```javascript\ndef debounce():\n  """\n  >>> f()\n  9\n  """\n```'
     assert check_code(js, "javascript")["pass"]
+
+
+# ------------------------------------ coverage beats a pass-rate drop (v3.8.0)
+#
+# The nightly failed on schedule twice -- 43362383328 (35/60 graded) and
+# 43151721574 (41/60) -- both at "Compare against yesterday", while manual runs
+# passed. Ungraded cases count as not-passed (correct: a broken judge must not
+# inflate a score), so the pass rate fell, and compare() saw a "headline metric
+# moving the wrong way" and called it a regression. summarize() had already
+# written status="inconclusive" on those reports; compare() never read it.
+
+def _coverage_report(status, cases, graded, passed, judge=4.2):
+    return {
+        "summary": {
+            "cases": cases, "status": status,
+            "pass_rate": round(100.0 * passed / cases, 1),
+            "pass_rate_graded": round(100.0 * passed / graded, 1) if graded else None,
+            "judge_overall": judge, "grounding_rate": 0.9, "fabrication_rate": 2.0,
+            "latency_p50_s": 10.0, "latency_p95_s": 40.0,
+            "not_graded": ["missing"] * (cases - graded),
+            "by_category": {"coding": {"cases": 10, "pass_rate": 80.0}},
+            "check_failures": {},
+        },
+        "results": [{"id": f"c{i}", "passed": i < passed, "graded": i < graded}
+                    for i in range(cases)],
+        "prompt_fingerprint": "abc",
+        "evidence": {"x": 1},
+    }
+
+
+def test_a_quota_starved_run_is_not_a_regression():
+    """The production bug: 60 graded at 72%, then 35 graded. Ungraded count as
+    failed, so the raw rate collapses -- and that is a fact about the provider."""
+    diff = run.compare(_coverage_report("ok", 60, 60, 43),
+                             _coverage_report("inconclusive", 60, 35, 20))
+    assert diff["coverage"]["inconclusive"] is True
+    assert not diff["regression"], "a rate-limited run must not fail the nightly"
+    assert "inconclusive (coverage)" in run.render_compare(diff)
+
+
+def test_a_real_regression_is_still_a_regression_at_full_coverage():
+    """The guard must not become a way to ignore real failures."""
+    diff = run.compare(_coverage_report("ok", 60, 60, 43),
+                             _coverage_report("ok", 60, 60, 30))
+    assert diff["coverage"]["inconclusive"] is False
+    assert diff["regression"] is True
+
+
+def test_judge_falling_at_full_coverage_is_still_a_regression():
+    diff = run.compare(_coverage_report("ok", 60, 60, 43, judge=4.5),
+                             _coverage_report("ok", 60, 60, 43, judge=3.5))
+    assert diff["regression"] is True
+
+
+def test_inconclusive_on_whichever_side_protects():
+    diff = run.compare(_coverage_report("inconclusive", 60, 35, 20),
+                             _coverage_report("ok", 60, 60, 50))
+    assert diff["coverage"]["inconclusive"] is True
+    assert diff["regression"] is False
+
+
+def test_an_old_report_without_a_status_field_behaves_as_before():
+    """Backwards compatibility: pre-status artefacts must not silently change
+    meaning -- absent is treated as 'ok', not as 'inconclusive'."""
+    old, new = _coverage_report("ok", 60, 60, 43), _coverage_report("ok", 60, 60, 30)
+    del old["summary"]["status"]
+    del new["summary"]["status"]
+    diff = run.compare(old, new)
+    assert diff["coverage"]["inconclusive"] is False
+    assert diff["regression"] is True
+
+
+def test_the_reason_and_the_numbers_reach_the_reader():
+    """A suppressed red build must say why, and print the delta it refused."""
+    diff = run.compare(_coverage_report("ok", 60, 60, 43),
+                             _coverage_report("inconclusive", 60, 35, 20))
+    md = run.render_compare(diff)
+    assert "NOT A QUALITY COMPARISON: coverage" in md
+    assert "among cases that ran" in md.lower()
+    assert "71.7" in md and "57.1" in md    # graded rates, both sides
+    assert "not failing the job" in md
+
+
+def test_cli_exits_zero_when_coverage_is_thin(tmp_path):
+    """The exit code, not just the verdict string -- this is what the nightly reads."""
+    import json
+    old = _coverage_report("ok", 60, 60, 43)
+    new = _coverage_report("inconclusive", 60, 35, 20)
+    a, b = tmp_path / "old.json", tmp_path / "new.json"
+    a.write_text(json.dumps(old))
+    b.write_text(json.dumps(new))
+    rc = run.main(["--compare", str(a), str(b), "--fail-on-regression"])
+    assert rc == 0
+
+    # ...and a genuine regression still exits 1 through the same path.
+    c = tmp_path / "worse.json"
+    c.write_text(json.dumps(_coverage_report("ok", 60, 60, 30)))
+    assert run.main(["--compare", str(a), str(c), "--fail-on-regression"]) == 1

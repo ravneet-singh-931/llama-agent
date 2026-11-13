@@ -998,7 +998,34 @@ def compare(old: Dict, new: Dict) -> Dict:
         incompatible = ""
     if prompt_changed and not incompatible:
         incompatible = "prompt_changed"
+
+    # Coverage: a run whose own summary says its pass rate is not a quality
+    # score cannot supply the evidence for a regression.
+    #
+    # summarize() already decides this and writes `status: "inconclusive"` when
+    # the denominator contains cases that never ran. compare() -- the function
+    # whose entire job is to draw a conclusion -- never read that field. So the
+    # nightly did the following, twice, in production:
+    #
+    #   quota runs out -> ungraded cases count as not-passed (correct, and
+    #   deliberate: a broken judge must not inflate a score) -> pass_rate falls
+    #   -> pass_rate is a "headline metric moving the wrong way" -> regression
+    #   -> red build
+    #
+    # ...on reports whose own headline reads "the raw pass rate 55.0 is NOT a
+    # quality score". Run 43362383328 (35/60 graded) and 43151721574 (41/60),
+    # both failing at "Compare against yesterday" while manual runs passed.
+    #
+    # `newly_not_graded` was computed and printed by this function and never
+    # consulted here -- the diagnosis sat one field away from the decision.
+    old_status = so.get("status") or "ok"
+    new_status = sn.get("status") or "ok"
+    thin_coverage = "inconclusive" in (old_status, new_status)
     return {"metrics": metrics, "category_pass_delta": cats, "regressed_cases": regressed,
+            "coverage": {"old_status": old_status, "new_status": new_status,
+                         "inconclusive": thin_coverage,
+                         "old_graded": so.get("pass_rate_graded"),
+                         "new_graded": sn.get("pass_rate_graded")},
             "fixed_cases": fixed,
             "newly_not_graded": newly_not_graded,
             "check_failure_delta": check_delta,
@@ -1012,6 +1039,10 @@ def compare(old: Dict, new: Dict) -> Dict:
             "categories_up": _up,
             "categories_down": _down,
             "regression": bool(
+                # ...but never on a run the report itself calls unquotable.
+                # A missing answer is not a wrong answer, and "the provider
+                # rate-limited us" is not a property of the app.
+                not thin_coverage and (
                 # A headline metric moving the wrong way is a regression on its
                 # own: a rising fabrication rate is a fact about the answers.
                 bool(worse)
@@ -1020,7 +1051,7 @@ def compare(old: Dict, new: Dict) -> Dict:
                 # is one small category wobbling while the run improved, which is
                 # exactly what 2026-11-12 13:15 was: 76.7% and every headline
                 # metric better, called a REGRESSION on safety -12.5.
-                or (_cats_confirm and _pass_rate_down))}
+                or (_cats_confirm and _pass_rate_down)))}
 
 
 def render_compare(diff: Dict) -> str:
@@ -1080,8 +1111,26 @@ def render_compare(diff: Dict) -> str:
         # different systems, so a "regression" may be the prompt, not the code.
         lines.append(f"Prompts CHANGED between runs ({diff.get('prompt_old')} -> "
                      f"{diff.get('prompt_new')}); attribute flips carefully.")
+    cov = diff.get("coverage") or {}
+    if cov.get("inconclusive"):
+        # Name the reason, and print the number the verdict refused to use.
+        # A filter that silently suppresses a red build is the same failure as
+        # a guard that never fires -- the reader must be able to disagree.
+        lines += ["",
+                  f"**NOT A QUALITY COMPARISON: coverage** -- one of these runs was "
+                  f"{'inconclusive' if 'inconclusive' in (cov.get('old_status'), cov.get('new_status')) else 'thin'}"
+                  f" (old status `{cov.get('old_status')}`, new status "
+                  f"`{cov.get('new_status')}`). Cases that never ran are counted as "
+                  f"not-passed, so the pass-rate delta below is partly a statement "
+                  f"about the provider, not the app. Among cases that ran: "
+                  f"{cov.get('old_graded')} -> {cov.get('new_graded')}."]
+        if diff.get("newly_not_graded"):
+            lines.append(f"Cases that ran yesterday and did not run today: "
+                         f"{len(diff['newly_not_graded'])}")
     if diff.get("incomparable"):
         lines.append("Verdict: inconclusive (instrument changed) - not failing the job")
+    elif cov.get("inconclusive"):
+        lines.append("Verdict: inconclusive (coverage) - not failing the job")
     else:
         lines.append(f"Verdict: {'REGRESSION' if diff['regression'] else 'no regression'}")
     return "\n".join(lines)
@@ -1225,6 +1274,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         # regressed", and a job that goes red for the former teaches everyone
         # to ignore the colour.
         if diff.get("incomparable"):
+            return 0
+        # Same rule for coverage, for the same reason: "the provider
+        # rate-limited us" is not "the app regressed", and a job that goes red
+        # for the former teaches everyone to ignore the colour. diff['coverage']
+        # keeps the flag so this stays checkable rather than implied.
+        if (diff.get("coverage") or {}).get("inconclusive"):
             return 0
         return 1 if (args.fail_on_regression and diff["regression"]) else 0
 
