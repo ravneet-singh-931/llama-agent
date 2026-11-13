@@ -237,3 +237,105 @@ measured.
 > A limitation stated precisely can still teach a false belief. The README told the
 truth about a function and lied about the posture: containing an injection and
 noticing one are different guarantees, and it had only named the missing one.
+
+---
+
+## S5. CORS reflected any origin with credentials — fixed 2026-11-13
+
+Found while making `test_cors_headers_present` assert something, which it did not.
+Removing the CORS middleware entirely left that test green, so the configuration had
+never been checked by the suite at all.
+
+### What was wrong
+
+`api.py` registered, in every non-production environment:
+
+```python
+cors_origins = ["*"]
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins,
+                   allow_credentials=True, ...)
+```
+
+The assumption in the comment was *"allow all (safe for local testing only)"*. Starlette
+does not simply emit `Access-Control-Allow-Origin: *` here — it reflects the caller:
+
+```
+$ curl -H 'Origin: https://evil.example' localhost:8000/openapi.json -i
+access-control-allow-origin: https://evil.example
+access-control-allow-credentials: true
+```
+
+A browser refuses a literal `*` combined with credentials. It accepts a *reflected*
+origin. So any page the developer visited could issue authenticated cross-origin
+requests to their local API and read the response.
+
+### Why it was reachable
+
+The Next.js frontend does not need it. Everything the shipped UI does goes through a
+same-origin `/api` rewrite (`frontend/next.config.*`), and Nginx proxies `/api/*` as
+well. The wildcard bought nothing and was the only thing making the reflected-origin
+behaviour possible.
+
+### The fix
+
+`api.py` now lists the local development origins explicitly — `localhost:3000`,
+`3001`, `8501`, and the two `127.0.0.1` spellings — in development, and keeps the
+already-restricted list in production. Verified:
+
+```
+Origin: https://evil.example     -> (no access-control-allow-origin header)
+Origin: http://localhost:3000    -> access-control-allow-origin: http://localhost:3000
+```
+
+### The test now tests it
+
+`tests/test_security.py::TestCORS::test_cors_headers_present` asserts that
+`app.user_middleware` contains a `CORSMiddleware`, that `allow_origins` is non-empty,
+that `"*"` is never combined with `allow_credentials=True`, and that the expected
+methods and `Authorization` header are allowed.
+
+**Proof it can fail:** commenting out the `add_middleware(CORSMiddleware, ...)` call
+makes it fail with `assert []`. Before this change the same sabotage left it green —
+the check and the thing checked had been configured to agree.
+
+---
+
+## S6. Fact length limits were declared and enforced nowhere — fixed 2026-11-13
+
+`modules/security.py` declares `MAX_FACT_KEY_LENGTH = 100` and
+`MAX_FACT_VALUE_LENGTH = 1000`, and defines `validate_fact_key` /
+`validate_fact_value` directly beneath them. **Neither function was called from
+anywhere in the repository.**
+
+`POST /remember` was already capped by its Pydantic model
+(`RememberRequest: Field(..., max_length=100/1000)`), so that endpoint was fine — and an
+audit that stopped there would have concluded, wrongly, that the limits were live.
+They were not, because six other call sites build a fact out of free text:
+
+```python
+key, value = content.split("=", 1)
+facts.remember(key.strip(), value.strip(), user_id=user_id)
+```
+
+`content` there is a chat message, capped at `MAX_MESSAGE_LENGTH = 10_000`. So a
+10,000-character message could become a 10,000-character stored fact — ten times the
+declared limit, on the path a user actually reaches.
+
+Enforced now in `FactMemory.remember()`, the one function every caller goes through:
+
+```python
+ok, err = validate_fact_key(key);   if not ok: raise ValueError(err)
+ok, err = validate_fact_value(value); if not ok: raise ValueError(err)
+```
+
+Five tests in `tests/test_security.py::TestFactInputLimits` cover the oversized key,
+the oversized value (the chat path), an empty value, the unaffected happy path, and the
+endpoint's own 422.
+
+### The lesson, again
+
+> A validation function that exists and a validation that runs are different claims.
+
+The declared constant `MAX_FACT_VALUE_LENGTH = 1000` sat in the source next to a
+function that would have enforced it. Reading the file, the limit looks real. Running
+the code, nothing enforced it — on one of seven paths.

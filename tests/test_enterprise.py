@@ -223,14 +223,18 @@ class TestIntegration:
         
         assert config1 is config2
 
-    def test_services_singleton(self):
-        """Services should be a singleton"""
-        from modules.services import get_services
-        
-        services1 = get_services()
-        services2 = get_services()
-        
-        assert services1 is services2
+    def test_dead_service_locator_stays_deleted(self):
+        """`modules/services.py` was a service locator nothing imported.
+
+        84 lines, zero importers, zero references outside this test — which
+        only existed to import it. Deleting the test alone would have deleted
+        the reason it looked used, so the module is gone too and this asserts
+        it does not come back as a second path to the same singletons.
+        """
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        assert not (root / "modules/services.py").exists()
 
 
 # ============ ENVIRONMENT TESTS ============
@@ -380,7 +384,36 @@ class TestEnterpriseModules:
         # Unknown flags are always disabled
         assert feature_flags.is_enabled("does_not_exist") is False
         # Known, enabled flags evaluate as booleans
-        assert isinstance(feature_flags.is_enabled("enable_rate_limiting"), bool)
+        assert isinstance(feature_flags.is_enabled("enable_mcp_agents"), bool)
+
+    def test_every_shipped_flag_is_actually_read(self):
+        """No flag may be configured that no code ever asks about.
+
+        `config/feature_flags.json` used to carry eight flags. Seven of them —
+        enable_advanced_rag, enable_phoenix_tracing, enable_caching,
+        enable_rate_limiting, enable_websockets, enable_file_upload,
+        enable_beta_features — had zero `is_enabled(...)` call sites anywhere in
+        the codebase. Setting them to false changed nothing, while reading them
+        as if they were live controls. They were deleted; this test stops the
+        same thing from quietly coming back.
+        """
+        import json
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        shipped = set(json.loads((root / "config/feature_flags.json").read_text()).keys())
+        assert shipped, "feature_flags.json must not be empty"
+
+        sources = "".join(
+            p.read_text(encoding="utf-8", errors="ignore")
+            for p in root.rglob("*.py")
+            if "tests" not in p.parts and ".git" not in p.parts
+        )
+        unread = sorted(f for f in shipped
+                        if not re.search(rf'is_enabled\(\s*["\']{re.escape(f)}["\']', sources))
+        assert not unread, f"flags configured but never read by any code: {unread}"
+
 
     def test_feature_flags_file_based(self, tmp_path):
         from modules.cicd_improvements import FeatureFlagManager

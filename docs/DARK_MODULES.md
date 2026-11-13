@@ -27,7 +27,7 @@ Every one of the eleven is imported by live application code:
 | Module | Imported by |
 |---|---|
 | `database_improvements` | `api.py` (health check) |
-| `websocket` | `api.py`, `modules/services.py` |
+| `websocket` | `api.py` |
 | `cicd_improvements` | `api.py` (feature flags) |
 | `web_tools` | `modules/agent_tools.py` (the web search tool) |
 | `pg_store` | `api.py` (11 call sites) |
@@ -108,7 +108,13 @@ uses SQLAlchemy, managed Postgres, and a connection pool that already exists.
 
 Dead: `MessageType`, `WSMessage`, `ConnectionManager`, `broadcast_message`,
 `get_online_count`. Live: `get_ws_handler` and `WebSocketHandler`, both used by
-`modules/services.py`.
+`api.py` — and, when this was first written, by `modules/services.py`.
+
+**Correction (2026-11-13):** `broadcast_message` and `get_online_count` have now been
+deleted, and so has `modules/services.py` itself. That file was an 84-line service
+locator with zero importers and zero references anywhere in the repo; its only inbound
+reference was the module-level table row above, and its only caller was a test that
+imported it. `WebSocketHandler` is still live via `api.py`'s `get_ws_handler()`.
 
 The pattern is a **module written as a standalone WebSocket server** — own connection
 manager, own message types, own broadcast — of which the application uses only the
@@ -228,3 +234,76 @@ The narrower finding that survived is still worth having: **38% of the public su
 of those modules is unreachable, and thirteen of those functions and classes have no
 test either.** But it is a third of the surface, not all of it, and saying so is the
 difference between a document and a scare.
+
+---
+
+## Addendum 2026-11-13 — four more dead things, found by reading wiring rather than names
+
+This document was built by counting public names with no inbound reference. That method
+finds functions nothing calls. It does **not** find configuration nothing reads, so a
+second pass went looking for that instead. It found three things.
+
+### `modules/services.py` — 84 lines, deleted
+
+A service locator (`Services`, `get_services`, `reset_services`) exposing lazy singletons
+for database, RAG, memory, facts and websocket. **Zero importers.** Its only inbound
+reference in the whole repository was this document's own table, and its only caller was
+`tests/test_enterprise.py::test_services_singleton`, a test that existed to import it.
+
+That is the shape worth remembering: **the module was kept alive by a test whose only
+purpose was to touch it.** Deleting the test would have deleted the evidence; the module
+is deleted instead, and the test now asserts the file stays gone.
+
+### Seven of eight feature flags — deleted from `config/feature_flags.json`
+
+`FeatureFlagManager` (`modules/cicd_improvements.py`) loads
+`config/feature_flags.json`, which shipped eight flags. Counting
+`is_enabled("<flag>")` call sites across every non-test Python file:
+
+| Flag | Call sites |
+|---|---|
+| `enable_mcp_agents` | **2** (`api.py:3364`, `api.py:3387`) |
+| `enable_advanced_rag` | 0 |
+| `enable_phoenix_tracing` | 0 |
+| `enable_caching` | 0 |
+| `enable_rate_limiting` | 0 |
+| `enable_websockets` | 0 |
+| `enable_file_upload` | 0 |
+| `enable_beta_features` | 0 |
+
+There is no dynamic accessor — `set_flag`, `get_all_flags` and `get_enabled_flags` exist,
+but the only reads in the app are the two literal `"enable_mcp_agents"` strings. So
+setting `enable_rate_limiting: false` and restarting left rate limiting running:
+`api.py` calls `rate_limiter.is_rate_limited(client_ip)` unconditionally.
+
+Worse, `enable_caching`, `enable_rate_limiting` and `enable_websockets` **also** exist in
+a second, unrelated flag system (`modules/config.py::FeatureFlags`, read from
+`FEATURE_*` environment variables), which means there were two knobs for each of those
+three concepts and neither one gated the behaviour.
+
+The seven were removed. `enable_mcp_agents` stays because it is genuinely read.
+`tests/test_enterprise.py::TestEnterpriseModules::test_every_shipped_flag_is_actually_read`
+now fails if a flag is added to the JSON that no code asks about:
+
+```
+AssertionError: flags configured but never read by any code: ['enable_beta_features']
+```
+
+### `reload_config` — deleted
+
+`modules/config.py`, zero references. `get_config()` is the only accessor.
+
+### `validate_fact_key` / `validate_fact_value` — **not** dead, wired instead
+
+These were on the dead list in the first pass because nothing called them. Deleting them
+would have deleted the only statement of the fact-length limits. They are now called from
+`FactMemory.remember()`, which every writer goes through — see
+[`SECURITY_FINDINGS.md` S6](SECURITY_FINDINGS.md). A guard that nothing calls is a
+comment; a guard that something calls is a limit.
+
+### Revised count
+
+**23 dead public names** in the original pass, of which `broadcast_message`,
+`get_online_count`, `reload_config` and the whole `services` module are now deleted
+rather than documented. The 546 unreachable lines in `database_improvements` are
+unchanged — that deletion is still open.

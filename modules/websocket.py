@@ -394,24 +394,3 @@ def get_ws_handler() -> WebSocketHandler:
         _ws_handler = WebSocketHandler()
     return _ws_handler
 
-
-# ============ HELPER FUNCTIONS ============
-
-
-async def broadcast_message(message: str, sender: str = "system"):
-    """Broadcast a message to all connected users"""
-    handler = get_ws_handler()
-    broadcast = WSMessage(
-        type=MessageType.CHAT,
-        data={
-            "content": message,
-            "sender": sender,
-        }
-    )
-    await handler.manager.broadcast(broadcast)
-
-
-def get_online_count() -> int:
-    """Get number of online users"""
-    handler = get_ws_handler()
-    return handler.manager.user_count

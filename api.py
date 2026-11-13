@@ -669,12 +669,30 @@ if _environment == "production":
         # "https://yourdomain.com",
     ]
 else:
-    # DEVELOPMENT: Allow all (safe for local testing only)
-    cors_origins = ["*"]
+    # DEVELOPMENT: list the local dev origins explicitly rather than "*".
+    #
+    # "*" together with allow_credentials=True is not safe: Starlette responds to
+    # any caller with `Access-Control-Allow-Origin: <their origin>` and
+    # `Access-Control-Allow-Credentials: true`, so any website the developer
+    # visits can make authenticated cross-origin calls to their local API. The
+    # browser refuses a literal "*" plus credentials, but Starlette substitutes
+    # the caller's origin, which the browser accepts.
+    #
+    # No cross-origin caller needs access: the Next.js frontend reaches the API
+    # through its same-origin "/api" rewrite (frontend/next.config.*), and Nginx
+    # proxies /api/* too.
+    cors_origins = [
+        "http://localhost:3000",    # Next.js frontend
+        "http://localhost:3001",    # Next.js frontend (alt)
+        "http://localhost:8501",    # Streamlit legacy UI
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8501",
+    ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    # Only the listed origins above, never a reflected wildcard.
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
@@ -2954,6 +2972,12 @@ def _user_upload_dir(user_id: str) -> str:
     return path
 
 
+def _write_bytes(path: str, data: bytes) -> None:
+    """Blocking write, called via asyncio.to_thread so it never stalls the loop."""
+    with open(path, "wb") as f:
+        f.write(data)
+
+
 @app.post("/documents/read")
 async def read_document(file_path: str, user: Optional[Dict] = Depends(optional_auth)):
     """(Re-)index one of the caller's OWN uploaded files.
@@ -3024,8 +3048,12 @@ async def upload_document(file: UploadFile = File(...), user: Optional[Dict] = D
         safe_filename = sanitize_filename(file.filename or "uploaded_file")
         file_path = get_upload_path(upload_dir, safe_filename)
 
-        with open(file_path, "wb") as f:
-            f.write(content)
+        # Off the event loop: this runs inside `async def`, and a synchronous
+        # write stalls every other in-flight request for its duration. The cap
+        # is MAX_FILE_SIZE (10 MB), so the stall is short — but the next line
+        # already offloads its work, and there was no reason for this one to
+        # block.
+        await asyncio.to_thread(_write_bytes, file_path, content)
 
         # Index for this owner only (replaces a previous upload of the same
         # name) and drop this owner's cached answers.

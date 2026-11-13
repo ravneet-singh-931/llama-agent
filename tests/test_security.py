@@ -400,16 +400,29 @@ class TestCORS:
     """Test CORS configuration."""
 
     def test_cors_headers_present(self):
-        """Test: CORS headers are configured"""
-        # This would normally test the actual API
-        # For unit test, we verify the configuration
+        """Test: CORS headers are configured
+
+        This test used to build a list of middleware, discard it, print a
+        checkmark and pass — so deleting CORSMiddleware from api.py would not
+        have failed it. It now asserts on the middleware Starlette actually
+        holds, and on the values inside it.
+        """
+        from fastapi.middleware.cors import CORSMiddleware
 
         from api import app
 
-        # Check middleware is added
-        middleware = [m for m in app.middleware.__dict__.get("user_middleware", [])]
-        # CORS middleware should be present
-        print("  ✅ CORS middleware configured")
+        cors = [m for m in app.user_middleware if m.cls is CORSMiddleware]
+        assert cors, "api.py must register CORSMiddleware"
+
+        kwargs = cors[0].kwargs
+        assert kwargs["allow_origins"], "allow_origins must not be empty"
+        # Wildcard origins and credentials together are rejected by browsers and
+        # are a real misconfiguration, not a style choice.
+        assert not (kwargs["allow_origins"] == ["*"] and kwargs["allow_credentials"]), (
+            "allow_origins='*' with allow_credentials=True is invalid CORS"
+        )
+        assert "GET" in kwargs["allow_methods"] and "POST" in kwargs["allow_methods"]
+        assert any(h.lower() == "authorization" for h in kwargs["allow_headers"])
 
     def test_cors_origins_restricted(self):
         """Test: CORS origins are restricted in production"""
@@ -594,3 +607,52 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print(f"RESULTS: {passed} passed, {failed} failed")
     print("=" * 60)
+
+
+class TestFactInputLimits:
+    """`validate_fact_key` / `validate_fact_value` were written and never called.
+
+    `POST /remember` was already capped by its Pydantic model, so the uncovered
+    path was the one that matters more: six call sites build a fact out of a
+    free-text chat message ("X is Y", "X = Y"), where a 10,000-character message
+    became a 10,000-character fact. The limits are now enforced in
+    `FactMemory.remember`, which every caller goes through.
+    """
+
+    def test_remember_rejects_oversized_key(self):
+        from modules.memory import FactMemory
+
+        with pytest.raises(ValueError, match="too long"):
+            FactMemory().remember("k" * 101, "value")
+
+    def test_remember_rejects_oversized_value(self):
+        """The chat path: nothing but this check stands between a 10,000-char
+        message and a 10,000-char stored fact."""
+        from modules.memory import FactMemory
+
+        with pytest.raises(ValueError, match="too long"):
+            FactMemory().remember("ok", "v" * 1001)
+
+    def test_remember_rejects_empty(self):
+        from modules.memory import FactMemory
+
+        with pytest.raises(ValueError):
+            FactMemory().remember("ok", "")
+
+    def test_remember_still_accepts_a_normal_fact(self):
+        """The guard must not break the happy path it protects."""
+        from modules.memory import FactMemory
+
+        mem = FactMemory()
+        mem.remember("colour", "blue")
+        assert mem.recall("colour") == "blue"
+
+    def test_endpoint_limits_come_from_the_model(self):
+        """POST /remember rejects the same values, one layer earlier (422)."""
+        from starlette.testclient import TestClient
+
+        from api import app
+
+        with TestClient(app) as client:
+            r = client.post("/remember", json={"key": "k" * 101, "value": "v"})
+        assert r.status_code == 422

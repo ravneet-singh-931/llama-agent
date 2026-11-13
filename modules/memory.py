@@ -30,6 +30,11 @@ import uuid
 from datetime import datetime
 from typing import List, Dict, Optional
 
+# Imported at the top rather than inside remember(): modules/security.py imports
+# nothing from memory, so there is no cycle, and the limits belong to the same
+# declaration site as the code that enforces them.
+from modules.security import validate_fact_key, validate_fact_value
+
 
 class ConversationMemory:
     """Stores per-user conversation history.
@@ -470,7 +475,21 @@ class FactMemory:
         return f"{self._norm_user(user_id)}::{key}"
 
     def remember(self, key: str, value: str, user_id: str = "default"):
-        """Remember a fact under a per-user namespaced key (multi-tenant isolation)."""
+        """Remember a fact under a per-user namespaced key (multi-tenant isolation).
+
+        Enforces MAX_FACT_KEY_LENGTH / MAX_FACT_VALUE_LENGTH here, at the one
+        function every caller goes through. `POST /remember` was already capped
+        by its Pydantic model, but six other call sites take the key and value
+        out of a free-text chat message ("X is Y", "X = Y"), where a 10,000-char
+        message became a 10,000-char fact. `validate_fact_key` /
+        `validate_fact_value` existed for this and were called from nowhere.
+        """
+        ok, err = validate_fact_key(key)
+        if not ok:
+            raise ValueError(err)
+        ok, err = validate_fact_value(value)
+        if not ok:
+            raise ValueError(err)
         fk = self._fkey(key, user_id)
         uid = self._norm_user(user_id)
         previous = self._current_value(fk)

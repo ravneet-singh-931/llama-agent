@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (maintenance audit, 2026-11-13)
+
+Five defects found by reading wiring rather than names — each one a control that
+looked functional and was not. Every fix carries a test that fails when the fix
+is reverted.
+
+- **CORS reflected any origin while sending credentials.** Development ran
+  `allow_origins=["*"]` with `allow_credentials=True`. Starlette does not emit a
+  literal `*` there — it reflects the caller, so
+  `Origin: https://evil.example` came back as
+  `access-control-allow-origin: https://evil.example` **with**
+  `access-control-allow-credentials: true`, which browsers accept. Any page a
+  developer visited could make authenticated cross-origin calls to their local
+  API. Both environments now list origins explicitly; the frontend never needed
+  the wildcard, since it reaches the API through a same-origin `/api` rewrite.
+  Found while making the test below stop being vacuous.
+
+- **`test_cors_headers_present` could not fail.** It built a list of middleware,
+  discarded it, printed `✅ CORS middleware configured`, and passed. Removing
+  `CORSMiddleware` from `api.py` left it green, and the README cited it as the
+  CORS proof. It now asserts the middleware is registered, that origins are
+  non-empty, that `*` is never combined with credentials, and that the expected
+  methods and headers are allowed — and it fails with `assert []` when the
+  middleware is removed.
+
+- **The `integration` CI job did not install what the image installs.** It
+  hand-listed five unpinned `pip install` lines while the `test` job used
+  `requirements.txt`, so it tested the newest `mcp<2` instead of the pinned
+  `mcp==1.30.0` — the job named "Test all modules import" could stay green while
+  the image broke. It also installed the standalone `fastmcp`, which nothing
+  imports and which `test_version_and_deps.py` asserts is not a dependency. One
+  line now: `pip install -r requirements.txt`.
+
+- **Seven of the eight shipped feature flags were read by nothing.**
+  `config/feature_flags.json` carried `enable_advanced_rag`,
+  `enable_phoenix_tracing`, `enable_caching`, `enable_rate_limiting`,
+  `enable_websockets`, `enable_file_upload` and `enable_beta_features`, each with
+  zero `is_enabled(...)` call sites anywhere. Setting them to `false` changed
+  nothing. Three of those names also exist in a second flag system
+  (`modules/config.py::FeatureFlags`, from `FEATURE_*` env vars), so there were
+  two knobs per concept and neither gated the behaviour. The seven are deleted;
+  `enable_mcp_agents` stays because it is genuinely read. A new test fails if a
+  flag is ever configured that no code asks about.
+
+- **Declared fact limits were enforced nowhere.** `validate_fact_key` and
+  `validate_fact_value` sat under `MAX_FACT_KEY_LENGTH = 100` /
+  `MAX_FACT_VALUE_LENGTH = 1000` and were called from no code at all.
+  `POST /remember` was capped by its Pydantic model, so the limit looked live —
+  but six other call sites build a fact from a free-text chat message
+  (`key, value = content.split("=", 1)`), where the message cap is **10,000**
+  characters. The limits are now enforced in `FactMemory.remember()`.
+
+- **`modules/services.py` deleted** — 84 lines, zero importers, zero references.
+  Its only caller was `tests/test_enterprise.py::test_services_singleton`, a test
+  whose entire purpose was to import it. `broadcast_message`, `get_online_count`
+  and `reload_config` were dead in the same way and are gone too.
+
+- **`upload_document` wrote to disk on the event loop.** A synchronous
+  `open(...).write(...)` inside `async def` stalls every other in-flight request.
+  The cap is 10 MB so the stall is short, but the very next line already
+  offloaded its work. Now `await asyncio.to_thread(...)`.
+
+Tests: **833 → 839 passing**, 6 skipped, 17 deselected.
+
 ### Changed
 
 - **The scheduled nightly records, and asks whether it can finish first.** The

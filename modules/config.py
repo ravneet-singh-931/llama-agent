@@ -229,9 +229,3 @@ def get_config() -> AppConfig:
         _config = AppConfig.from_env()
     return _config
 
-
-def reload_config() -> AppConfig:
-    """Force reload configuration from environment"""
-    global _config
-    _config = AppConfig.from_env()
-    return _config
