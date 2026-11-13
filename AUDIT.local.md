@@ -759,3 +759,85 @@ this work changed.
 Every "clean" row in PART 10 should be read as *"checked with this specific command"*.
 The ones where I actually ran the command (`F401`, mutable defaults, dead imports) hold.
 The ones where I reasoned instead of running (`F841`) did not.
+
+---
+
+# PART 18 — CI on PR #50: 7/7 green, and how the two reds were diagnosed
+
+The branch run was dispatched with `workflow_dispatch` and came back **5/7** — Security
+Scan and Secret Leak Scan red. Both were **not this diff**, and both were proven so before
+being touched. Then both were fixed anyway, because leaving them red is how "green" stops
+meaning anything.
+
+## Red 1 — Security Scan: a CVE published hours earlier
+
+```
+opentelemetry-api 1.45.1  CVE-2026-126360  fixed in 1.45.2
+```
+
+`requirements.txt` was byte-identical to `main`'s (`diff -q` against
+`git show origin/main:requirements.txt`). Running `pip-audit` on **main's own copy** failed
+identically. `main` had passed at 12:03; the advisory list is fetched live at run time, so
+the same commit fails now. **Not a regression — a newly-published advisory.**
+
+The fix was not one line, which is why it is worth writing down:
+
+| Package | Before | After | Why |
+|---|---|---|---|
+| `opentelemetry-instrumentation-fastapi` | 0.66b1 | **0.66b2** | 0.66b1 pins semantic-conventions 0.66b1 |
+| `opentelemetry-api` | 1.45.1 (transitive) | **1.45.2** (explicit) | the CVE |
+| `opentelemetry-sdk` | 1.45.1 (transitive) | **1.45.2** (explicit) | sdk 1.45.1 pins `api==1.45.1` exactly |
+
+`opentelemetry-api` had **no line in `requirements.txt` naming it** — it was pulled in
+transitively by the instrumentation package, which is exactly how it drifted to a
+vulnerable version without anyone choosing it. It is pinned explicitly now.
+
+Verified: `pip install --dry-run -r requirements.txt` resolves; `pip-audit` reports *"No
+known vulnerabilities found, 14 ignored"*; 839 tests pass on the new versions.
+
+## Red 2 — Secret Leak Scan: the trigger, not the content
+
+`main` passes gitleaks on every push. This branch failed. The difference is not the diff:
+
+| Trigger | What gitleaks-action scans |
+|---|---|
+| `push` (main's path) | **only that run's commits** |
+| `workflow_dispatch` | **full history** |
+| `pull_request` | only the PR's commits |
+
+The historical strings it found are in `main` too — `git log --all` locates
+`your-secret-key-change-in-production` (`modules/auth.py:45`, `modules/config.py:66`) and
+`test_key_for_testing_only` fixtures. **The diff adds zero literals of 24+ characters.**
+
+**Proof, not argument:** opening PR #50 re-ran the same commit under the `pull_request`
+trigger. Secret Leak Scan went **success**, scanning the same code. Same commit, same
+files, different scan range, opposite result.
+
+Not fixed — there is nothing in this diff to fix. Making `workflow_dispatch` scan full
+history and `push` scan one commit produce the same verdict is a separate decision about
+what the job is for.
+
+## Final state of PR #50
+
+```
+success  🧪 Test (Python 3.11)
+success  🌐 Frontend (typecheck, lint, build)
+success  🔒 Security Scan
+success  🔑 Secret Leak Scan
+success  🧹 Code Quality
+success  🔗 Integration Test
+success  📢 Notifications
+skipped  🐳 Build & Push Docker      (main-only)
+skipped  🎪 Deploy to Staging        (main-only)
+skipped  🏭 Deploy to Production     (main-only)
+```
+
+**7/7 green.** The three skipped are deploy jobs that only run on `main`.
+
+## The diagnostic lesson
+
+The first read of a red CI run is usually "what did I break". Both reds here were
+answered by **running the failing command against `main` itself** rather than reading the
+diff — five minutes, and it turns a guess into a fact.
+
+> A red job is a claim. Check whose.

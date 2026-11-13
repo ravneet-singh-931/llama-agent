@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (maintenance audit, 2026-11-13)
 
+- **CVE-2026-126360 in `opentelemetry-api` 1.45.1.** The Security Scan went red on a
+  dependency `requirements.txt` never named — `opentelemetry-api` arrived transitively
+  through `opentelemetry-instrumentation-fastapi`, which is how it drifted to a
+  vulnerable version without anyone choosing it. Not a one-line bump: `opentelemetry-sdk`
+  1.45.1 pins `opentelemetry-api==1.45.1` exactly, and the instrumentation package
+  0.66b1 pins `opentelemetry-semantic-conventions==0.66b1`, which sdk 1.45.2 requires at
+  0.66b2. All three move together — instrumentation-fastapi 0.66b2, api 1.45.2, sdk
+  1.45.2 — and `opentelemetry-api` is now pinned explicitly so the next advisory has a
+  line to bump. `pip-audit`: no known vulnerabilities, 14 ignored (unchanged).
+
+
 Five defects found by reading wiring rather than names — each one a control that
 looked functional and was not. Every fix carries a test that fails when the fix
 is reverted.
