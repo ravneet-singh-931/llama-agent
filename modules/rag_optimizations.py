@@ -1656,10 +1656,10 @@ class OptimizedRAG:
             # it is an unprocessed fragment that was never shown to any model.
             # Falling back to it turned "I could not verify this" into
             # "return the first paragraph of a document".
-            answer = crag_result.get("answer") or (
-                results[0].get("content", "") if results else "")
-        else:
-            answer = results[0].get("content", "") if results else ""
+            #
+            # crag_result (not a local copy) is what the return value below
+            # reads. A local `answer` used to be assigned on both branches here
+            # and never read.
 
         # Step 5: Conversational retrieval (if enabled)
         conversational_result = None

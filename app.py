@@ -226,7 +226,7 @@ def _db_create_conversation(user_id: str, title: str = "New Chat"):
             )
             conn.commit()
             return {"id": conv_id, "title": title}
-    except Exception as e:
+    except Exception :
         conn.rollback()
         return {"id": None, "title": title}
     finally:
@@ -278,7 +278,7 @@ def _db_save_message(conversation_id: str, role: str, content: str):
                     (content[:50] + ("..." if len(content) > 50 else ""), conversation_id),
                 )
             conn.commit()
-    except Exception as e:
+    except Exception :
         conn.rollback()
     finally:
         conn.close()
@@ -671,10 +671,11 @@ async def process_message(user_input: str, doc_context: str = "", force_agent: s
     Returns (result, agent_used).
     """
     try:
-        from modules.memory import ConversationMemory, FactMemory
+        from modules.memory import ConversationMemory
 
+        # FactMemory was constructed here and never used in this function; the
+        # fact path lives below, where `facts` is built for the branch that needs it.
         memory = ConversationMemory()
-        facts = FactMemory()
 
         memory.add_message("user", user_input)
 
@@ -711,10 +712,11 @@ def _route_command(user_input: str) -> str:
     Check whether a message is a special command, MCP command, or plain single-agent task.
     Returns: "special", "mcp", or "stream"
     """
-    from modules.memory import ConversationMemory, FactMemory
+    from modules.memory import FactMemory
     from modules.vector_store import get_vector_store
 
-    memory = ConversationMemory()
+    # A `memory = ConversationMemory()` was constructed here and never used in
+    # this branch; the import went with it.
     facts = FactMemory()
     rag = get_vector_store()
 

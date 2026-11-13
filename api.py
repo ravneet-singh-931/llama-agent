@@ -2635,7 +2635,7 @@ async def chat_stream(
                         yield "data: " + json.dumps({"type": "agent_done", "agent": ev.get("agent"), "step": ev.get("step")}) + "\n\n"
                     elif etype == "final":
                         final_text = ev.get("content", "")
-            except Exception as e:
+            except Exception :
                 logging.getLogger(__name__).exception("team collaboration failed")
                 err = "⚠️ The agent team could not complete this task."
                 streamed += "\n\n" + err
@@ -2919,7 +2919,7 @@ async def remember_fact(request: RememberRequest, user = Depends(optional_auth))
         user_id = _request_uid(user)
         facts.remember(request.key, request.value, user_id=user_id)
         return {"status": "success", "message": f"Remembered: {request.key} = {request.value}"}
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2931,7 +2931,7 @@ async def recall_fact(request: RecallRequest, user = Depends(optional_auth)):
         user_id = _request_uid(user)
         value = facts.recall(request.key, user_id=user_id)
         return {"key": request.key, "value": value}
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2943,7 +2943,7 @@ async def list_facts(user = Depends(optional_auth)):
         user_id = _request_uid(user)
         all_facts = facts.get_all_facts(user_id=user_id)
         return {"facts": all_facts}
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2955,7 +2955,7 @@ async def delete_fact(key: str, user = Depends(optional_auth)):
         user_id = _request_uid(user)
         facts.forget(key, user_id=user_id)
         return {"status": "success", "message": f"Deleted: {key}"}
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3009,7 +3009,7 @@ async def read_document(file_path: str, user: Optional[Dict] = Depends(optional_
         return {"status": "success", "message": result}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3069,7 +3069,7 @@ async def upload_document(file: UploadFile = File(...), user: Optional[Dict] = D
         return {"status": "success", "message": result, "file": safe_filename}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3080,7 +3080,7 @@ async def search_documents(request: SearchRequest, user: Optional[Dict] = Depend
         rag = _user_rag(_request_uid(user))
         results = await asyncio.wait_for(asyncio.to_thread(rag.search, request.query, request.top_k), timeout=DOWNSTREAM_TIMEOUT)
         return {"query": request.query, "results": results}
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3093,7 +3093,7 @@ async def ask_documents(request: SearchRequest, user: Optional[Dict] = Depends(o
         rag = _user_rag(_request_uid(user))
         answer = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, request.query, rag), timeout=DOWNSTREAM_TIMEOUT)
         return {"query": request.query, "answer": answer}
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3104,7 +3104,7 @@ async def list_documents(user: Optional[Dict] = Depends(optional_auth)):
         rag = _user_rag(_request_uid(user))
         docs = rag.list_documents()
         return {"documents": docs}
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3128,7 +3128,7 @@ async def get_memory(
             "recent_messages": recent,
             "conversations": conversations,
         }
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3146,7 +3146,7 @@ async def clear_memory(user = Depends(optional_auth)):
         await pg_store.clear_user(user_id)
         await redis_store.invalidate_user(user_id)
         return {"status": "success", "message": f"Memory cleared for {user_id}"}
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3180,7 +3180,7 @@ async def list_conversations(
             "limit": limit,
             "offset": offset,
         }
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3213,7 +3213,7 @@ async def get_conversation(conversation_id: str, user = Depends(optional_auth)):
         return summary
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3237,7 +3237,7 @@ async def create_conversation(request: CreateConversationRequest = None,
         await pg_store.ensure_conversation(user_id, conv["id"], title=title)
         await redis_store.invalidate_user(user_id)
         return conv
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3257,7 +3257,7 @@ async def delete_conversation(conversation_id: str, user = Depends(optional_auth
         return {"status": "success", "conversation_id": conversation_id}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3291,7 +3291,7 @@ async def get_metrics_json(user=Depends(require_admin)):
         metrics = logger.get_metrics()
         
         return {"health": health, "metrics": metrics}
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3315,7 +3315,7 @@ async def monitoring_dashboard(user=Depends(require_admin)):
             "audit_events": len(audit_logger.events),
         }
         return dashboard
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3350,7 +3350,7 @@ async def agent_team_stats(user = Depends(optional_auth)):
             },
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
-    except Exception as e:
+    except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3394,7 +3394,7 @@ async def mcp_status(user = Depends(optional_auth)):
     business_metrics.record_feature_usage("mcp_status")
     try:
         return await get_mcp_status()
-    except Exception as e:
+    except Exception :
         raise HTTPException(
             status_code=503,
             detail="MCP server unreachable",
@@ -3434,7 +3434,7 @@ async def mcp_tool_call(request: MCPToolRequest, user = Depends(get_current_user
         raise HTTPException(status_code=504, detail="MCP tool call timed out")
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception :
         _mcp_record_failure()
         app.state.monitor.track_error()
         raise HTTPException(status_code=502, detail="MCP tool call failed")

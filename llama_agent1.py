@@ -849,8 +849,8 @@ def main():
             print("\n🤖 Agent: Thinking...")
             result = asyncio.run(run_agent(user_input))
             # Persist the exchange (run_agent no longer saves to memory itself).
+            # fact_store was constructed here and never written to or read from.
             mem = globals().get("memory") or ConversationMemory()
-            fact_store = globals().get("facts") or FactMemory()
             mem.add_message("user", user_input, user_id="guest", conversation_id="default_cli")
             mem.add_message("assistant", result, user_id="guest", conversation_id="default_cli")
             print(f"\n🤖 Agent: {result}")

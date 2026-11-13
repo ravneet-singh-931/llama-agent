@@ -245,7 +245,9 @@ class WebSocketHandler:
         
         This is the main entry point for WebSocket connections.
         """
-        connection_id = await self.manager.connect(websocket, user_id, username)
+        # connect() returns an id, but disconnect() takes the socket and user id,
+        # so the return value was assigned and never read.
+        await self.manager.connect(websocket, user_id, username)
         
         try:
             while True:

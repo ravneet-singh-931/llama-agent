@@ -309,11 +309,13 @@ class SimpleRateLimiter:
         return self._redis
 
     def _cleanup(self, key: str):
-        """Remove old entries (in-memory path)"""
-        now = datetime.now()
-        cutoff_minute = now - timedelta(minutes=1)
-        cutoff_hour = now - timedelta(hours=1)
+        """Remove entries older than the longest window (1 hour).
 
+        Only the hour cutoff is needed: it is the widest of the two windows, so
+        anything dropped here is out of scope for the minute window too. A
+        `cutoff_minute` used to be computed here and never read.
+        """
+        cutoff_hour = datetime.now() - timedelta(hours=1)
         self._requests[key] = [
             ts for ts in self._requests[key]
             if ts > cutoff_hour
@@ -358,14 +360,15 @@ class SimpleRateLimiter:
             self._cleanup(key)
             now = datetime.now()
             cutoff_minute = now - timedelta(minutes=1)
-            cutoff_hour = now - timedelta(hours=1)
 
             # Count requests in last minute
             recent_minute = sum(1 for ts in self._requests[key] if ts > cutoff_minute)
             if recent_minute >= self.requests_per_minute:
                 return True, f"Rate limit: {self.requests_per_minute} requests per minute"
 
-            # Count requests in last hour
+            # Count requests in last hour. `len()` is correct and not an oversight:
+            # _cleanup() above has already pruned everything older than an hour, so
+            # every remaining entry is inside the hour window.
             recent_hour = len(self._requests[key])
             if recent_hour >= self.requests_per_hour:
                 return True, f"Rate limit: {self.requests_per_hour} requests per hour"
