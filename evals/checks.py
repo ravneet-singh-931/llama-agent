@@ -10,8 +10,7 @@ import ast
 import json
 import os
 import re
-import subprocess
-import sys
+import subprocess  # nosec B404 - runs the answer's own doctests; see run_doctests()
 import textwrap
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -421,8 +420,13 @@ def run_doctests(code: str, timeout_s: float = 5.0) -> Optional[str]:
     # needs. doctest wants the real source because the examples live inside the
     # docstrings of a real function.
     script = _DOCTEST_RUNNER.format(src=code)
+    # Bandit B603: not shell=True, argv list, and the payload is model output
+    # this check exists to execute. The subprocess IS the sandbox -- bounded by
+    # timeout_s, and importing model output into the eval process is strictly
+    # worse. The comment must sit on the call line: a `# nosec` above it does
+    # nothing, which is how the first version of this fix still failed CI.
     try:
-        proc = subprocess.run([sys.executable, "-c", script],
+        proc = subprocess.run([sys.executable, "-c", script],  # nosec B603
                               capture_output=True, text=True, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         return f"doctests did not finish in {timeout_s:g}s"

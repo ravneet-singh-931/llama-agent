@@ -217,6 +217,22 @@ true and was the point — the check could not tell the difference, and the fixt
 encoded that as correct behaviour. It now uses a correct body. Worth saying plainly:
 **a test written against a checker's weakness will defend the weakness.**
 
+**A CI failure worth keeping.** The first version of this fix failed the
+Security Scan job: bandit exits non-zero on *any* finding, having no severity
+floor, and `subprocess` is two of them (B404 import, B603 call). Both are LOW.
+Neither is a bug here — executing the answer's own doctests is the entire point of
+the fix — so the correct resolution is `# nosec` **with the reason written above
+it**, not a refactor to dodge the scanner.
+
+Two details are the lesson:
+
+- the first `# nosec` was placed on the comment line *above* the call and did
+  nothing; bandit annotates the flagged line. A suppression that does not suppress
+  looks exactly like a suppression that worked, until CI runs.
+- **bandit has no severity floor**, so "LOW" and "block the merge" are the same
+  status. That is recorded in this project already (it is why the job skips
+  B101/B104/B105/B106/B107/B110) and it caught this change too.
+
 **What is still open, and why it is stated rather than fixed.**
 
 - **The 1.25 has not been re-measured.** Fixing an instrument does not re-score a
