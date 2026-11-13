@@ -220,13 +220,30 @@ def test_rag_list_documents():
 
 # ============ TEST MONITORING ============
 
-def test_monitor_health():
+def test_monitor_health_is_process_health_only():
+    """PerformanceMonitor must not keep a second set of request counts.
+
+    It used to have track_request()/track_error() and derive ``status`` from
+    their ratio. That was a per-process second opinion on an event Prometheus
+    already counts in prometheus_middleware -- and it only saw the chat and
+    MCP handlers, so the two totals could never agree, and /health is a k8s
+    probe so probe traffic diluted the error rate. Request/error counting now
+    has one owner; this class owns uptime.
+    """
     from modules.monitoring import PerformanceMonitor
+
     monitor = PerformanceMonitor()
-    monitor.track_request()
     health = monitor.get_health()
+
     assert health["status"] == "healthy"
-    assert health["total_requests"] == 1
+    assert health["uptime_human"]
+    assert health["uptime_seconds"] >= 0
+    # The counters are gone, not merely uncounted: a stale field would be
+    # read as a working number by any caller that still asks for it.
+    for gone in ("total_requests", "total_errors", "error_rate"):
+        assert gone not in health
+    for gone in ("track_request", "track_error", "request_count", "error_count"):
+        assert not hasattr(monitor, gone), f"{gone} should be gone"
 
 
 def test_logger_metrics():

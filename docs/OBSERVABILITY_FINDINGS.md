@@ -186,7 +186,118 @@ sentence in this very file that said so.
 > **An assumption that happens to be true is still an assumption, and the ones
 > that happen to be true are the ones that never get checked.**
 
-## The pattern, four for four
+## 5. Two sets of books for the same request, and a health check that improved as it failed
+
+**Symptom.** Two numbers called "requests" on two dashboards, permanently different.
+Neither was a bug in a counter. Both counters worked.
+
+**Cause.** The same event was counted twice, at different layers:
+
+| | counts | where |
+|---|---|---|
+| Prometheus `llama_agent_requests_total` / `_errors_total` / `_response_time_seconds` | every HTTP request, in middleware | `prometheus_middleware` (`api.py`) |
+| `PerformanceMonitor.request_count` / `error_count` | only chat + MCP-tool handlers, by hand | `track_request()` had 2 call sites, `track_error()` 4 |
+
+So the two were not two views of one thing. They were two things: the middleware
+counts every route, every 404, every 429; `PerformanceMonitor` counted only the two
+handlers someone had remembered to instrument. Every validation error, every rate
+limit and every unhandled 500 anywhere else incremented Prometheus and left
+`PerformanceMonitor` untouched, so its error rate was **structurally understated**.
+
+**Then it got worse, and this is the part that matters.** `/health` returns
+`PerformanceMonitor.get_health()`, whose `status` was
+`"healthy" if error_count / max(request_count, 1) < 0.1 else "degraded"`. And
+`/health` is the k8s **liveness, readiness and startup probe**
+(`k8s/api.yaml`, three probes). Probe traffic was therefore *most* of
+`request_count` on a quiet system — which inflated the denominator and made the
+error rate smaller the more often the probe ran. **The health endpoint's verdict
+improved the more it was polled, including while the service was failing.**
+
+And the counters lived in process memory while the API runs 2–10 replicas
+(`k8s/api.yaml`, `k8s/api-hpa.yaml`): each pod reported its own fraction as if it
+were the total. The repository had already made this exact call once — per-user
+spend was moved off an in-memory dict onto a Prometheus counter, with the reason
+written in `prometheus_metrics.py`: *"two replicas reported two different totals
+and a restart erased both."*
+
+**Fix.** One event, one owner. Request and error counting belongs to Prometheus and
+is scraped from `/metrics`. `PerformanceMonitor` keeps the one number it owns
+honestly — *this process's* uptime — and `get_health()` now returns
+`status`/`uptime_seconds`/`uptime_human` and nothing else. When the counters went,
+the probe-dilution bug went with them: there is no calculation left to dilute.
+
+The obvious-looking alternative was rejected: reading
+`REQUEST_COUNT._value.get()` into `/health` would have replaced a per-pod number
+with *a differently per-pod number*, since a Prometheus registry is per process and
+there is one process per pod. That is the option that looks conservative and
+changes what the number means without changing its name.
+
+**The dashboard.** `AgentCollaborationDashboard` rendered those two fields as live
+cards. They were replaced with numbers that are actually true across replicas:
+`tasks_handled_total` (from shared storage, not process memory) and a count of
+agents used at least once. Two TypeScript interfaces (`MetricsData`, `HealthStatus`)
+also described fields the API never returned — `requests_last_hour` exists in no
+backend file — and had zero importers. Deleted.
+
+> **A number that is wrong in the same direction as the thing you are checking is
+> the most expensive kind of wrong.** The probe did not just dilute the error rate;
+> it diluted it *because* the system was being watched.
+
+## 6. Four of five alert rules could not fire, and the alert list stayed green
+
+**Symptom.** None. The alert list was empty, which is what a healthy service looks
+like.
+
+**Cause.** `AlertManager.rules` is one flat namespace of metric keys, but the dict
+handed to `check_alerts()` came from `business_metrics.get_metrics()`, and the rule
+keys were not in it:
+
+| rule | read | the feed publishes | result |
+|---|---|---|---|
+| `high_error_rate` | `error_rate` | `failure_rate` | never fires |
+| `high_cost` | `daily_cost` | *(nothing — spend is in `cost_summary()`)* | never fires |
+| `low_uptime` | `uptime_percent` | `uptime_hours` | never fires |
+| `memory_high` | `memory_usage_percent` | *(nothing — `psutil` is not even a dependency)* | never fires |
+| `slow_response` | `avg_response_time` | `avg_response_time` | **live** |
+
+`.get(key, 0)` turned each absence into a benign default, `check_alerts()` caught
+nothing, and returned `[]`. **A dead rule and a healthy system produced identical
+output** — the same failure as finding 2, in a different module.
+
+The one rule that did work was pinned by a test that *hand-fed* it the key the real
+feed never sends (`check_alerts({"error_rate": 99, ...})`). The test passed, the
+production path never did.
+
+**Fix.** `high_error_rate` now reads `failure_rate` — the field that exists, in the
+same units (percent), compared against 5 as intended. The spend and memory rules
+are **deleted rather than re-pointed**: spend is already covered by
+`llama_agent_llm_cost_usd_total` in `_cost_summary()`, and memory needs a dependency
+the project does not have. Re-pointing `high_cost` at `total_cost` would have
+alerted on *cumulative lifetime* spend against a threshold written for a daily
+figure — a rule that fires forever once crossed, which is its own kind of dead.
+
+The two call sites now build their input through one `_alert_metrics()` helper that
+merges the business feed with the Prometheus cost summary, so a rule and its input
+are defined in the same place.
+
+**The test that prevents a repeat** reads the published keys out of the **real feed
+builder** (`inspect.getsource(business_metrics.get_metrics)`) rather than restating
+them, then asserts every rule's key is in that set. Adding a rule for a field nobody
+publishes fails in CI instead of silently never firing. Verified by re-adding
+`memory_high` and watching it fail with the key named:
+
+```
+alert rule 'memory_high' reads ['memory_usage_percent'], which the metrics feed
+never publishes (it has ['avg_response_time', ..., 'failure_rate', ...,
+'uptime_hours']), so the rule can never fire
+```
+
+> **A control that reports "nothing to report" is indistinguishable from a control
+> that is broken, unless you test the control.**
+
+---
+
+## The pattern, six for six
 
 | # | What the metric said | What was true | Why |
 |---|---|---|---|
@@ -194,10 +305,13 @@ sentence in this very file that said so.
 | 2 | "No data" | 0 failures | a counter that does not exist until it fires |
 | 3 | 0.002 s | 2.008 s | the clock stopped before the streamed answer began |
 | 4 | "traced cheaply" | ~5 µs/span — **true**, but unmeasured | the claim had no number behind it |
+| 5 | "healthy", ~2% errors | two uncoupled counters; the probe inflated the denominator | the same event counted twice, at two layers |
+| 6 | no alerts | four of five rules read keys the feed never sends | `.get(key, 0)` made absence look like health |
 
-Findings 1–3 were **read and trusted**. None was caught by looking at the code —
-each was caught by comparing the dashboard against a second source: the pods' raw
-metrics, the absence of failures in the logs, and a stopwatch.
+Findings 1–3 and 5–6 were **read and trusted**. None was caught by looking at the
+code — each was caught by comparing the dashboard against a second source: the pods'
+raw metrics, the absence of failures in the logs, a stopwatch, a `grep` for call
+sites, and the list of keys a function actually returns.
 
 **Finding 4 is the odd one out and completes the pattern.** It found nothing
 broken. It was caught by asking which claims had no second source at all — and then
@@ -205,8 +319,14 @@ becoming one.
 
 **A dashboard is a measuring instrument, and it needs the same suspicion as a test
 suite.** The eval part of this project has 19 findings about the measuring stick.
-This part has three about the dashboard. They are the same kind of bug in different
+This part has six about the dashboard. They are the same kind of bug in different
 clothes.
+
+Findings 5 and 6 are the sharpest form of it: in both, the broken instrument and the
+healthy system produce **the same output**. A missing metric reads as "no data"
+(finding 2). A rule with no input reads as "no alerts" (finding 6). A diluted error
+rate reads as "healthy" (finding 5). **The failure mode of a monitoring system is
+silence, and silence is what success looks like.**
 
 ---
 
@@ -220,7 +340,9 @@ Stated so it is not discovered by a reader first:
   blocking.
 - **No alert delivery.** Prometheus alert rules exist; no Alertmanager is deployed.
   The rules evaluate and nothing is sent anywhere. See [`SLO.md`](SLO.md) for the
-  targets and README "Known limits" for the gap.
+  targets and README "Known limits" for the gap. Note that this is a *second*,
+  independent reason an alert would not reach anyone: finding 6 removed the rules
+  that could not fire, but the two that can still only print a line at startup.
 - **`/chat/stream` skips the in-app business metrics** that `/chat` records, though
   request metrics and Phoenix traces do cover it.
 - **The judge is not traced as its own span tree** — eval judge calls appear as

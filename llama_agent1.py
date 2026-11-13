@@ -642,7 +642,6 @@ async def run_agent(user_input: str, memory: Optional[Any] = None,
     fact_context = fact_store.get_context_string(user_id=user_id)
 
     # Log the interaction
-    monitor.track_request()
     start_time = time.time()
 
     # Build the prompt: user message + recent conversation + known facts.
@@ -701,8 +700,6 @@ async def _run_agent_compute(prompt: str, cache_key: str,
             if not fut.cancelled():
                 fut.set_result(result)
         except Exception as e:
-            elapsed = time.time() - start_time
-            monitor.track_error()
             logger.log_error(e, context=f"User input: {user_input}")
             # Never leak internal error details to the caller.
             result = "Error: something went wrong. Please try again."
@@ -820,7 +817,6 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
     # Save to memory after streaming is done
     mem.add_message("user", user_input, user_id=user_id, conversation_id=conversation_id)
     mem.add_message("assistant", full_response, user_id=user_id, conversation_id=conversation_id)
-    monitor.track_request()
 
 
 def main():

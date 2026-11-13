@@ -50,31 +50,27 @@ class AlertManager:
         self.dedup_window = 300  # 5 minutes
         
         # Alert rules
+        #
+        # Every condition below must key off a field that the metrics dict fed
+        # to check_alerts() actually contains -- otherwise the rule is dead
+        # code that reads as a working control. Four of these used to:
+        # ``error_rate`` (the feed publishes ``failure_rate``), ``daily_cost``
+        # (spend lives in cost_summary()/Prometheus, not business metrics),
+        # ``uptime_percent`` (the feed has ``uptime_hours``) and
+        # ``memory_usage_percent`` (nothing measured memory; psutil is not a
+        # dependency). The alert manager swallowed the empty result as "no
+        # alerts", so a permanently-green alert list was indistinguishable
+        # from a healthy service.
         self.rules: Dict[str, Dict] = {
             "high_error_rate": {
-                "condition": lambda metrics: metrics.get("error_rate", 0) > 5,
+                "condition": lambda metrics: metrics.get("failure_rate", 0) > 5,
                 "severity": AlertSeverity.ERROR,
-                "message": "High error rate detected: {error_rate}%",
+                "message": "High error rate detected: {failure_rate}%",
             },
             "slow_response": {
                 "condition": lambda metrics: metrics.get("avg_response_time", 0) > 2,
                 "severity": AlertSeverity.WARNING,
                 "message": "Slow response times: {avg_response_time}s average",
-            },
-            "high_cost": {
-                "condition": lambda metrics: metrics.get("daily_cost", 0) > 10,
-                "severity": AlertSeverity.WARNING,
-                "message": "High API cost: ${daily_cost:.2f} today",
-            },
-            "low_uptime": {
-                "condition": lambda metrics: metrics.get("uptime_percent", 100) < 99.9,
-                "severity": AlertSeverity.CRITICAL,
-                "message": "Low uptime: {uptime_percent}%",
-            },
-            "memory_high": {
-                "condition": lambda metrics: metrics.get("memory_usage_percent", 0) > 80,
-                "severity": AlertSeverity.WARNING,
-                "message": "High memory usage: {memory_usage_percent}%",
             },
         }
     

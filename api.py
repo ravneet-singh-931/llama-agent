@@ -585,7 +585,7 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  Database health check unavailable: {app.state.db_health_result.get('error', 'unknown')}")
     
     # Enterprise: initial alert sweep so the monitoring stack has a baseline
-    triggered = alert_manager.check_alerts(business_metrics.get_metrics())
+    triggered = alert_manager.check_alerts(_alert_metrics())
     if triggered:
         print(f"📈 Baseline alerts triggered: {[a['type'] for a in triggered]}")
     
@@ -2169,7 +2169,6 @@ async def chat(
     """Chat with the agent. Auth optional in development mode."""
     require_api_key()
     start_time = datetime.now()
-    monitor = app.state.monitor
     memory = app.state.memory
     facts = app.state.facts
     logger = app.state.logger
@@ -2179,7 +2178,6 @@ async def chat(
     # The storage layer also refuses to rebind a conversation to another user.
     conversation_id = request.conversation_id or _default_conversation_id(user_id)
     
-    monitor.track_request()
     query_type = "general"
     # Name introduced in plain chat? ("my name is X" / "call me X" / "i am X")
     detected_name = extract_name_from_message(request.message)
@@ -2362,7 +2360,7 @@ async def chat(
             query_type=query_type,
         )
         sla_monitor.record_response_time(elapsed)
-        alert_manager.check_alerts(business_metrics.get_metrics())
+        alert_manager.check_alerts(_alert_metrics())
         
         return ChatResponse(
             response=str(response),
@@ -2371,7 +2369,6 @@ async def chat(
         )
         
     except Exception as e:
-        monitor.track_error()
         logger.log_error(e, context=f"User: {request.message}")
         # Enterprise monitoring: record the failure + SLA error
         elapsed = (datetime.now() - start_time).total_seconds()
@@ -3259,6 +3256,24 @@ async def delete_conversation(conversation_id: str, user = Depends(optional_auth
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+# ============ ALERT METRICS ============
+
+def _alert_metrics() -> Dict:
+    """The metrics dict every alert rule is evaluated against.
+
+    ``AlertManager.rules`` are one flat namespace of keys, but the data lives
+    in two places: business metrics (failure_rate, avg_response_time) and the
+    Prometheus cost summary (total_cost). Earlier this passed only the first,
+    so any rule reading a cost field could never fire. Merging here means a
+    rule and its input are defined in the same place, and a key that is not in
+    this dict is visibly absent rather than silently defaulting to 0.
+    """
+    from modules.prometheus_metrics import cost_summary
+    metrics = dict(business_metrics.get_metrics())
+    metrics["total_cost"] = cost_summary().get("total_cost", 0.0)
+    return metrics
+
+
 # ============ METRICS ENDPOINTS ============
 
 
@@ -3417,7 +3432,6 @@ async def mcp_tool_call(request: MCPToolRequest, user = Depends(get_current_user
     agent_keys = _MCP_TOOL_TO_AGENT.get(request.name)
     if agent_keys:
         await _record_agent_usage(agent_keys)
-    app.state.monitor.track_request()
     if _mcp_circuit_open():
         raise HTTPException(status_code=503, detail="MCP server temporarily unavailable")
     try:
@@ -3428,11 +3442,9 @@ async def mcp_tool_call(request: MCPToolRequest, user = Depends(get_current_user
         return result
     except asyncio.TimeoutError:
         _mcp_record_failure()
-        app.state.monitor.track_error()
         raise HTTPException(status_code=504, detail="MCP tool call timed out")
     except HTTPException:
         raise
     except Exception :
         _mcp_record_failure()
-        app.state.monitor.track_error()
         raise HTTPException(status_code=502, detail="MCP tool call failed")

@@ -12,7 +12,7 @@
 in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/after.
 🔴 OPEN means still present in the repo, with the effort estimated.
 
-**Last updated:** #18 closed — every silent handler now says what it loses.
+**Last updated:** #20 closed — one owner for request/error counts, and four dead alert rules.
 
 | # | Problem | Where | Status | Proof / note |
 |---|---|---|---|---|
@@ -35,7 +35,7 @@ in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/a
 | 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🟢 **DONE** | stdio client (230 lines) deleted with the UI; only the SSE client ships |
 | 18 | `except Exception: pass` in live paths — **60 handlers, not 32** (my first count was of the audit, not the code) | 19 files, mostly `prometheus_metrics.py` | 🟢 **DONE** | **59 converted to `degrade(what, exc)`; 1 left (a queue timeout, which is control flow, not a fallback).** The message names what is lost and the failure is logged at DEBUG. `modules/silent.py` + 10 tests. Coverage 81.81% → **81.94%** |
 | 19 | 31 unused local variables (`F841`) — invisible to CI | repo-wide | 🟢 **DONE** | **31 → 0.** 24 were `except … as e` bindings; **7 were real dead assignments**, two of which changed what the rate limiter's hour window means. F401 unchanged at 29, none introduced |
-| 20 | Metrics counted twice; 3 ways to view them | `api.py`, `prometheus_metrics.py` | 🔴 **OPEN** | duplication, low |
+| 20 | Metrics counted twice; 3 ways to view them | `api.py`, `monitoring.py`, `advanced_monitoring.py` | 🟢 **DONE** | **Worse than recorded.** The duplicate counters were also the input to `/health`'s `status`, and `/health` is the k8s probe — so probe traffic inflated the denominator and the health verdict **improved the more it was polled**. Counters deleted; `PerformanceMonitor` keeps uptime only. Also found and fixed in the same knot: **4 of 5 in-app alert rules read keys the feed never sends** (`error_rate` vs `failure_rate`, `daily_cost`, `uptime_percent`, `memory_usage_percent`) — they could never fire, and `.get(key,0)` made that look like "no alerts". Suite 844 → **845**; coverage 81.94% → **82.01%** |
 
 **15 DONE, 5 OPEN.** Every 🟢 row has a test that fails when the fix is reverted, or a
 measured before/after. Every 🔴 row has an effort estimate and a reason for its position.
@@ -1147,3 +1147,150 @@ first number was a second-hand count from an earlier part of this audit, and I
 did not re-derive it before restating it in a document whose whole purpose is
 that numbers trace to files. The scan that produced 60 took four seconds. This
 is the same failure as PART 20: restating instead of measuring.
+
+---
+
+# PART 22 — #20: one owner for request counts, and four alert rules that could not fire
+
+## What the finding said, and what was there
+
+Recorded as *"Metrics counted twice; 3 ways to view them — duplication, low"*. It was
+not low, and "duplication" understated it in the specific way that matters: the
+duplicate was not a nuisance, it was the **input to a decision**.
+
+Two counters, same event, different layers:
+
+| | counts | call sites |
+|---|---|---|
+| Prometheus `llama_agent_requests_total` / `_errors_total` | every HTTP request, in `prometheus_middleware` | 1 (the middleware) |
+| `PerformanceMonitor.request_count` / `error_count` | only chat + MCP-tool handlers, by hand | `track_request` **2**, `track_error` **4** |
+
+They could never agree, and the hand-counted one was the *smaller* set: every 4xx,
+every 429, every 500 outside those two handlers went to Prometheus only. Its error
+rate was structurally understated.
+
+## The part that made it urgent
+
+`/health` returns `PerformanceMonitor.get_health()`, and `status` was
+`"healthy" if error_count / max(request_count, 1) < 0.1 else "degraded"`.
+
+`/health` is the k8s **liveness, readiness and startup probe** (`k8s/api.yaml:249`,
+`:257`, `:265`). Probes therefore dominate `request_count` on a quiet system, which
+inflates the denominator and **shrinks the error rate the more the probe runs**. The
+health endpoint's verdict got rosier with the frequency of its own polling — while a
+real failure rate sat unchanged in the numerator.
+
+Add the deployment: `uvicorn api:app` with **no `--workers`**, so one process per pod,
+and `k8s/api.yaml` runs **2 replicas** (HPA 2→10). Each pod reported its own fraction
+with no label saying so.
+
+The repo had already decided this question once. `prometheus_metrics.py` carries the
+reason per-user spend moved to a counter: *"two replicas reported two different
+totals and a restart erased both."* The same argument applies to the request counter
+and had simply never been applied to it.
+
+## Do it or don't
+
+**Do it, and treat it as correctness, not tidying.** Three of the four remaining
+problems (#14, #15, #16) are days of restructuring. This was hours, and it removes a
+health check that flatters itself under load — the exact failure the reader of a
+dashboard cannot detect.
+
+## The decision, and the two I rejected
+
+Rejected **A** (read `REQUEST_COUNT._value.get()` into `/health`): a Prometheus
+registry is per-process, so that swaps a per-pod number for *a differently per-pod
+number* with a more authoritative name. It is the option that looks conservative and
+changes the meaning without changing the name.
+
+Rejected **B** (keep both, document them as different): leaves two fields called
+"requests" and leaves the probe-dilution calculation running.
+
+Taken: **one event, one owner.** Prometheus counts requests and errors and is
+scraped. `PerformanceMonitor` keeps the one number it owns honestly — *this
+process's* uptime — and returns `status`/`uptime_seconds`/`uptime_human`.
+
+Deleted: `request_count`, `error_count`, `track_request()`, `track_error()`, all **7**
+call sites (`api.py` ×5, `llama_agent1.py` ×2) and the two fields from `/health`.
+`status` has no error-rate term left, so the probe-dilution bug is not fixed — it is
+**gone**, because there is no calculation to dilute.
+
+## The finding inside the finding
+
+While mapping the blast radius I followed `check_alerts()` and found the same defect
+class again, in the same module, larger:
+
+`AlertManager.rules` is one flat namespace; the dict passed to it came from
+`business_metrics.get_metrics()`. **Four of five rules read keys that feed never
+contains.**
+
+| rule | reads | feed has | outcome |
+|---|---|---|---|
+| `high_error_rate` | `error_rate` | `failure_rate` | never fires |
+| `high_cost` | `daily_cost` | — (`cost_summary()`) | never fires |
+| `low_uptime` | `uptime_percent` | `uptime_hours` | never fires |
+| `memory_high` | `memory_usage_percent` | — (`psutil` not a dependency) | never fires |
+| `slow_response` | `avg_response_time` | `avg_response_time` | **live** |
+
+`.get(key, 0)` turned every absence into a benign default; `check_alerts()` caught
+nothing and returned `[]`. **A dead rule and a healthy system produced identical
+output.** This is finding 2 of `OBSERVABILITY_FINDINGS.md` ("No data" read as "no
+problems") in a different module.
+
+The single working rule was pinned by a test that **hand-fed it the key production
+never sends** — `check_alerts({"error_rate": 99, ...})`. Green test, dead rule.
+
+Fixed by reading `failure_rate`; the cost and memory rules were **deleted rather than
+re-pointed**, because spend is already covered by `llama_agent_llm_cost_usd_total` and
+memory needs a dependency the project does not have. Re-pointing `high_cost` at
+`total_cost` would have fired on *cumulative lifetime* spend against a threshold
+written for a day — a rule that stays lit forever once crossed, which is its own
+species of dead. Both call sites now build their input through one `_alert_metrics()`
+helper, so a rule and its input are defined in one place.
+
+## Scope call, stated plainly
+
+I kept this to **one knot**: duplicate counts in, dead rules out. #14 (three
+monitoring modules, 1,348 lines) still owns the consolidation of `monitoring.py`,
+`advanced_monitoring.py` and `prometheus_metrics.py`. I did **not** touch the
+`SLAComplianceMonitor`, which computes an `error_rate` a third way and compares it
+against a `target` of `1.0` keyed `error_rate_percent` — that is a units problem
+belonging to #14, and it is recorded here so it is not lost.
+
+## Proof
+
+| check | before | after |
+|---|---|---|
+| suite | 844 passed / 6 skipped | **845 passed / 6 skipped** |
+| coverage (`--cov=.`) | 81.94% | **82.01%** |
+| bandit (CI flags) | 0 | **0** |
+| TypeScript (`tsc --noEmit`) | clean | **clean** |
+| F841 repo-wide | 0 | **0** (I introduced one; caught by flake8 and fixed) |
+
+Tests changed, and why each one *had* to change:
+
+- `test_tools.py::test_monitor_health` → asserts the counters are **absent**
+  (`hasattr` is False), not just uncounted. A stale field would be read as a working
+  number by any caller that still asks for it.
+- `test_e2e.py::test_error_tracking` → errors are counted by `AgentLogger.log_error`,
+  which writes the record, not by a monitor that was counting in parallel.
+- `test_enterprise.py::test_alert_manager_triggers` → feeds `failure_rate`, the field
+  that exists.
+- **new** `test_every_alert_rule_reads_a_key_that_is_actually_published` — reads the
+  published keys out of the real feed builder with `inspect.getsource`, so it cannot
+  drift. Verified by re-adding `memory_high` and watching it fail naming the key.
+
+Frontend: the two cards that rendered the deleted fields now show
+`tasks_handled_total`-class data and a count of agents used at least once. Two
+TypeScript interfaces (`MetricsData`, `HealthStatus`) described fields the API has
+never returned — `requests_last_hour` exists in no backend file — and had **zero
+importers**. Deleted.
+
+## Wrong claim of mine, recorded
+
+I told the user this was **"~1–2 h, low risk, purely duplication."** Reading the call
+sites falsified all three parts: it was 2–3 h, it touched `/health` (a k8s probe) and
+the frontend, and the duplicate was the *input to a health verdict*, not dead weight.
+I made that estimate before reading `get_health()` and the probe config, and stated
+it in the same breath as the recommendation to act. **Estimate after reading, not
+before.**

@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (maintenance audit, 2026-11-13)
+
+- **Two sets of books for the same request, and a health check whose verdict improved
+  the more it was polled.** `PerformanceMonitor` kept its own `request_count` /
+  `error_count` beside the Prometheus counters that `prometheus_middleware` already
+  increments for every request. They could never agree: the hand-written ones had 2
+  and 4 call sites (chat + MCP only), so every validation error, rate limit and
+  unhandled 500 elsewhere reached Prometheus and nothing else.
+
+  Worse, `/health` derived `status` from that ratio, and `/health` is the k8s
+  **liveness, readiness and startup probe** (`k8s/api.yaml`). Probe traffic therefore
+  dominated the denominator on a quiet system, so the error rate *fell* the more the
+  probe ran — **the health endpoint reported better the more often it was checked,
+  including while failing.** The counters were also per-process while the API runs 2–10
+  replicas, so each pod reported its fraction as if it were the total. The repo had
+  already settled this argument for per-user spend (`prometheus_metrics.py`: *"two
+  replicas reported two different totals and a restart erased both"*).
+
+  Request and error counting now has one owner: Prometheus, scraped from `/metrics`.
+  `PerformanceMonitor` keeps only `start_time` and reports `status`, `uptime_seconds`
+  and `uptime_human`. `total_requests`, `total_errors` and `error_rate` are gone from
+  `/health` and `/agents/stats`; the dashboard cards that displayed them now show
+  replica-shared data. Seven call sites removed; one test rewritten to assert the
+  fields are **absent**, not merely uncounted.
+
+  Considered and rejected: reading `REQUEST_COUNT._value.get()` into `/health` — a
+  Prometheus registry is per-process, so that replaces a per-pod number with a
+  differently per-pod number.
+
+- **Four of five in-app alert rules could never fire.** `AlertManager.rules` read
+  `error_rate` (the feed publishes `failure_rate`), `daily_cost` (spend lives in
+  Prometheus' `cost_summary()`), `uptime_percent` (the feed has `uptime_hours`) and
+  `memory_usage_percent` (nothing measured memory — `psutil` is not a dependency).
+  `.get(key, 0)` turned each absence into a benign default, so `check_alerts()` returned
+  `[]` and **a dead rule was indistinguishable from a healthy system.** The one rule
+  that worked was pinned by a test that hand-fed it the key production never sends.
+
+  `high_error_rate` now reads `failure_rate`; the cost and memory rules are deleted
+  rather than re-pointed (spend is already covered by `llama_agent_llm_cost_usd_total`;
+  re-pointing `high_cost` at `total_cost` would alert on cumulative lifetime spend
+  against a daily threshold). Both call sites now build their input through one
+  `_alert_metrics()` helper merging the business feed with the cost summary.
+
+  New test `test_every_alert_rule_reads_a_key_that_is_actually_published` reads the
+  published keys out of the real feed builder via `inspect.getsource`, so the drift
+  cannot recur silently.
+
+  Also deleted: `MetricsData` and `HealthStatus` in `frontend/src/types/index.ts`, which
+  described fields the API has never returned (`requests_last_hour` exists in no
+  backend file) and had zero importers.
+
+  Suite 844 → **845 passed**, coverage 81.94% → **82.01%**.
+
 ### Changed (maintenance audit, 2026-11-13)
 
 - **Every silent exception handler now names what it loses. 59 handlers across 19 files.**

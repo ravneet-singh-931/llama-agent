@@ -346,8 +346,51 @@ class TestEnterpriseModules:
         from modules.advanced_monitoring import AlertManager
 
         manager = AlertManager()
-        triggered = manager.check_alerts({"error_rate": 99, "avg_response_time": 0.1})
+        triggered = manager.check_alerts({"failure_rate": 99, "avg_response_time": 0.1})
         assert any(a["type"] == "high_error_rate" for a in triggered)
+
+    def test_every_alert_rule_reads_a_key_that_is_actually_published(self):
+        """A rule whose key never arrives is a control that cannot fire.
+
+        Four of the five rules used to be dead this way: error_rate (the feed
+        publishes failure_rate), daily_cost (spend lives in Prometheus'
+        cost_summary), uptime_percent (the feed has uptime_hours) and
+        memory_usage_percent (nothing measured memory). check_alerts swallowed
+        the empty result as "no alerts", so a permanently-green alert list was
+        indistinguishable from a healthy service.
+
+        This test reads the *real* keys out of the feed builder rather than
+        restating them, so adding a rule for a field nobody publishes fails
+        here instead of silently never firing in production.
+        """
+        import inspect
+        import re
+
+        from modules.advanced_monitoring import AlertManager, business_metrics
+
+        # Keys the business-metrics feed really returns.
+        src = inspect.getsource(business_metrics.__class__.get_metrics)
+        published = set(re.findall(r'"([a-z_0-9]+)":', src))
+        # Keys _alert_metrics() adds from the Prometheus cost summary.
+        import api
+
+        alert_src = inspect.getsource(api._alert_metrics)
+        assert "cost_summary" in alert_src
+        published |= {"total_cost"}
+
+        manager = AlertManager()
+        for name, rule in manager.rules.items():
+            # The condition is a live lambda, not a parseable string, so read
+            # the key out of its source text.
+            cond_src = inspect.getsource(rule["condition"])
+            read = set(re.findall(r'metrics\.get\("([a-z_0-9]+)"', cond_src))
+            assert read, f"rule {name} reads no metrics key"
+            missing = read - published
+            assert not missing, (
+                f"alert rule {name!r} reads {sorted(missing)}, which the "
+                f"metrics feed never publishes (it has {sorted(published)}), "
+                "so the rule can never fire"
+            )
 
     def test_default_models_have_explicit_prices(self, monkeypatch):
         """Both tier defaults are priced explicitly (no silent default-price guess).

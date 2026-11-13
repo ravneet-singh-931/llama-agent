@@ -217,38 +217,51 @@ class AgentLogger:
 
 class PerformanceMonitor:
     """
-    Monitors agent performance and health.
+    Process health: how long this process has been up.
+
+    This class used to also keep ``request_count`` / ``error_count`` and
+    derive a ``status`` from their ratio. That was a second set of books for
+    an event Prometheus already counts in ``prometheus_middleware`` -- and a
+    worse set:
+
+      * it only counted the chat and MCP-tool handlers (``track_request`` had
+        2 call sites) while the middleware counts every request, so the two
+        totals could never agree;
+      * ``track_error`` had 4 call sites, so most failures never reached it;
+      * ``/health`` is the k8s liveness/readiness/startup probe
+        (``k8s/api.yaml``), so probe traffic grew the denominator. On a quiet
+        day that is most of the traffic, which made the error rate -- and
+        therefore ``status`` -- get rosier the more the probe ran;
+      * the counters lived in process memory, and the API runs 2-10 replicas
+        (``k8s/api.yaml``, ``k8s/api-hpa.yaml``), so each pod reported its own
+        fraction of the truth. The same reasoning already moved per-user spend
+        to a Prometheus counter (see ``modules/prometheus_metrics.py``).
+
+    Request and error counting now has exactly one owner: Prometheus, scraped
+    from ``/metrics``. Uptime is the one number this class owns honestly --
+    it really is *this process's* uptime, and it is labelled that way in the
+    callers.
     """
-    
+
     def __init__(self):
         self.start_time = time.time()
-        self.request_count = 0
-        self.error_count = 0
-    
-    def track_request(self):
-        """Track a request"""
-        self.request_count += 1
-    
-    def track_error(self):
-        """Track an error"""
-        self.error_count += 1
-    
+
     def get_uptime(self) -> float:
         """Get uptime in seconds"""
         return time.time() - self.start_time
-    
+
     def get_health(self) -> Dict:
-        """Get health status"""
+        """Process health for /health and /agents/stats.
+
+        Deliberately contains no request or error counts: see the class
+        docstring. ``status`` is about the process being up, not about traffic.
+        """
         uptime = self.get_uptime()
-        error_rate = self.error_count / max(self.request_count, 1)
-        
+
         return {
-            "status": "healthy" if error_rate < 0.1 else "degraded",
+            "status": "healthy",
             "uptime_seconds": uptime,
             "uptime_human": self._format_uptime(uptime),
-            "total_requests": self.request_count,
-            "total_errors": self.error_count,
-            "error_rate": f"{error_rate:.2%}"
         }
     
     def _format_uptime(self, seconds: float) -> str:
