@@ -97,7 +97,7 @@ lines, still with zero findings** — against a 2,717-line eval harness that pro
 | ~~2~~ | ~~`SECURITY_FINDINGS.md`~~ | ✅ **DONE.** Four questions answered; S1 corrected the README in three places (containment is on both paths; what the main path loses is the *audit trail*). S2 closed. S3 has a stated DNS caveat. S4 open and stated. |
 | ~~**3**~~ | ~~`code-intervals`~~ | ✅ **DONE** — agent finding #5, instrument fix + 6 tests. The 1.25 re-measures on the next smoke run. |
 | ~~**3½**~~ | ~~**Nightly `compare` fix**~~ | ✅ **DONE** — eval finding #20, 7 tests. The next scheduled run is the live check. |
-| **4** | Tracing overhead measurement | One number. Closes the observability gap. |
+| ~~**4**~~ | ~~Tracing overhead measurement~~ | ✅ **DONE** — observability finding #4: ~5 µs/span, 0.003% of a 2 s answer, and a dead collector drops spans instead of blocking. |
 | **5** | Dark-module triage | The largest is now covered (`rag_optimizations`). The rest: test it, or delete it, or state that it is unexercised. **Do not leave "nobody knows" as the answer.** |
 | **6** | Publish posts 1–4 | The actual goal. Do not let this stay last forever. |
 | **7** | k8s revisit | Instructed last. Already documented; verify the numbers still hold. |

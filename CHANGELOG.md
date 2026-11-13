@@ -131,6 +131,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `docs/EVAL_FINDINGS.md` finding **20**, and one new row in the scope table.
 
+- **Observability finding 4 — tracing overhead, measured at last.**
+  `OBSERVABILITY_FINDINGS.md` ended with an honest sentence: *"the claim 'traced' is
+  verified; the claim 'traced cheaply' is not."* That sentence was the finding.
+
+  Measured: **~5 µs per span**, linear from 2 to 51 spans. A real 13-span run costs
+  **+64 µs**, which is **0.003%** of a 2 s answer. And the question that mattered
+  more than the average — what happens when Phoenix is *down* — came back the right
+  way: with a full queue and no collector, OTel **drops** spans (`Queue full,
+  dropping Span`) rather than blocking the caller. Median span creation 0.028 ms.
+  **A monitoring outage costs traces, not latency.**
+
+  One number is deliberately *not* claimed: an early run suggested a dead collector
+  costs more than a healthy one, but varying the exporter timeout made the "faster"
+  setting cost more, which cannot be real. That measurement was noise; the per-span
+  figures survived because they are a slope across five span counts. The doc says so
+  instead of rounding it into the table.
+
+  `tests/test_tracing_overhead.py` — 3 tests, ceilings set ~10× the measurement
+  because a tight timing bound on shared CI is flaky and a flaky timing test gets
+  deleted. One test pins **drop-not-block**.
+
 - **`docs/CASE_STUDIES.md` — the index the project was missing.** Four parts, four
   findings documents, one headline number each, and the through-line that connects
   them. The README now links it first, because until now a visitor had to find the
