@@ -18,7 +18,7 @@ proves the fix.
 | 1 | **Eval harness** (2,717 lines) | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | 18 | ✅ **DONE** — plus record/replay, so a run is reproducible for 0 tokens |
 | 2 | **Agents** (5 specialists + team) | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | 4 fixed, **5 open** | 🟡 **PARTIAL** — the open five are real, listed below |
 | 3 | **Observability** (Prometheus/Grafana/Phoenix) | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | 3 | 🟡 **PARTIAL** — tracing overhead never measured |
-| 4 | **RAG** (`rag_optimizations` 1,703 lines — largest module) | *none* | 5 exist in README rows 6–9, 18 | ❌ **NOT WRITTEN** — highest value/effort ratio |
+| 4 | **RAG** (`rag_optimizations` 1,703 lines — largest module) | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 5 | ✅ **DONE** — including the retrieval table with its three negative results |
 | 5 | **Security & multi-tenancy** (~1,900 lines, 5 modules) | *none* | 0 | ❌ **NEVER EXPLORED** |
 | 6 | **Dark modules** (4,629 lines, 12 files) | *none* | 0 | ❌ **NEVER EXPLORED** |
 | 7 | **k8s / Docker** (31 manifests, 14 services) | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 5 checks | ✅ **DONE** — user's instruction: revisit at the very end |
@@ -30,12 +30,13 @@ Legend: ✅ done · 🟡 partial · ❌ not started
 
 ## The twelve dark modules
 
-Checked by grepping every findings document for each module name. **4,629 lines with
-zero findings**, against a 2,717-line eval harness that produced 18.
+Checked by grepping every findings document for each module name. **11 modules, ~2,900
+lines, still with zero findings** — against a 2,717-line eval harness that produced 18.
+`rag_optimizations` (1,703 lines) has left this table: it now has
+[`RAG_FINDINGS.md`](RAG_FINDINGS.md).
 
 | Module | Lines | What it does | Risk if ignored |
 |---|---|---|---|
-| `rag_optimizations` | 1,703 | hybrid search, reranker, cache, CRAG | **highest** — largest module, real bugs exist (rows 6–9) |
 | `database_improvements` | 678 | pooling, migrations | medium — "improved" is unmeasured |
 | `websocket` | 417 | `/ws/ticket` → `/ws/x` | medium — README admits the UI never calls it |
 | `cicd_improvements` | 383 | pipeline | low — CI is green, it speaks for itself |
@@ -86,11 +87,11 @@ zero findings**, against a 2,717-line eval harness that produced 18.
 
 | Step | Work | Why here |
 |---|---|---|
-| **1** | `RAG_FINDINGS.md` | Five findings already exist with numbers (27/38 → 31/38; wrong cache answers 2 → 0). Biggest module, zero writeup. Mostly writing. |
+| ~~1~~ | ~~`RAG_FINDINGS.md`~~ | ✅ **DONE.** 5 findings, the retrieval table with its three negative results, and a "what is not measured" section. |
 | **2** | `code-intervals` | The only live quality failure. Free to reproduce. Becomes agent finding #5. |
 | **3** | `SECURITY_FINDINGS.md` | Investigate the four questions above; at minimum fix the `/chat/stream` sanitizer gap. |
 | **4** | Tracing overhead measurement | One number. Closes the observability gap. |
-| **5** | Dark-module triage | For each: test it, or delete it, or state in the README that it is unexercised. **Do not leave "nobody knows" as the answer.** |
+| **5** | Dark-module triage | The largest is now covered (`rag_optimizations`). The rest: test it, or delete it, or state that it is unexercised. **Do not leave "nobody knows" as the answer.** |
 | **6** | Publish posts 1–4 | The actual goal. Do not let this stay last forever. |
 | **7** | k8s revisit | Instructed last. Already documented; verify the numbers still hold. |
 | **8** | **Close** | Rewrite README from this file. Delete `ROADMAP.md`. Tag a release. |

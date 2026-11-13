@@ -19,7 +19,8 @@ different kinds of wrong.
 | **1. Measurement** | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | 18 | the suite published **35%** when the real figure was **72.4%** |
 | **2. The agents** | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | 4 fixed, 5 open | a team step hung for **309 s** against a 300 s limit |
 | **3. Observability** | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | 3 | a 2.0 s stream measured as **0.002 s** |
-| **4. The cluster** | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 5 checks | a nightly backup failed **3 nights** because the PC is off at 02:00 |
+| **4. RAG** | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 5 | the "cross-encoder reranker" was keyword overlap |
+| **5. The cluster** | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 5 checks | a nightly backup failed **3 nights** because the PC is off at 02:00 |
 
 ---
 
@@ -125,6 +126,7 @@ configured, and the configuration was wrong.**
 | Measurement | guards attached one level too low |
 | Agents | agents answering without the input they needed |
 | Observability | the instrument reporting a true number about the wrong thing |
+| RAG | quality features that reported success while doing nothing |
 | Cluster | correct configuration for the wrong assumption |
 
 Four different surfaces, and in all four the system was **not** failing loudly. It was
@@ -139,8 +141,10 @@ answer** — and the only defence is measuring the thing twice.
 1. **This file** — the map.
 2. [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) — the largest, and the one with the most numbers.
 3. [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) — shortest; what the product actually gets wrong.
-4. [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) — three bugs, one pattern.
-5. [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) — runnable commands, live cluster.
+4. [`RAG_FINDINGS.md`](RAG_FINDINGS.md) — five findings, and four of them were
+   features that reported success while doing nothing.
+5. [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) — three bugs, one pattern.
+6. [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) — runnable commands, live cluster.
 
 The README's [bugs table](../README.md#-bugs-found-and-fixed) is the flat list of all 39
 findings across every part, with the fix and the proof for each.
