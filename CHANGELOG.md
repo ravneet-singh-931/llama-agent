@@ -171,6 +171,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code change, not a triage, and deleting plausible planned work is the owner's call.
   What changed is that every dead name is now listed instead of assumed absent.
 
+- **`docs/READING_GUIDE.md` — a timed path through the repo for someone who knows nothing
+  about it.** Six hours, eight stages, each ending with a sentence the reader can say out
+  loud. Run it first (30 min), then README in a *non-linear* order with real line numbers,
+  then one findings document read properly, then the other six at ten minutes each, then the
+  five code locations you would actually be asked about, then the bugs table and the honest
+  ending.
+
+  It exists because the repo is 5,800 lines of documents and 6,267 lines of code, and
+  nothing said **which order**. Two things in particular are non-obvious: read *"what still
+  fails"* **before** the successes, and read **one** findings document completely instead
+  of skimming seven.
+
+  It ends with a 90-second explanation, a 2-hour fallback path, a one-page cheat sheet, and
+  a **traps table** — the eight things in this repo that will confuse a new reader
+  (`ROADMAP.md` still looks unfinished, a findings doc still says "18", `@team` is slow by
+  design, `/chat` and `/chat/stream` differ only in the audit trail).
+
+  Every line reference and every number was read from the file rather than recalled, and the
+  four that had drifted were corrected while writing it — including `/chat/stream`, which
+  moved to line 2375 when the key guard was added, and the endpoint count, which is **32
+  unique paths from 35 handlers** (`/memory` and `/conversations` answer on two methods).
+
 - **`DARK_MODULES.md` quoted an instruction that `ROADMAP.md` never contained.** Found
   while checking whether the roadmap could be deleted: it is cited by two documents, so
   deleting it would have broken seven citations — but checking those citations turned up
