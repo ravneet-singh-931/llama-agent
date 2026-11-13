@@ -171,7 +171,7 @@ prices for these Groq models; spend is tracked in Prometheus (panels above).
 | Document | What it covers |
 |----------|---------------|
 | **[docs/CASE_STUDIES.md](docs/CASE_STUDIES.md)** | **Start here: the seven parts of this project, each with its findings document and headline number** |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Live status of every part: what is done, what is open, and in what order the rest happens |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | The worked plan: every part, in the order it was done, with the status each finished at. Kept because the security and dark-module documents cite it as the source of their questions |
 | [docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md) | 19 findings from building the eval harness — the suite reported 35% when the real figure was 72.4% |
 | [docs/AGENT_FINDINGS.md](docs/AGENT_FINDINGS.md) | 5 agent findings fixed, 4 open — what the agents get wrong and why |
 | [docs/RAG_FINDINGS.md](docs/RAG_FINDINGS.md) | 6 RAG findings — a reranker that was keyword overlap, and the CI gate that could not see it |

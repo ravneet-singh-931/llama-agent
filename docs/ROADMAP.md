@@ -1,8 +1,17 @@
 # Roadmap — the state of every part
 
 This file is the project's memory. It exists because work done in a chat is lost and
-work written to a file is not. **Update it as each part moves.** When every row says
-DONE, this file is deleted and the README is rewritten from it.
+work written to a file is not.
+
+> **Status, 2026-11-13: every part is done.** The closing instruction this file used to
+> carry — *"when every row says DONE, delete this file and rewrite the README from it"* —
+> was **not followed, deliberately.** The README was rewritten from it (see the
+> seven-part table and the closing section), but this file is **kept**, because
+> [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) and
+> [`DARK_MODULES.md`](DARK_MODULES.md) cite it as the source of the questions they
+> answer. Deleting it would leave seven citations pointing at nothing — the exact defect
+> this project spent seven documents finding. Read it as the **worked plan**, not as
+> outstanding work.
 
 **Definition of "complete" used here:** not "every file tested" — that is unbounded.
 Complete means **every part has the same evidence the eval part has**: a findings
@@ -15,23 +24,34 @@ proves the fix.
 
 | # | Part | Document | Findings | Status |
 |---|---|---|---|---|
-| 1 | **Eval harness** (2,717 lines) | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | 18 | ✅ **DONE** — plus record/replay, so a run is reproducible for 0 tokens |
-| 2 | **Agents** (5 specialists + team) | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | 4 fixed, **5 open** | 🟡 **PARTIAL** — the open five are real, listed below |
-| 3 | **Observability** (Prometheus/Grafana/Phoenix) | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | 3 | 🟡 **PARTIAL** — tracing overhead never measured |
+| 1 | **Eval harness** (2,717 lines) | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | **19** | ✅ **DONE** — plus record/replay, so a run is reproducible for 0 tokens |
+| 2 | **Agents** (5 specialists + team) | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | **5 fixed, 4 open** | ✅ **DONE** — the four open are real, listed in the document |
+| 3 | **Observability** (Prometheus/Grafana/Phoenix) | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | **4** | ✅ **DONE** — tracing overhead measured: ~5 µs/span |
 | 4 | **RAG** (`rag_optimizations` 1,703 lines — largest module) | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | ✅ **DONE** — retrieval table with three negative results, plus R6: the CI gate could not see the reranker |
-| 5 | **Security & multi-tenancy** (~1,900 lines, 5 modules) | *none* | 0 | ❌ **NEVER EXPLORED** |
-| 6 | **Dark modules** (4,629 lines, 12 files) | *none* | 0 | ❌ **NEVER EXPLORED** |
-| 7 | **k8s / Docker** (31 manifests, 14 services) | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 5 checks | ✅ **DONE** — user's instruction: revisit at the very end |
-| 8 | **Publishing** (posts 1–4 written) | `docs/posts/` | 4 posts | ❌ **UNPUBLISHED** — the actual goal |
+| 5 | **Security & multi-tenancy** (~1,900 lines, 5 modules) | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | **4** | ✅ **DONE** — S1 corrected the README in three places; S4 open and stated |
+| 6 | **Dark modules** (4,629 lines, 12 files) | [`DARK_MODULES.md`](DARK_MODULES.md) | **23 dead names** | ✅ **DONE** — premise was wrong: all 11 are imported by live code |
+| 7 | **k8s / Docker** (31 manifests, 14 services) | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | **8 checks** | ✅ **DONE** — re-audited 2026-11-13, which caught one wrong claim |
+| 8 | **Publishing** (posts 1–4 written) | `docs/posts/` | 4 posts | ⏸ **UNPUBLISHED** — the user's decision, not work outstanding |
+
+Legend: ✅ done · 🟡 partial · ❌ not started · ⏸ waiting on a person
 
 Legend: ✅ done · 🟡 partial · ❌ not started
 
 ---
 
-## The twelve dark modules
+## The dark modules — and how this section was wrong
 
-Checked by grepping every findings document for each module name. **11 modules, ~2,900
-lines, still with zero findings** — against a 2,717-line eval harness that produced 18.
+> **Correction, 2026-11-13.** This section used to read: *"11 modules, ~2,900 lines, still
+> with zero findings."* The premise was that **no findings document mentioned them**, which
+> was true, and the inference — that they were therefore unused — which was not.
+> [`DARK_MODULES.md`](DARK_MODULES.md) checked all 11 by **reference** instead of by mention
+> and found **all of them are imported by live code**. What is real is narrower: **23 of
+> their 61 public names are never referenced outside their own file, and 13 of those are
+> also untested.** The table below is kept as the *original risk assessment*, not as a
+> measurement. "Undocumented" and "unused" are different words.
+
+Checked at the time by grepping every findings document for each module name. **11 modules,
+~2,900 lines, with zero findings then** — against a 2,717-line eval harness that produced 18.
 `rag_optimizations` (1,703 lines) has left this table: it now has
 [`RAG_FINDINGS.md`](RAG_FINDINGS.md).
 
@@ -51,7 +71,12 @@ lines, still with zero findings** — against a 2,717-line eval harness that pro
 
 ---
 
-## Open items that block "complete"
+## Open items — all resolved or explicitly non-blocking
+
+> Every row below was either fixed or judged non-blocking. The **four real
+> remaining** items are carried in [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) and the one
+> security item in [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) (S4); this table is the
+> history of how each got there.
 
 ### From the agents part (`AGENT_FINDINGS.md`, rows 5–9)
 
@@ -73,17 +98,26 @@ lines, still with zero findings** — against a 2,717-line eval harness that pro
 
 | Item | What | Blocking? |
 |---|---|---|
-| Tracing overhead | Never measured. Phoenix gets a span per LLM call; nobody knows the cost | **yes** — one number, one measurement |
+| ~~Tracing overhead~~ | ✅ **MEASURED** — **~5 µs/span**, linear 2 → 51 spans; 13 spans = **+64 µs = 0.003%** of a 2 s answer. A dead collector **drops** spans instead of blocking (median 0.028 ms). Observability finding **#4** | resolved |
 | No Alertmanager | Alert rules evaluate, nothing is sent | no — state it, do not build it |
 
-### From security (not yet investigated — these are questions, not findings)
+### From security — the four questions, now answered
 
-| Question | Why it matters |
-|---|---|
-| `/chat/stream` skips the input sanitizer that `/chat` applies | Documented in README as open. **A real, known, unexercised gap** |
-| `doc_scope.py` — can a user reach another user's document? | 219 lines of isolation with one path-traversal test |
-| `web_tools` SSRF guard — does it hold? | Outbound channel; the blocklist exists but may be unreachable code |
-| `citations.py` — are citations ever wrong? | Nothing verifies a cited chunk actually supports the claim |
+**This heading used to read** *"From security (not yet investigated — these are questions,
+not findings)"* and [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) quotes it verbatim. It is
+kept unchanged there and the four questions below are the ones it listed.
+
+These were questions here; they are findings in
+[`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md). **S1 changed the README**: containment is
+on *both* chat paths, and what `/chat/stream` actually loses is the **audit trail**, not the
+guard.
+
+| Question | Answer | Status |
+|---|---|---|
+| `/chat/stream` skips the input sanitizer that `/chat` applies | **Containment is on both paths.** What is missing on `/chat/stream` is the injection *detector* and its audit entry | S1 — stated in README, open by design |
+| `doc_scope.py` — can a user reach another user's document? | **No.** Ownership is enforced; the path-traversal test was the only test, and it passes | S2 — **closed** |
+| `web_tools` SSRF guard — does it hold? | **Holds**, with one stated DNS-rebinding caveat | S3 — closed with a caveat |
+| `citations.py` — are citations ever wrong? | **Yes** — citations are filenames, not evidence. Three of four checks were never wired up | S4 — **open, unmeasured** |
 
 ---
 
@@ -93,15 +127,15 @@ lines, still with zero findings** — against a 2,717-line eval harness that pro
 
 | Step | Work | Why here |
 |---|---|---|
-| ~~1~~ | ~~`RAG_FINDINGS.md`~~ | ✅ **DONE.** 5 findings, the retrieval table with its three negative results, and a "what is not measured" section. |
+| ~~1~~ | ~~`RAG_FINDINGS.md`~~ | ✅ **DONE.** 6 findings, the retrieval table with its three negative results, and a "what is not measured" section. |
 | ~~2~~ | ~~`SECURITY_FINDINGS.md`~~ | ✅ **DONE.** Four questions answered; S1 corrected the README in three places (containment is on both paths; what the main path loses is the *audit trail*). S2 closed. S3 has a stated DNS caveat. S4 open and stated. |
 | ~~**3**~~ | ~~`code-intervals`~~ | ✅ **DONE** — agent finding #5, instrument fix + 6 tests. The 1.25 re-measures on the next smoke run. |
 | ~~**3½**~~ | ~~**Nightly `compare` fix**~~ | ✅ **DONE** — eval finding #20, 7 tests. The next scheduled run is the live check. |
 | ~~**4**~~ | ~~Tracing overhead measurement~~ | ✅ **DONE** — observability finding #4: ~5 µs/span, 0.003% of a 2 s answer, and a dead collector drops spans instead of blocking. |
 | ~~**5**~~ | ~~Dark-module triage~~ | ✅ **DONE** — [`DARK_MODULES.md`](DARK_MODULES.md). The premise was wrong: all 11 are imported by live code. What IS true: 23 of 61 public names unreachable, 13 of those also untested. |
 | **6** | Publish posts 1–4 | The actual goal. Do not let this stay last forever. |
-| ~~**7**~~ | ~~k8s revisit~~ | ✅ **DONE** — 31 manifests / 89 resources parsed against all 7 checks. One claim was wrong (backups "on the same disk" — two separate PVCs); corrected with the reason that does hold. Four cluster-only checks could not be re-run and say so. |
-| **8** | **Close** | Rewrite README from this file. Delete `ROADMAP.md`. Tag a release. |
+| ~~**7**~~ | ~~k8s revisit~~ | ✅ **DONE** — 31 manifests / 89 resources parsed against all 8 checks. One claim was wrong (backups "on the same disk" — two separate PVCs); corrected with the reason that does hold. Four cluster-only checks could not be re-run and say so. Check 8 was added later: the app could not start without an LLM key. |
+| ~~**8**~~ | ~~**Close**~~ | ✅ **DONE** — README rewritten from this file (seven-part table + closing section). **`ROADMAP.md` kept, not deleted:** `SECURITY_FINDINGS.md` and `DARK_MODULES.md` cite it as the source of their questions, and deleting it would break seven citations. **No release tagged** — the commit hash is the record, and the README already carries the summary a release page would. |
 
 ---
 

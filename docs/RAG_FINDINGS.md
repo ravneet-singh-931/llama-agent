@@ -10,10 +10,10 @@ most: upload a document, ask a question, get a grounded answer.
 
 | Document | Surface | Findings |
 |---|---|---|
-| [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | the measuring stick | 18 |
-| [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | the agents | 4 fixed, 5 open |
+| [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | the measuring stick | 19 |
+| [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | the agents | 5 fixed, 4 open |
 | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | dashboards and traces | 3 |
-| [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | the cluster | 5 checks |
+| [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | the cluster | 8 checks |
 | **this file** | **retrieval, ranking, caching, memory, the gate** | **6** |
 
 **The through-line, and it is the sharpest one in the project:**
@@ -347,7 +347,7 @@ by measuring an output rather than a code path — the ranking position, the rej
 count, the wrong answer, the summary length, the memory high-water mark.
 
 **This is the same finding as the eval part of this project, moved down one layer.**
-There, 16 of 18 findings were in the measuring stick rather than the thing measured.
+There, 17 of 19 findings were in the measuring stick rather than the thing measured.
 Here, four of five are in quality features that were never measured at all. In both
 cases the system was confident and wrong rather than broken and loud.
 

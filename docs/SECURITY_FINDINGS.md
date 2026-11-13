@@ -2,16 +2,17 @@
 
 The security part is the last of the five to be written, and the only one that
 started from **questions instead of findings** — four of them, recorded in
-[`ROADMAP.md`](ROADMAP.md) as *"not yet investigated: these are questions, not
-findings."*
+[`ROADMAP.md`](ROADMAP.md) under the heading *"From security (not yet investigated — these
+are questions, not findings)"*. **That heading is quoted verbatim** and is still in the
+file; the roadmap was kept precisely so this citation resolves.
 
 | Document | Surface | Findings |
 |---|---|---|
-| [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | the measuring stick | 18 |
-| [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | the agents | 4 fixed, 5 open |
+| [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | the measuring stick | 19 |
+| [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | the agents | 5 fixed, 4 open |
 | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | dashboards and traces | 3 |
 | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | retrieval, ranking, caching, the gate | 6 |
-| [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | the cluster | 5 checks |
+| [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | the cluster | 8 checks |
 | **this file** | **the browser boundary and the two chat paths** | **4** |
 
 **The through-line is different here, and it is the reason this document was worth

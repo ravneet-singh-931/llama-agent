@@ -171,6 +171,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code change, not a triage, and deleting plausible planned work is the owner's call.
   What changed is that every dead name is now listed instead of assumed absent.
 
+- **`DARK_MODULES.md` quoted an instruction that `ROADMAP.md` never contained.** Found
+  while checking whether the roadmap could be deleted: it is cited by two documents, so
+  deleting it would have broken seven citations — but checking those citations turned up
+  something worse than a dead link.
+
+  `DARK_MODULES.md` opened with *"`ROADMAP.md` listed them ... with one instruction: 'for
+  each: test it, or delete it, or state in the README that it is unexercised'"* and later
+  *"`ROADMAP.md` carries the table and a single instruction for the close-out step."*
+
+  **Neither sentence is in `ROADMAP.md`, and `git log -S` finds no commit where it was.**
+  The roadmap row said only *"still with zero findings"* — no next step attached. The
+  instruction was written into the document and then attributed to the file. It is a good
+  instruction, which is why it was followed; it was just **mine, not the roadmap's**.
+
+  This is the failure that document exists to describe — **a claim that reads as though it
+  was checked because it carries a citation** — happening inside the finding itself. Both
+  passages now say so, in place, rather than being quietly reworded.
+
+  The `SECURITY_FINDINGS.md` citation of the same file **was** accurate: it quotes the
+  heading *"From security (not yet investigated — these are questions, not findings)"*
+  verbatim, and that heading still exists. The roadmap is kept, and the citation is noted
+  at both ends.
+
+- **ROADMAP brought up to date, since it is now permanent.** Every row says DONE except
+  publishing (the user's decision, not outstanding work). Security was still marked
+  **"NEVER EXPLORED"** with 0 findings after `SECURITY_FINDINGS.md` had shipped; agents
+  still read "4 fixed, 5 open" after the fifth fix; the dark-module section still carried
+  the retired premise. Also corrected in four documents that had *copied* the old counts
+  into their own index tables: **18 → 19** eval findings (four places), **"4 fixed, 5
+  open" → "5 fixed, 4 open"**, **5 → 8** cluster checks, and `KUBERNETES_CHECKS.md` read
+  **20** for the eval — the highest finding *number*, not the count, which is the exact
+  confusion documented at the top of `EVAL_FINDINGS.md`.
+
 - **The app now starts with no LLM key — because it used to die before opening a port.**
   Found by doing what a stranger does: clone and start it.
 

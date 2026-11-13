@@ -204,7 +204,7 @@ broken. It was caught by asking which claims had no second source at all — and
 becoming one.
 
 **A dashboard is a measuring instrument, and it needs the same suspicion as a test
-suite.** The eval part of this project has 18 findings about the measuring stick.
+suite.** The eval part of this project has 19 findings about the measuring stick.
 This part has three about the dashboard. They are the same kind of bug in different
 clothes.
 
