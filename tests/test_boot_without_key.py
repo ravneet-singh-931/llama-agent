@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 - spawns the current interpreter only, fixed argv, no shell
 import sys
 from pathlib import Path
 
@@ -63,7 +63,7 @@ def _boot_without_key() -> dict:
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("GROQ") and k not in ("EVAL_RECORD_MODE", "JWT_SECRET_KEY")}
     env["PYTHONPATH"] = str(REPO)
-    proc = subprocess.run(
+    proc = subprocess.run(  # nosec B603 - fixed argv, sys.executable, no shell
         [sys.executable, "-c", _BOOT_SCRIPT],
         cwd=str(REPO), env=env, capture_output=True, text=True, timeout=300,
     )
