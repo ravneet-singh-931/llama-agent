@@ -18,7 +18,7 @@ different kinds of wrong.
 |---|---|---|---|
 | **1. Measurement** | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | 20 | the suite published **35%** when the real figure was **72.4%** |
 | **2. The agents** | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | 4 fixed, 5 open | a team step hung for **309 s** against a 300 s limit |
-| **3. Observability** | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | 3 | a 2.0 s stream measured as **0.002 s** |
+| **3. Observability** | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | 4 | a 2.0 s stream measured as **0.002 s** |
 | **4. RAG** | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | the "cross-encoder reranker" was keyword overlap |
 | **5. Security** | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | 4 | the safeguard was on the endpoint nobody uses |
 | **6. The cluster** | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 5 checks | a nightly backup failed **3 nights** because the PC is off at 02:00 |
