@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess  # nosec B404 - runs the answer's own doctests; see run_doctests()
+import sys
 import textwrap
 from datetime import datetime, timezone
 from html.parser import HTMLParser

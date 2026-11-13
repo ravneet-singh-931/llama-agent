@@ -233,6 +233,13 @@ Two details are the lesson:
   status. That is recorded in this project already (it is why the job skips
   B101/B104/B105/B106/B107/B110) and it caught this change too.
 
+And a third, which is why this is written down rather than quietly fixed. Moving
+the `# nosec` down lost the `import sys` line that a previous edit had folded into
+the same statement, and six tests went from passing to `NameError` — **the tests
+caught it, not the diff.** The lesson is the ordinary one this project keeps
+meeting: an edit that reads correctly can remove a line nobody was looking at, so
+the check that matters is the one that runs, not the one that reviews.
+
 **What is still open, and why it is stated rather than fixed.**
 
 - **The 1.25 has not been re-measured.** Fixing an instrument does not re-score a
