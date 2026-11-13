@@ -34,10 +34,10 @@ in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/a
 | 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🔴 **OPEN** | days |
 | 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🔴 **OPEN** | 1 h |
 | 18 | 32 `except Exception: pass` in live paths | mostly `prometheus_metrics.py` | 🔴 **OPEN** | 1 h |
-| 19 | 31 unused local variables (`F841`) — invisible to CI | repo-wide | 🔴 **OPEN** | CI runs only `--select=E9,F63,F7,F82` |
+| 19 | 31 unused local variables (`F841`) — invisible to CI | repo-wide | 🟢 **DONE** | **31 → 0.** 24 were `except … as e` bindings; **7 were real dead assignments**, two of which changed what the rate limiter's hour window means. F401 unchanged at 29, none introduced |
 | 20 | Metrics counted twice; 3 ways to view them | `api.py`, `prometheus_metrics.py` | 🔴 **OPEN** | duplication, low |
 
-**12 DONE, 8 OPEN.** Every 🟢 row has a test that fails when the fix is reverted, or a
+**13 DONE, 7 OPEN.** Every 🟢 row has a test that fails when the fix is reverted, or a
 measured before/after. Every 🔴 row has an effort estimate and a reason for its position.
 
 ---

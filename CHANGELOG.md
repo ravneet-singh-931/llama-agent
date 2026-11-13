@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (maintenance audit, 2026-11-13)
 
+- **31 unused local variables, 7 of them real dead assignments.** CI lints with
+  `--select=E9,F63,F7,F82`, so `F841` had never been checked. Twenty-four were
+  `except Exception as e:` bindings where `e` is never read (dropped). Seven were worth
+  reading rather than deleting:
+  - `modules/security.py` computed `cutoff_minute` in `_cleanup()` and `cutoff_hour` in
+    `_is_rate_limited_memory()`, and used neither. `_cleanup()` prunes to one hour, which
+    is why `_is_rate_limited_memory()` can count the hour window with a bare `len()` —
+    both facts are now comments, because the next reader would suspect an off-by-a-window
+    bug. Verified after the edit: 3/min blocks on the 4th request, 3/hr blocks on the 4th.
+  - `modules/rag_optimizations.py` assigned `answer` on both branches of the CRAG block
+    and never read it. Removing it exposed that the fallback to `results[0]` had been
+    deliberately removed earlier and explained in a comment; the assignment was a leftover.
+  - `websocket.py` bound `connection_id` from `connect()`, but `disconnect()` takes the
+    socket and user id, so the id was never used.
+  - `app.py` (twice) and `llama_agent1.py` constructed a memory/fact store in functions
+    that never touched it.
+
 - **111 environment variables the code reads, 37 documented — now 120 and 120.**
   Extracted every `os.getenv` / `os.environ` read from the source rather than from a
   hand-kept list: `.env.example` named 37 of the 111, so 74 live knobs —
