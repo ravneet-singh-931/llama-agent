@@ -21,7 +21,7 @@ different kinds of wrong.
 | **4. RAG** | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | the "cross-encoder reranker" was keyword overlap |
 | **5. Security** | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | 4 | the safeguard was on the endpoint nobody uses |
 | **6. The dark modules** | [`DARK_MODULES.md`](DARK_MODULES.md) | 23 dead names | "undocumented" had been read as "unused" — and it is a third of the surface, not all of it |
-| **7. The cluster** | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 7 checks | a nightly backup failed **3 nights** because the PC is off at 02:00 |
+| **7. The cluster** | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 8 checks | a nightly backup failed **3 nights** because the PC is off at 02:00 |
 
 ---
 

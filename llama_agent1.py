@@ -5,6 +5,7 @@ Now with: Memory, RAG, Web Search, Monitoring, Logging
 
 import asyncio
 import hashlib
+import logging
 import os
 import datetime
 import threading
@@ -175,16 +176,40 @@ if _groq_key:
     os.environ["GROQ_API_KEY"] = _groq_key
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# True when a real key was supplied (env, .env or Docker secret). Kept as a
+# module-level fact so the API can report it instead of guessing.
+GROQ_API_KEY_CONFIGURED = bool(GROQ_API_KEY) or (
+    (os.getenv("EVAL_RECORD_MODE", "") or "").strip().lower() == "replay"
+)
+
 if not GROQ_API_KEY:
     # An eval replay serves every model reply and tool result from disk, so it
     # needs no key at all. Refusing to start without one would mean the one
     # thing a recording is for -- letting someone reproduce this suite without
-    # a Groq account -- was impossible. Any other mode still requires the key.
+    # a Groq account -- was impossible.
     if (os.getenv("EVAL_RECORD_MODE", "") or "").strip().lower() == "replay":
         GROQ_API_KEY = "replay-no-key-needed"
         os.environ["GROQ_API_KEY"] = GROQ_API_KEY
     else:
-        raise SystemExit("GROQ_API_KEY not set. Add it to your environment or a .env file.")
+        # This used to be `raise SystemExit(...)`, and it was raised at import
+        # time, which meant the whole process died before uvicorn opened a
+        # socket: no /health, no /docs, no error a client could read -- just a
+        # stack trace in a container log that a `docker compose up` reports as
+        # an exit code.
+        #
+        # That is the first thing a new clone does, because the key lives in a
+        # gitignored secrets/ directory and people create the file empty
+        # before they fill it. The app is perfectly able to start without a
+        # key: the Groq client accepts an empty string. What it cannot do is
+        # answer. So start, serve, and refuse the calls that need a key, with
+        # a message that says what to do -- see `require_api_key` in api.py.
+        GROQ_API_KEY = ""
+        logger_no_key = logging.getLogger("llama_agent")
+        logger_no_key.warning(
+            "GROQ_API_KEY is not set (or is empty). The API will start and "
+            "serve /health, but chat and agent routes return 503 until a key "
+            "is configured. See README > Quick Start."
+        )
 
 # Initialize modules
 memory = ConversationMemory()

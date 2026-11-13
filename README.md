@@ -66,7 +66,7 @@ on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 828 passed, 6 skipped, 17 deselected (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 833 passed, 6 skipped, 17 deselected (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
 | **Cost** | $0.24 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (row 22) |
 | **Bugs found and fixed** | 39 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
 
@@ -85,7 +85,7 @@ proof type, the row does not belong here.
 | 4 | **RAG** | [`RAG_FINDINGS.md`](docs/RAG_FINDINGS.md) | 6 | a retrieval table with three *negative* results published; 0 cross-user leaks across every run |
 | 5 | **Security** | [`SECURITY_FINDINGS.md`](docs/SECURITY_FINDINGS.md) | 4 | four questions answered in both directions; containment verified on both chat paths |
 | 6 | **The dark modules** | [`DARK_MODULES.md`](docs/DARK_MODULES.md) | 23 dead names | 61 public names checked by reference, not by line count; 13 also untested |
-| 7 | **The cluster** | [`KUBERNETES_CHECKS.md`](docs/KUBERNETES_CHECKS.md) | 7 checks | live-cluster commands; re-audited against all 31 manifests, which caught one wrong claim |
+| 7 | **The cluster** | [`KUBERNETES_CHECKS.md`](docs/KUBERNETES_CHECKS.md) | 8 checks | live-cluster commands; re-audited against all 31 manifests, which caught one wrong claim; check 8 boots the app with no key |
 
 **What that adds up to:** 39 fixed bugs, 23 dead public names, 7 findings documents, and
 **828 tests**. The number that matters is not any one of those — it is that each of them
@@ -178,7 +178,7 @@ prices for these Groq models; spend is tracked in Prometheus (panels above).
 | [docs/SECURITY_FINDINGS.md](docs/SECURITY_FINDINGS.md) | 4 security findings — the safety claim described the wrong path, and citations are filenames, not evidence |
 | [docs/DARK_MODULES.md](docs/DARK_MODULES.md) | 11 modules, 2,928 lines — 23 of 61 public names unreachable, 13 of those untested |
 | [docs/OBSERVABILITY_FINDINGS.md](docs/OBSERVABILITY_FINDINGS.md) | 4 findings — a 2.0 s stream measured as 0.002 s, and the one claim that had no number behind it |
-| [docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md) | 7 checks against a live cluster, with runnable commands, re-audited 2026-11-13 |
+| [docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md) | 8 checks against a live cluster, with runnable commands, re-audited 2026-11-13 |
 | [docs/SLO.md](docs/SLO.md) | Chat SLOs per route, and what "failed" means for a streamed answer |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Full system design, data flow, and decision records |
 | [API_DOCUMENTATION.md](API_DOCUMENTATION.md) | Every REST/WebSocket endpoint with payloads and examples |
@@ -987,7 +987,7 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status:** 828 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
+**Current status:** 833 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
 39 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
@@ -1121,7 +1121,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 828 passed, 6 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 833 passed, 6 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89
@@ -1164,6 +1164,12 @@ Three known problems, none blocking, listed so they are not discovered by a read
 | **`llm_guard._tier_of`** | Misclassifies `gpt-4o` as `"other"`, so `LLM_INPUT_BUDGET_STRONG/FAST` would be ignored for non-Groq models | Proven latent: the one call site always passes a Groq model, and both budgets default to the same value. Not worth churn on working code. |
 
 
+- **No key means no answers, but the app still starts.** `/health`, `/docs` and the
+  model-free routes serve normally and `/health` reports `llm_key: missing`; `/chat`,
+  `/chat/stream` and `/documents/ask` return a **503** that names `GROQ_API_KEY` and where it
+  goes. It used to `raise SystemExit` at import, which killed the process before uvicorn opened
+  a socket — the first thing a fresh clone hit. `tests/test_boot_without_key.py` now boots the
+  app with the key removed in a subprocess, so that configuration is finally exercised.
 - **One machine.** Staging and production are namespaces on a single-node kind cluster on my
   PC; there is no cloud HA. The CD jobs run on hosted runners and skip the kubectl steps unless
   `KUBE_CONFIG` is set (it needs a self-hosted runner able to reach the kind API), so deploys are
@@ -1205,7 +1211,7 @@ Three known problems, none blocking, listed so they are not discovered by a read
 - **14 open dependency advisories** (pip-audit on the v3.5.6 image, down from 27):
   - `chromadb` 1.5.9, 5 advisories, no fixed release yet. The code-injection ones run in Chroma's Python server (this stack runs Chroma's Rust server) or in a client reading a poisoned collection config, which needs write access to Chroma. The cross-tenant ones are about Chroma's own tenants and RBAC; the app keeps users apart with an owner filter on every query (RAG eval: 0 cross-user leaks).
   - `transformers` 4.57.6, 9 advisories. Only pulled in by `llama-index-llms-openai-like`; the app never imports it (embeddings and the reranker run on ONNX).
-  - Same audit, other scans: Bandit 0 High (4 Medium, all B104, the default host 0.0.0.0 that servers inside containers need), flake8 no real errors (102 style warnings), MCP server tests 17/17.
+  - Same audit, other scans: Bandit 0 High (4 Medium, all B104, the default host 0.0.0.0 that servers inside containers need), flake8 no real errors (**2,970 style warnings**, of which **606 are trailing whitespace on blank lines** and only **217 are not whitespace**; the earlier "102" here was wrong), MCP server tests 17/17.
 
 ---
 

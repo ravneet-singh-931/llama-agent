@@ -6,7 +6,7 @@ wrong, what was fixed, and the proof. The commands are safe to rerun.
 **Status, stated up front.** The seven checks below were run against a live cluster on
 2026-10-26. On **2026-11-13** every claim that can be verified from the manifests alone was
 re-verified by parsing all 31 files (89 resources) — and **one claim in this document was
-wrong**. See *"What the audit found"* at the end. The four checks that need a running
+wrong**. Check 8 is newer still (2026-11-13) and did not come from the cluster at all. See *"What the audit found"* at the end. The four checks that need a running
 cluster (`kubectl`) could not be re-executed here and are marked as such; they are not
 being re-asserted as freshly true.
 
@@ -18,7 +18,7 @@ being re-asserted as freshly true.
 | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | retrieval, ranking, the gate | 6 |
 | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | the browser boundary | 4 |
 | [`DARK_MODULES.md`](DARK_MODULES.md) | 11 modules, 2,928 lines | 23 dead names |
-| **this file** | **the cluster itself** | **7 checks** |
+| **this file** | **the cluster itself** | **8 checks** |
 
 **The through-line here is different again.** The eval findings were guards attached one
 level too low; the agent findings were agents answering without the input they needed.
@@ -132,6 +132,88 @@ mcp-server, web, frontend) are not in the list.
 | RAG retrieval (hit@1 / hit@3 / hit@6 / MRR) | 0.816 / 0.895 / 0.921 / 0.862 | same |
 
 Memory per pod: `process_resident_memory_bytes{job="llama-agent-api"}` in Prometheus.
+
+## 8. The app could not start without a key (2026-11-13)
+
+Not found on the cluster. Found by trying to do what a stranger does: clone the
+repository and start it.
+
+**What was wrong.** `llama_agent1.py` ended its key loading with
+
+```python
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    ...
+    raise SystemExit("GROQ_API_KEY not set. Add it to your environment or a .env file.")
+```
+
+That is at **import time**, and `api.py`'s lifespan imports the module. So
+uvicorn imported the app, the import raised `SystemExit`, and the process died
+**before a socket was opened**. The consequence is not "chat is unavailable" —
+it is that nothing is available:
+
+```
+$ curl -s localhost:8000/health
+curl: (7) Failed to connect
+```
+
+`/health`, `/docs`, `/openapi.json`: all of it. What the operator sees is a
+container that exits, and `docker compose up` reports three of them, because
+the API, the web UI and the MCP server all mount `groq_api_key`.
+
+**Why it is the first thing a new clone hits.** The key lives in `secrets/`,
+which is gitignored, so a fresh clone has no `secrets/` at all. The README tells
+you to create the file, and the common way to do that is `touch` / `echo` — which
+leaves a file that exists and is empty. Checked directly:
+
+```python
+>>> get_secret("GROQ_API_KEY")   # file exists, contains b""
+''
+>>> bool(get_secret("GROQ_API_KEY"))
+False
+```
+
+So "I created the secret file" and "there is no key" were the same state to the
+program, and both crashed it.
+
+**Why 828 tests did not catch it.** Every test that imports `api` sets
+`GROQ_API_KEY` first — CI exports `test_key_for_ci`, and the local suite does the
+same. The one configuration a new user actually has was the one configuration
+never exercised. It is the same shape as the rest of this project: the check and
+the thing being checked were configured to agree.
+
+**The fix.** Start anyway. The Groq client accepts an empty string (verified:
+`Groq(api_key="")` and `build_client("groq", "")` both construct), so nothing
+below the boot path needed a key to exist. `llama_agent1` now records
+`GROQ_API_KEY_CONFIGURED`, logs a warning, and returns; `api.py` gained
+`require_api_key()`, called by `/chat`, `/chat/stream` and `/documents/ask`, which
+raises **503** with a message naming the variable and the file. `/health` gained
+an `llm_key` field so a probe can tell *up and ready* from *up and unconfigured*.
+
+**Proof**, with no key in the environment:
+
+| Request | Before | After |
+|---|---|---|
+| the process | exits before binding a port | binds and serves |
+| `GET /health` | connection refused | **200**, `llm_key: missing` |
+| `GET /docs` | connection refused | **200** |
+| `GET /tools` | connection refused | **200** |
+| `POST /chat` | connection refused | **503** + what to set and where |
+| `POST /chat/stream` | connection refused | **503** |
+| `POST /documents/ask` | connection refused | **503** |
+
+`tests/test_boot_without_key.py` (5 tests) boots the app in a **subprocess with
+the key removed**, because the parent process has already imported the module
+and Python will not re-run a top-level block. Restoring the `SystemExit` fails
+**4 of the 5**; the fifth reads the flag and is unaffected by design.
+
+**The lesson, and it is the same one as every other check in this file:** the
+test suite was green and the deployment worked, because the person running both
+had already done the thing the new user has not. The gap was not in the code's
+behaviour — the code behaved exactly as written. It was between the documented
+first step and what the program accepted as a first step.
+
+---
 
 ## What the audit found (2026-11-13)
 
