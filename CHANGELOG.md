@@ -33,6 +33,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stamped, carries `"complete": false`, and the upload step runs on `always()`
   so a capped night still produces an artefact.
 
+- **`docs/CASE_STUDIES.md` — the index the project was missing.** Four parts, four
+  findings documents, one headline number each, and the through-line that connects
+  them. The README now links it first, because until now a visitor had to find the
+  interesting material by scrolling past 400 lines of bug table.
+
+- **`docs/AGENT_FINDINGS.md`** — the agents part, four findings fixed and five stated
+  as open. Every one is "the agent was answering without the thing it needed": a
+  critic without the sources, a synthesis without a no-repeat instruction, a
+  tool-using step whose rescue path wrapped the call and not the stream, and a DAG
+  level with a per-future timeout instead of a per-level deadline. `code-intervals`
+  at judge 1.25 (run 43279398224) is recorded as the first open item rather than
+  quietly omitted.
+
+- **`docs/OBSERVABILITY_FINDINGS.md`** — three findings where a metric reported a true
+  number about the wrong thing: p50 0.5 s on the dashboard against ~3 s in the pods
+  (a load-balanced scrape interleaved two pods' series), "No data" rendered
+  identically to "zero failures", and a 2.0 s stream recorded as 0.002 s because the
+  timer stopped when the headers were ready. Includes a "what is not measured"
+  section: tracing overhead has never been measured, and there is no Alertmanager.
+
+- **`docs/KUBERNETES_CHECKS.md`** gains a front matter tying it to the other two
+  documents, and names the through-line for that part: the cluster worked exactly as
+  configured, and the configuration was wrong.
+
 - **Eval record/replay (`modules/recording.py`).** A full 60-case run needs
   ~314,330 input tokens and the free tier allows 200,000 a day, so the suite
   could not be reproduced by anyone who did not have the CI logs. Every model

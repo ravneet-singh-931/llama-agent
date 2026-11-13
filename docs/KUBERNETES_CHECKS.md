@@ -3,6 +3,26 @@
 Checked on the running cluster (Docker Desktop, kind, 1 node, Kubernetes v1.36.1): what was
 wrong, what was fixed, and the proof. The commands are safe to rerun.
 
+**This is the third of three findings documents**, and the only one written against a
+running cluster rather than a test suite:
+
+| Document | Surface | Findings |
+|---|---|---|
+| [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | the measuring stick | 18 |
+| [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | Prometheus / Grafana / Phoenix | 3 |
+| **this file** | the cluster itself | 5 checks |
+
+**The through-line here is different again.** The eval findings were guards attached one
+level too low; the agent findings were agents answering without the input they needed.
+Every item below is a case where **the cluster was working exactly as configured and the
+configuration was wrong** — a CronJob scheduled at an hour the machine is off, autoscalers
+with nothing to scale on, an image tag that moves. Nothing was broken. Nothing was right.
+
+**The one worth reading first:** the nightly backup failed three nights running. It was not
+broken either. It was scheduled for 02:00 UTC, the PC is off at that hour, so Kubernetes ran
+the missed job at **boot** — where it started 13 seconds after Postgres and failed before
+Postgres accepted connections. The job was fine; the schedule and the boot order were not.
+
 | Check | Before | After | Proof |
 |---|---|---|---|
 | Nightly Postgres backup | Last 3 jobs failed | Waits for Postgres, then dumps | Postgres scaled to 0: job waited, finished when Postgres was back |
