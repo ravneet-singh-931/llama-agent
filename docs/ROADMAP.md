@@ -96,7 +96,7 @@ lines, still with zero findings** — against a 2,717-line eval harness that pro
 | Step | Work | Why here |
 |---|---|---|
 | ~~1~~ | ~~`RAG_FINDINGS.md`~~ | ✅ **DONE.** 5 findings, the retrieval table with its three negative results, and a "what is not measured" section. |
-| **2** | `SECURITY_FINDINGS.md` | **Promoted to next.** The only part at zero — not thin, *unwritten* — and it holds a real, known, unexercised gap (`/chat/stream`). One new instance of a known class is worth less than a whole new class. |
+| ~~2~~ | ~~`SECURITY_FINDINGS.md`~~ | ✅ **DONE.** Four questions answered; S1 corrected the README in three places (containment is on both paths; what the main path loses is the *audit trail*). S2 closed. S3 has a stated DNS caveat. S4 open and stated. |
 | **3** | `code-intervals` | The only live quality failure. Free to reproduce. Becomes agent finding #5. |
 | **3½** | **Nightly `compare` fix** | The live red above. Third, **not last** — see the note in that row. |
 | **4** | Tracing overhead measurement | One number. Closes the observability gap. |

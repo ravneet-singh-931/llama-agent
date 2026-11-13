@@ -67,6 +67,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `evals/rag_eval.py`, `.github/workflows/main.yml`, `tests/test_rag_eval.py`
   (**29 passed**, six new, one of which reproduces the old gate's blindness).
 
+- **`docs/SECURITY_FINDINGS.md` — four questions, four wrong beliefs.** The last part
+  to be written, and the only one that started from questions instead of findings.
+
+  * **S1** is the one that matters. The README said, in two places, that the input
+    sanitizer runs on `/chat` but not on `/chat/stream` — and the frontend only ever
+    calls `/chat/stream`. Read literally that says the path users take is the
+    unhardened one. The opposite is true: containment (`PROMPT_INJECTION_GUARD` +
+    `<<UNTRUSTED_DATA>>` delimiters) is on **both** paths, and on tool results
+    (`agent_tools.py:559,610`) and on every `@team`/`@research` task
+    (`multi_agent.py`, 15 sites). What the main path actually lacks is the
+    **injection auditor**: an attempt against the path carrying web and document
+    content leaves no entry in the audit log. An audit blind spot reported as a
+    containment gap, on the wrong endpoint.
+  * **S2** closed: `doc_scope.py` cannot reach another user's document because
+    isolation is enforced at the store query, not in the wrapper — and RAG eval's
+    cross-user leak check runs in CI on every push (0 leaks).
+  * **S3**: the SSRF guard holds, including redirects; DNS rebinding is a stated
+    caveat, not a silent one.
+  * **S4** open: `cites_file` checks that the right *filename* was produced, not that
+    the cited chunk supports the claim. A citation is a pointer, not evidence.
+
+  The README's security table and both limitation bullets were rewritten to say what
+  the skip costs. A limitation stated precisely can still teach a false belief.
+
 - **`docs/CASE_STUDIES.md` — the index the project was missing.** Four parts, four
   findings documents, one headline number each, and the through-line that connects
   them. The README now links it first, because until now a visitor had to find the
