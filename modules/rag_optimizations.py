@@ -44,6 +44,7 @@ import os
 import re
 import time
 
+from modules.silent import degrade
 from modules.doc_scope import call_with_owner, format_chunks, rank_document_chunks, resolve_filename
 
 
@@ -614,8 +615,8 @@ class ContextualRetriever:
             ids = (existing or {}).get("ids") or []
             if ids:
                 self._store.collection.delete(ids=ids)
-        except Exception:
-            pass  # minimal/fake collections without where/delete support
+        except Exception as _e:
+            degrade("existing cache entries not deleted (collection without ids support)", _e)
 
     def add_document(self, file_path: str, owner: Optional[str] = None) -> str:
         """Add a document with contextual summary + semantic chunking."""
@@ -1324,8 +1325,8 @@ class SemanticCache:
             ids = (existing or {}).get("ids") or []
             if ids:
                 coll.delete(ids=ids)
-        except Exception:
-            pass
+        except Exception as _e:
+            degrade("cache entry not deleted (collection without ids support)", _e)
 
     def clear(self):
         """Clear the cache."""
@@ -1335,8 +1336,8 @@ class SemanticCache:
                 client.delete_collection("query_cache")
             elif self._cache_collection is not None:
                 self._cache_collection.delete_collection()
-        except Exception:
-            pass
+        except Exception as _e:
+            degrade("query_cache collection not dropped (old rows may linger)", _e)
         self._cache_collection = None
 
     def get_stats(self) -> Dict:
@@ -1569,8 +1570,8 @@ class OptimizedRAG:
         try:
             from modules.prometheus_metrics import RAG_CRAG_VERDICTS
             RAG_CRAG_VERDICTS.labels(verdict=verdict).inc()
-        except Exception:
-            pass
+        except Exception as _e:
+            degrade("CRAG verdict metric dropped (dashboard undercounts)", _e)
         if verdict == "unsure":
             logging.getLogger(__name__).info("CRAG: no verdict in reply %r", (reply or "")[:200])
         return verdict != "unsupported"

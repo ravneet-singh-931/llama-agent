@@ -30,6 +30,7 @@ import uuid
 from datetime import datetime
 from typing import List, Dict, Optional
 
+from modules.silent import degrade
 # Imported at the top rather than inside remember(): modules/security.py imports
 # nothing from memory, so there is no cycle, and the limits belong to the same
 # declaration site as the code that enforces them.
@@ -72,8 +73,8 @@ class ConversationMemory:
                 with open(self.memory_file, "r", encoding="utf-8") as f:
                     raw = json.load(f)
                 return self._migrate(raw)
-            except (json.JSONDecodeError, IOError):
-                pass
+            except (json.JSONDecodeError, IOError) as _e:
+                degrade("conversation memory file unreadable (starting empty)", _e)
         return {"conversations": {}}
 
     def _migrate(self, raw) -> Dict:
@@ -518,8 +519,8 @@ class FactMemory:
                         return json.loads(raw)["value"]
                     except (json.JSONDecodeError, TypeError):
                         return raw
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("redis fact read failed (falling back to local mirror)", _e)
         if fk in self.facts:
             data = self.facts[fk]
             return data["value"] if isinstance(data, dict) else data
@@ -604,7 +605,8 @@ class FactMemory:
                 for raw in raws:
                     try:
                         records.append(json.loads(raw))
-                    except (json.JSONDecodeError, TypeError):
+                    except (json.JSONDecodeError, TypeError) as _e:
+                        degrade("one stored fact row was not valid JSON (skipped)", _e)
                         continue
             else:
                 records = list(reversed(self._history))

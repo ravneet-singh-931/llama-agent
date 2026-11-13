@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (maintenance audit, 2026-11-13)
+
+- **Every silent exception handler now names what it loses. 59 handlers across 19 files.**
+
+  The audit had recorded 32 `except Exception: pass` handlers. Scanning the AST found
+  **60** whose body is a single `pass` or `continue` (100 matched a looser "swallows the
+  exception" heuristic; the other 40 `return`, append to a failure list, or re-raise, and
+  are not silent). 41 of the 60 had no comment at all.
+
+  All 60 turned out to be deliberate fallbacks — telemetry must not fail a tool call, a
+  dead WebSocket must not stop a broadcast, a corrupt metrics file must fall through to
+  empty defaults. **The behaviour was right; the code did not say so.** `except: pass` is
+  textually identical to a handler written to make a red test go green, so no reviewer and
+  no `git blame` could tell the two apart.
+
+  New `modules/silent.py` provides `degrade(what, exc)`, which logs at DEBUG and — the
+  point — takes `what` as a **required argument**, so the explanation cannot be dropped by
+  a formatter or an edit. `STRICT = True` raises `DegradedError` so tests can assert a
+  fallback was taken. Control flow is unchanged everywhere.
+
+  59 converted; the one left is `evals/run.py`'s `queue.Empty` timeout, which is normal
+  control flow rather than a lost capability.
+
+  `tests/test_degrade.py` (10 tests) covers the helper's contract, fires two real degraded
+  paths through the real classes, and adds an **AST census test** that fails on any new
+  undocumented `except: pass` — so this cannot regress. Suite 834 → **844 passed**;
+  coverage 81.81% → **81.94%**.
+
 ### Removed (maintenance audit, 2026-11-13)
 
 - **The Streamlit legacy UI, and everything that existed only for it. ~1,900 lines.**

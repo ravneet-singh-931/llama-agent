@@ -17,6 +17,7 @@ from typing import Dict, Set, Optional, Any, List
 from dataclasses import dataclass, field
 from enum import Enum
 
+from modules.silent import degrade
 from fastapi import WebSocket, WebSocketDisconnect
 
 
@@ -156,9 +157,8 @@ class ConnectionManager:
             for ws in self.active_connections[user_id]:
                 try:
                     await ws.send_text(message.to_json())
-                except Exception:
-                    # Connection might be dead
-                    pass
+                except Exception as _e:
+                    degrade("broadcast to one connection failed (socket already gone)", _e)
 
     async def broadcast(
         self,
@@ -171,8 +171,8 @@ class ConnectionManager:
                 for ws in connections:
                     try:
                         await ws.send_text(message.to_json())
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        degrade("broadcast to one connection failed (socket already gone)", _e)
 
     async def send_typing(self, user_id: str, is_typing: bool):
         """Send typing indicator to the user's OWN other connections (tabs).
@@ -270,8 +270,8 @@ class WebSocketHandler:
             )
             try:
                 await websocket.send_text(error_msg.to_json())
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("error frame not delivered (client already disconnected)", _e)
             self.manager.disconnect(websocket, user_id)
 
     async def _process_message(

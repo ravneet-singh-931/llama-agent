@@ -12,6 +12,7 @@ import traceback
 from datetime import datetime
 from typing import Dict, List
 
+from modules.silent import degrade
 
 class AgentLogger:
     """
@@ -41,11 +42,8 @@ class AgentLogger:
             try:
                 with open(self.metrics_file, 'r') as f:
                     return json.load(f)
-            except (OSError, ValueError):
-                # Missing/corrupt metrics file: fall through to the empty
-                # defaults below. OSError covers IO failures, ValueError
-                # covers json.JSONDecodeError.
-                pass
+            except (OSError, ValueError) as _e:
+                degrade("metrics file missing or corrupt (starting from empty defaults)", _e)
         
         return {
             "total_queries": 0,
@@ -212,11 +210,8 @@ class AgentLogger:
                     "error_types": error_types,
                     "recent_errors": errors[-5:]
                 }
-            except (OSError, ValueError, KeyError, TypeError):
-                # Unreadable file (OSError), bad JSON (ValueError), or an
-                # entry missing "error_type" (KeyError/TypeError): report the
-                # empty summary instead of breaking the stats endpoint.
-                pass
+            except (OSError, ValueError, KeyError, TypeError) as _e:
+                degrade("error log unreadable or malformed (empty error summary returned)", _e)
         return {"total_errors": 0, "error_types": {}, "recent_errors": []}
 
 

@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Optional, Tuple, List
 
+from modules.silent import degrade
 
 # ============ FILE UPLOAD SECURITY ============
 
@@ -332,10 +333,8 @@ class SimpleRateLimiter:
         if r is not None:
             try:
                 return self._is_rate_limited_redis(r, key)
-            except Exception:
-                # Redis error -> fall back to in-memory so the service keeps
-                # working (degraded, per-process limiting only).
-                pass
+            except Exception as _e:
+                degrade("redis rate-limit check failed (per-process in-memory fallback)", _e)
         return self._is_rate_limited_memory(key)
 
     def _is_rate_limited_redis(self, r, key: str) -> Tuple[bool, str]:

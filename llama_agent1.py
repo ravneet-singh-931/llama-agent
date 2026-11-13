@@ -14,6 +14,7 @@ from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, List, Optional, Sequence
 
+from modules.silent import degrade
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -301,8 +302,8 @@ class GroqLLM(LLM):
             # /chat/stream can refuse the next request when it is spent.
             from modules import llm_guard
             llm_guard.record_spend(tin + tout)
-        except Exception:
-            pass
+        except Exception as _e:
+            degrade("token spend not recorded for this streamed reply", _e)
 
     def _record_call_seconds(self, start: float, stream: bool = False) -> None:
         """Time ONE model call. The agent/chat histograms mix model time with
@@ -313,8 +314,8 @@ class GroqLLM(LLM):
             record_llm_call_seconds(self.model, time.monotonic() - start,
                                     component=getattr(self, "component", "other"),
                                     stream=stream)
-        except Exception:
-            pass
+        except Exception as _e:
+            degrade("llm latency metric dropped for this reply", _e)
 
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
         start = time.monotonic()

@@ -25,6 +25,7 @@ from typing import Any, Optional, List, Dict
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 
+from modules.silent import degrade
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -120,8 +121,8 @@ async def _load_shared_dict(key: str, default: dict) -> dict:
         val = await redis_store.get_json(key)
         if isinstance(val, dict):
             return val
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("redis conversation cache read failed (falling through to local memory)", _e)
     return default
 
 
@@ -129,8 +130,8 @@ async def _save_shared_dict(key: str, value: dict) -> None:
     try:
         from modules import redis_store
         await redis_store.set_json(key, value, ttl=86400)
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("redis conversation cache write failed (chat continues on memory)", _e)
 
 
 # Lazy singleton Groq client (P2 #7): avoid rebuilding the client on every
@@ -1805,8 +1806,8 @@ def _check_doc_citations(answer: str, context: str) -> str:
             record_citation_failure("wrong_chunk")
         elif report["unsourced"]:
             record_citation_failure("unsourced")
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("citation quality metric not recorded for this answer", _e)
     if report["unsourced"]:
         return answer + "\n\n" + _DOC_UNSOURCED_NOTE
     # Spell the citation the way the prompt asks the model to write it, so the
@@ -2085,8 +2086,8 @@ def answer_from_documents(query: str, rag) -> str:
         if callable(cache):
             try:
                 cache(query, answer)
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("answer cache write failed (answer still returned)", _e)
         _doc_answer_cache.put(cache_key, answer)
 
     try:
@@ -2717,8 +2718,8 @@ async def chat_stream(
                             )
                             + "\n\n"
                         )
-                except Exception:
-                    pass
+                except Exception as _e:
+                    degrade("critic pass produced no note for this answer", _e)
             _tail = _redactor.flush()
             if _tail:
                 streamed += _tail

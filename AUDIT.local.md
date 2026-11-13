@@ -12,7 +12,7 @@
 in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/after.
 🔴 OPEN means still present in the repo, with the effort estimated.
 
-**Last updated:** after PR #50 reached 7/7 CI green.
+**Last updated:** #18 closed — every silent handler now says what it loses.
 
 | # | Problem | Where | Status | Proof / note |
 |---|---|---|---|---|
@@ -33,7 +33,7 @@ in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/a
 | 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🔴 **OPEN** | days; do last |
 | 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🔴 **OPEN** | days |
 | 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🟢 **DONE** | stdio client (230 lines) deleted with the UI; only the SSE client ships |
-| 18 | 32 `except Exception: pass` in live paths | mostly `prometheus_metrics.py` | 🔴 **OPEN** | 1 h |
+| 18 | `except Exception: pass` in live paths — **60 handlers, not 32** (my first count was of the audit, not the code) | 19 files, mostly `prometheus_metrics.py` | 🟢 **DONE** | **59 converted to `degrade(what, exc)`; 1 left (a queue timeout, which is control flow, not a fallback).** The message names what is lost and the failure is logged at DEBUG. `modules/silent.py` + 10 tests. Coverage 81.81% → **81.94%** |
 | 19 | 31 unused local variables (`F841`) — invisible to CI | repo-wide | 🟢 **DONE** | **31 → 0.** 24 were `except … as e` bindings; **7 were real dead assignments**, two of which changed what the rate limiter's hour window means. F401 unchanged at 29, none introduced |
 | 20 | Metrics counted twice; 3 ways to view them | `api.py`, `prometheus_metrics.py` | 🔴 **OPEN** | duplication, low |
 
@@ -1052,3 +1052,98 @@ at 102. I read truncated output as an absence and stated it as a finding.
 The correct version: **Streamlit was deployed in both compose and the cluster.** It is
 deleted from both now. Recorded here because "I checked and it wasn't there" is the exact
 failure mode this whole audit is about, and I did it again.
+
+---
+
+# PART 21 — #18: every silent handler now says what it loses
+
+## What the code actually had
+
+The audit said **32** `except Exception: pass` handlers. That number came from
+reading the audit, not the code. Scanning the real AST:
+
+| filter | count |
+|---|---|
+| handlers matching a loose "swallows the exception" heuristic | **100** |
+| …of those, body is a single `pass` or `continue` | **60** |
+| …of those, with no explanatory comment at all | **41** |
+
+So the finding was real and **nearly twice as large** as written. The 40 dropped
+by the first filter are not silent — they `return`, append to a failure list, or
+`raise`. Counting those as silent would have been a false accusation, which is
+why the filter exists; but stopping at the audit's 32 would have left 28 real
+ones in place.
+
+## Do it or don't
+
+**Do it.** This is the cheapest defect class in the repo to fix and one of the
+most expensive to leave. `except Exception: pass` is textually identical whether
+it is a considered fallback or a bug someone hid to make a test go green, and
+neither a reviewer nor `git blame` can tell. Every one of the 60 turned out to be
+a *deliberate* fallback — telemetry must not fail a tool call, a dead WebSocket
+must not stop a broadcast — so **the behaviour was right and the code did not say
+so.**
+
+## What was done
+
+New `modules/silent.py` (imports only `logging`, so no cycle):
+
+```python
+degrade(what: str, exc: BaseException | None = None) -> None
+```
+
+* `what` is **required** — naming the loss is not a comment that a formatter can
+  drop, it is an argument the call will not compile without;
+* the failure is logged at **DEBUG**, so normal runs stay quiet and
+  `LOG_LEVEL=DEBUG` replays every fallback that fired;
+* `STRICT = True` raises `DegradedError` chained from the original, so a test can
+  assert a fallback was *taken* rather than reading logs;
+* returns `None`, so `except: continue` stays visible at the call site
+  (`degrade(...); continue`) instead of hiding the loop control in a helper.
+
+**59 handlers converted across 19 files.** The message states the consequence,
+not the exception: `"tool call not written to the audit log"`,
+`"redis rate-limit check failed (per-process in-memory fallback)"`,
+`"torn last line from a killed run (skipped)"`. One handler was deliberately
+**not** converted — `evals/run.py:264`, a `queue.Empty` timeout that re-checks
+the clock. That is control flow, not a lost capability, and calling it a
+degradation would be the same lie in the other direction.
+
+**The one thing that had to be checked by hand:** the `# nosec B110` / `B112`
+justifications on several handlers. An automated line edit turned
+`except Exception:  # nosec B110 - …` into `except Exception:  # nosec B110 - … as _e:`
+on four sites, which still parses but puts the binding inside the comment. Fixed
+and verified with `grep -rn '#.*as _e:'` → 0 hits.
+
+## Proof
+
+`tests/test_degrade.py`, 10 tests, in three groups:
+
+1. **the helper's contract** — logs at DEBUG, `what` is required (a bare
+   `degrade()` is a `TypeError`, not a no-op), STRICT raises and keeps
+   `__cause__`, STRICT defaults to off;
+2. **real paths fire** — a corrupt `metrics.json` and a torn `llm.jsonl` are fed
+   through the real classes and the record is asserted, including the documented
+   fallback after it (empty metrics, the intact line still loads); STRICT turns
+   one real path into a `DegradedError`, proving the wiring and not just the
+   helper;
+3. **the census cannot regress** — an AST test fails on any new
+   `except: pass|continue` that is not on a one-entry allow-list, and a second
+   test asserts `degrade()` is reached from ≥15 files so a partial revert is
+   caught. *A guard that nothing calls is a comment.*
+
+| check | before | after |
+|---|---|---|
+| silent handlers | 60 | **1** (control flow) |
+| suite | 834 passed / 6 skipped | **844 passed / 6 skipped** |
+| coverage (`--cov=.`) | 81.81% | **81.94%** |
+| bandit (CI flags) | 0 | **0** |
+| flake8 F/E7/E9/W6 on touched files | — | **0 new** (5 pre-existing F541/E741, identical at `HEAD`) |
+
+## Wrong claim of mine, recorded
+
+I wrote **32** in the status board and repeated it. The real count is **60**. The
+first number was a second-hand count from an earlier part of this audit, and I
+did not re-derive it before restating it in a document whose whole purpose is
+that numbers trace to files. The scan that produced 60 took four seconds. This
+is the same failure as PART 20: restating instead of measuring.
