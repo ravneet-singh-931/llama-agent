@@ -12,7 +12,7 @@ being re-asserted as freshly true.
 
 | Document | Surface | Findings |
 |---|---|---|
-| [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | the measuring stick | 20 |
+| [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | the measuring stick | 19 |
 | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | the agents | 5 fixed, 4 open |
 | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | Prometheus / Grafana / Phoenix | 4 |
 | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | retrieval, ranking, the gate | 6 |

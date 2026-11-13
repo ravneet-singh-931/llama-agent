@@ -1,6 +1,6 @@
 # Agent findings
 
-The eval part of this project produced **18 findings about the measuring stick**.
+The eval part of this project produced **19 findings about the measuring stick**.
 This part is about the thing being measured: five agents, a critic, a team
 orchestrator, and the prompt rules they share.
 

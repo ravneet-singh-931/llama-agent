@@ -1,9 +1,16 @@
 # The dark modules
 
 Eleven modules, **2,928 lines**, that no findings document had ever mentioned.
-[`ROADMAP.md`](ROADMAP.md) listed them as the last real work before publishing,
-with one instruction: *"for each: test it, or delete it, or state in the README
-that it is unexercised. Do not leave 'nobody knows' as the answer."*
+[`ROADMAP.md`](ROADMAP.md) listed them as the last real work before publishing, with no
+next step attached — the row said only "still with zero findings".
+
+> **Correction, 2026-11-13.** This paragraph used to attribute a quotation to
+> `ROADMAP.md`: *"for each: test it, or delete it, or state in the README that it is
+> unexercised."* **That sentence is not in `ROADMAP.md`** and, as far as the git history
+> reaches, never was. It was a plausible-sounding instruction written into this document
+> and then attributed to the file, which is the exact failure this document is about —
+> a claim that reads like it was checked because it has a citation on it. The instruction
+> is a good one, which is why it was carried out; it was just **mine**, not the roadmap's.
 
 This is that triage.
 
@@ -159,9 +166,9 @@ code changed my answer, and it is the third option for almost all of it.
    performed in a docs PR.
 
 **What is recommended instead, and is done here:** every dead name is now *listed*.
-`ROADMAP.md` carries the table and a single instruction for the close-out step:
-either wire it up, or delete it, or leave it with a one-line comment saying what it
-is waiting for. **The status "unexercised and unlisted" is gone.**
+The rule applied — also misattributed to `ROADMAP.md` in the first version of this
+document — was: either wire it up, or delete it, or leave it with a one-line comment saying
+what it is waiting for. **The status "unexercised and unlisted" is gone.**
 
 ---
 
