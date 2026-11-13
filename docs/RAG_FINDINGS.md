@@ -304,6 +304,20 @@ blind and silent is R1. A gate that is blind and announces it is a bug report.
 
 `tests/test_rag_eval.py`: **29 passed**.
 
+**Live proof, not just a synthetic table.** The tests above run against the
+published numbers. The gate itself was then exercised by CI on the real corpus in
+run **43387791311** (`Test (Python 3.11)`, 2026-11-13). It **passed**, and with
+`--require-reranker` and the two new floors in place, passing means all three of
+these held on real data in that run:
+
+- the live reranker backend was **ONNX**, not a fallback,
+- `hit@1 ≥ 0.75` — at most 9 of 38 questions with the answer outside position one,
+- `MRR ≥ 0.82`.
+
+The floors were not tuned to make the build green; they were set from the
+2026-10-25 table first, and the first real run happened to clear them. If it had
+not, the honest outcome would have been to investigate, not to lower the floor.
+
 **The lesson.** *A gate is a measuring instrument, and it needs the same suspicion
 as a test suite.* R1's lesson was that a fallback chain that always succeeds cannot
 be noticed; R6's is that the check meant to notice it was measuring a property that
