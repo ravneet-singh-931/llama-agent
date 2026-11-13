@@ -35,7 +35,7 @@ We expect all contributors to:
 
 3. **Add upstream remote**
    ```bash
-   git remote add upstream https://github.com/ravneet-png/llama-agent.git
+   git remote add upstream https://github.com/ravneet-singh-931/llama-agent.git
    ```
 
 4. **Create a branch**

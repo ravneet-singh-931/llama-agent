@@ -395,7 +395,7 @@ class TestEnterpriseModules:
 
     def test_db_health_check_handles_failure(self):
         from modules.database_improvements import DatabaseHealthCheck
-        from unittest.mock import MagicMock
+        # MagicMock is imported at module level; re-importing it here was F811.
 
         broken_conn = MagicMock()
         broken_conn.cursor.side_effect = Exception("connection refused")

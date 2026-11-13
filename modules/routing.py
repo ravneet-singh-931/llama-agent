@@ -216,7 +216,9 @@ class AhoCorasick:
         self._built = False
 
     def build(self) -> None:
-        from collections import deque
+        # deque is imported at module level; the duplicate import here was
+        # reported by flake8 as F811. CI's gate only selects E9,F63,F7,F82, so
+        # nothing caught it.
         q = deque()
         for ch, nxt in self._next[0].items():
             self._fail[nxt] = 0

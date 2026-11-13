@@ -810,6 +810,38 @@ async def root():
     }
 
 
+# ============ LLM AVAILABILITY ============
+
+_LLM_KEY_HELP = (
+    "No LLM API key is configured, so this endpoint cannot answer. Set "
+    "GROQ_API_KEY in the environment, or put it in secrets/groq_api_key.txt "
+    "(Docker secret) / .env, then restart. The rest of the app is up: see "
+    "/health and /docs."
+)
+
+
+def _llm_key_configured() -> bool:
+    """Whether an LLM key was supplied at startup (reported by /health)."""
+    try:
+        import llama_agent1 as _agent_mod
+        return getattr(_agent_mod, "GROQ_API_KEY_CONFIGURED", True)
+    except Exception:  # pragma: no cover
+        return True
+
+
+def require_api_key() -> None:
+    """Raise 503 when no LLM key was supplied at startup.
+
+    The app boots without a key on purpose (see the note in llama_agent1.py):
+    a clone that has not filled in secrets/ should still be able to reach
+    /health and /docs and read what is wrong. Only the routes that actually
+    call a model refuse, and they refuse with an explanation rather than an
+    authentication error from the provider several layers down.
+    """
+    if not _llm_key_configured():
+        raise HTTPException(status_code=503, detail=_LLM_KEY_HELP)
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
@@ -824,6 +856,7 @@ async def health_check():
             "memory": "active",
             "rag": "active",
             "monitoring": "active",
+            "llm_key": "configured" if _llm_key_configured() else "missing",
             "database": "active" if get_config().features.enable_auth else "disabled",
             "websocket": "active" if get_config().features.enable_websockets else "disabled",
         }
@@ -2118,6 +2151,7 @@ async def chat(
     user = Depends(optional_auth),  # Optional auth (works with or without login)
 ):
     """Chat with the agent. Auth optional in development mode."""
+    require_api_key()
     start_time = datetime.now()
     monitor = app.state.monitor
     memory = app.state.memory
@@ -2344,6 +2378,7 @@ async def chat_stream(
     user = Depends(optional_auth),
 ):
     """Chat with streaming response (Server-Sent Events)."""
+    require_api_key()
     from llama_agent1 import run_agent_stream
 
     # Single unified memory/facts instances (shared with /chat and /memory),
@@ -3025,6 +3060,7 @@ async def search_documents(request: SearchRequest, user: Optional[Dict] = Depend
 async def ask_documents(request: SearchRequest, user: Optional[Dict] = Depends(optional_auth)):
     """Ask a question about the caller's uploaded documents and get a clean,
     LLM-written answer (instead of raw chunk JSON)."""
+    require_api_key()
     try:
         rag = _user_rag(_request_uid(user))
         answer = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, request.query, rag), timeout=DOWNSTREAM_TIMEOUT)

@@ -171,6 +171,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code change, not a triage, and deleting plausible planned work is the owner's call.
   What changed is that every dead name is now listed instead of assumed absent.
 
+- **The app now starts with no LLM key — because it used to die before opening a port.**
+  Found by doing what a stranger does: clone and start it.
+
+  `llama_agent1.py` ended key loading with `raise SystemExit(...)` **at import time**, and
+  `api.py`'s lifespan imports that module. So uvicorn imported the app, the import raised,
+  and the process died **before a socket existed**: no `/health`, no `/docs`, no readable
+  error — a container that exits, three of them, because API, web and MCP all mount
+  `groq_api_key`.
+
+  A fresh clone has no `secrets/` (gitignored), and the common way to create the file leaves
+  it **empty** — `get_secret` returns `""` for that, so "I made the secret file" and "there
+  is no key" were the same state, and both crashed.
+
+  **828 tests missed it** because every test importing `api` sets `GROQ_API_KEY` first, and
+  CI exports `test_key_for_ci`. The one configuration a new user has was the one never
+  exercised.
+
+  Now the app starts, `/health` reports `llm_key: missing`, `/docs` and model-free routes
+  serve, and `/chat`, `/chat/stream`, `/documents/ask` return **503** naming `GROQ_API_KEY`
+  and where it goes. `tests/test_boot_without_key.py` boots the app in a **subprocess with
+  the key removed** (the parent cannot re-run an import); restoring the `SystemExit` fails
+  **4 of its 5 tests**. `tests/test_recording.py` had asserted the old crash — it now
+  asserts the intent that survives: a normal run is never granted the replay exemption.
+
+- **Three smaller ones from the same audit.** `CONTRIBUTING.md` still told contributors to
+  `git remote add upstream .../ravneet-png/...` (404 — same dead org as the README last
+  PR). `modules/routing.py` re-imported `deque` inside a method (F811, invisible to CI's
+  gate which selects only E9/F63/F7/F82); `tests/test_enterprise.py` re-imported
+  `MagicMock`. **F811 is now 0 repo-wide.** And the README's *"102 style warnings"* was
+  **2,970** — now stated with the honest split: 606 trailing whitespace on blank lines,
+  **217 non-whitespace**.
+
 - **README rewritten against the artefacts, and it was carrying ten stale or false claims.**
   Every one was checked against the file that owns it, not against another sentence in the
   README. The two that matter most were **outside the prose**:

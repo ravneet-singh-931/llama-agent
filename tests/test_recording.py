@@ -275,18 +275,36 @@ def test_a_replay_can_start_without_an_api_key(tmp_path, monkeypatch):
     assert "replay-no-key-needed" in proc.stdout
 
 
-def test_a_normal_run_still_requires_a_key(tmp_path):
-    """The exemption is scoped to replay. Everything else must still fail
-    loudly rather than start with no credentials."""
+def test_a_normal_run_is_still_not_treated_as_replay(tmp_path):
+    """The replay exemption is scoped to replay.
+
+    This test used to assert the process *died* without a key. That behaviour
+    was removed on 2026-11-13: raising ``SystemExit`` at import time meant
+    uvicorn never opened a socket, so a fresh clone got no ``/health``, no
+    ``/docs`` and no readable error -- just a container that exited. The app now
+    starts and refuses only the routes that need a model.
+
+    The intent of the old test still holds and is what is asserted here: a
+    normal run must **not** be silently granted the replay exemption, so
+    ``GROQ_API_KEY_CONFIGURED`` is False and the module says so out loud.
+    Whether a call is then refused is covered by tests/test_boot_without_key.py.
+    """
     import subprocess, sys  # nosec B404 - spawns the current interpreter only, fixed argv, no shell
     env = {k: v for k, v in os.environ.items() if k != "GROQ_API_KEY"}
     env.pop("EVAL_RECORD_MODE", None)
     env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     proc = subprocess.run(  # nosec B603 - fixed argv, sys.executable, no shell
-        [sys.executable, "-c", "import llama_agent1"], env=env,
-        capture_output=True, text=True, cwd=env["PYTHONPATH"])
-    assert proc.returncode != 0
-    assert "GROQ_API_KEY not set" in (proc.stderr + proc.stdout)
+        [sys.executable, "-c",
+         "import llama_agent1 as m; "
+         "print('CONFIGURED:', m.GROQ_API_KEY_CONFIGURED); "
+         "print('KEY:', repr(m.GROQ_API_KEY))"],
+        env=env, capture_output=True, text=True, cwd=env["PYTHONPATH"])
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "CONFIGURED: False" in proc.stdout
+    # No fake key was injected -- that is what "replay-only" means.
+    assert "KEY: ''" in proc.stdout
+    # And it is not silent: the warning names the variable and says what breaks.
+    assert "GROQ_API_KEY is not set" in (proc.stderr + proc.stdout)
 
 
 # ------------------------------------------------- partial / interrupted runs
