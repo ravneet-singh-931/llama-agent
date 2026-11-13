@@ -10,6 +10,8 @@ import ast
 import json
 import os
 import re
+import subprocess  # nosec B404 - runs the answer's own doctests; see run_doctests()
+import sys
 import textwrap
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -371,6 +373,81 @@ def _doctest_to_code(code: str) -> str:
     return "\n".join(out)
 
 
+_DOCTEST_RUNNER = """
+import doctest, io, contextlib, types, sys
+_src = {src!r}
+_mod = types.ModuleType("answer")
+try:
+    exec(compile(_src, "<answer>", "exec"), _mod.__dict__)
+except Exception as e:
+    sys.stderr.write("IMPORTERROR=%s" % type(e).__name__)
+    raise SystemExit(0)
+_finder = doctest.DocTestFinder(exclude_empty=True)
+_runner = doctest.DocTestRunner(verbose=False)
+_fails = _tries = 0
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    for _t in _finder.find(_mod, globs=_mod.__dict__):
+        _r = _runner.run(_t)
+        _fails += _r.failed
+        _tries += _r.attempted
+sys.stderr.write("FAILURES=%d TRIES=%d" % (_fails, _tries))
+"""
+
+
+def run_doctests(code: str, timeout_s: float = 5.0) -> Optional[str]:
+    """Execute the answer's own doctests. Return an error string, or None.
+
+    `validate_code` parses; parsing is not running, and the gap is exactly what
+    these cases ask about. Measured before this existed: a ``merge()`` that
+    returns its input unchanged -- wrong on all three of its own doctests --
+    came back ``{'pass': True}``, because ``ast.parse`` has no opinion about
+    behaviour.
+
+    Scoped deliberately:
+
+    * runs only when the block CONTAINS ``>>>``. An answer with no doctests is
+      not penalised here; the judge scores it. (Forcing doctests would grade
+      formatting, the bug fixed three separate times already in this file.)
+    * a subprocess with a timeout, because the code is model output and
+      ``import os; os.remove(...)`` is a perfectly valid doctest.
+    * the answer's own stated output is the oracle -- nothing is invented.
+    """
+    if ">>>" not in code:
+        return None
+    # The RAW source, not _doctest_to_code(): that helper exists to make a
+    # pasted doctest SESSION parseable by ast.parse, and it does so by
+    # commenting out every non->>> line -- which deletes the function body this
+    # needs. doctest wants the real source because the examples live inside the
+    # docstrings of a real function.
+    script = _DOCTEST_RUNNER.format(src=code)
+    # Bandit B603: not shell=True, argv list, and the payload is model output
+    # this check exists to execute. The subprocess IS the sandbox -- bounded by
+    # timeout_s, and importing model output into the eval process is strictly
+    # worse. The comment must sit on the call line: a `# nosec` above it does
+    # nothing, which is how the first version of this fix still failed CI.
+    try:
+        proc = subprocess.run([sys.executable, "-c", script],  # nosec B603
+                              capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return f"doctests did not finish in {timeout_s:g}s"
+    except Exception as e:                                   # noqa: BLE001
+        return f"doctests could not run: {type(e).__name__}"
+    if "IMPORTERROR=" in (proc.stdout or ""):
+        # The examples were written against names defined elsewhere (or the
+        # answer is a fragment); not a wrong answer, just not runnable here.
+        return None
+    line = next((l for l in (proc.stderr or "").splitlines()
+                 if l.startswith("FAILURES=")), "")
+    if not line:
+        return None                     # no verdict: do not fail on our own bug
+    fails, tries = (int(x.split("=")[1]) for x in line.split())
+    if fails:
+        return (f"{fails} of {tries} doctest example(s) do not produce "
+                f"their own stated output")
+    return None
+
+
 def check_code(answer: str, expected_lang: Optional[str]) -> Dict:
     blocks = code_blocks(answer)
     errors = [e for b in blocks if (e := validate_code(b["lang"], b["code"]))]
@@ -413,6 +490,15 @@ def check_code(answer: str, expected_lang: Optional[str]) -> Dict:
                 if _looks_like_regex(prose(answer)):
                     return {"pass": True, "detail": ""}
             return {"pass": False, "detail": f"no {expected_lang} code block"}
+    if not errors:
+        # Parsing passed; now run the answer's own examples. A doctest that
+        # does not produce its stated output is a wrong answer, not a style
+        # issue, and it is the one thing these prompts explicitly request.
+        for b in blocks:
+            if (b["lang"] in _LANG_ALIASES["python"] or not b["lang"]):
+                err = run_doctests(b["code"])
+                if err:
+                    errors.append(err)
     return {"pass": not errors, "detail": "; ".join(errors)}
 
 
