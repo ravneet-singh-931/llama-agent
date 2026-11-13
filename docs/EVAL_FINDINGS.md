@@ -722,6 +722,26 @@ every finding above it: *two records of one thing, and nobody compared them.*
 
 ---
 
+# WHERE FINDING 16 WENT
+
+**There is no Finding 16, and that is not an edit made here.** The numbering jumps 15 → 17.
+It happened while the list was being assembled: 16 was reserved for a candidate finding that
+was later merged into Finding 15 (both were about the same daily-quota wall seen from two
+angles — the per-minute meter and the daily cap), and the renumber never got done.
+
+**So the honest count is 19, and the highest number is 20.** Anyone counting the headings will
+get 19; anyone reading "Finding 20" will assume 20 exist. Both are right about what they saw.
+The count used in the README and in [`CASE_STUDIES.md`](CASE_STUDIES.md) is therefore **19**,
+and it is stated as 19 everywhere.
+
+This is left as a numbered gap on purpose rather than silently renumbered: renumbering 17–20
+would invalidate every cross-reference in this document, the README's 39-row bugs table, and
+`docs/CASE_STUDIES.md` — four files and about twenty citation links — to fix a cosmetic hole.
+**A documented gap is cheaper than a broken reference**, and the alternative is the exact
+defect this document is about: changing the record to make the count look tidy.
+
+---
+
 # THE COUNT, AND A CLAIM THAT NEEDS CORRECTING
 
 The line the posts were going to use was:
