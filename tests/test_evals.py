@@ -977,8 +977,22 @@ def test_a_pasted_doctest_session_is_valid_python():
 
 
 def test_a_doctest_inside_a_function_still_parses():
+    """A real function with real doctests passes -- the parse path.
+
+    This used to assert that `merge(iv): return iv` PASSES: the body returned
+    its input unchanged, so the single doctest was wrong, and the check had no
+    opinion because it only ever parsed. That was the behaviour of the check,
+    not a property of a correct answer, so the fixture was pinning the bug.
+    v3.7.0 executes the examples, so the body has to be right."""
     answer = ("```python\ndef merge(iv):\n    \"\"\"Merge.\n\n"
-              "    >>> merge([[1,3],[2,6]])\n    [[1, 6]]\n    \"\"\"\n    return iv\n```")
+              "    >>> merge([[1,3],[2,6]])\n    [[1, 6]]\n    \"\"\"\n"
+              "    out = []\n"
+              "    for s, e in sorted(iv):\n"
+              "        if out and s <= out[-1][1]:\n"
+              "            out[-1][1] = max(out[-1][1], e)\n"
+              "        else:\n"
+              "            out.append([s, e])\n"
+              "    return out\n```")
     assert checks.check_code(answer, "python")["pass"]
 
 
@@ -1508,3 +1522,83 @@ def test_the_report_names_the_negative_category_it_did_not_count():
         _rep(80.0, 4.6, 0.70, 8.0, cats_new)))
     assert "NOT counted as regressions" in text
     assert "analysis" in text
+
+
+# ------------------------------------------------ doctests are executed (v3.7.0)
+#
+# `code-intervals` asks for "three doctest examples". `validate_code` parsed
+# them with ast.parse, which has no opinion about behaviour: a merge() that
+# returned its input unchanged was wrong on all three of its own examples and
+# still passed. These tests pin the difference between parsing and running.
+
+_MERGE_RIGHT = '''```python
+from typing import List
+
+def merge(intervals: List[List[int]]) -> List[List[int]]:
+    """Merge overlapping intervals.
+
+    >>> merge([[1,3],[2,6],[8,10],[15,18]])
+    [[1, 6], [8, 10], [15, 18]]
+    >>> merge([[1,4],[4,5]])
+    [[1, 5]]
+    >>> merge([[1,4],[0,4]])
+    [[0, 4]]
+    """
+    out = []
+    for s, e in sorted(intervals):
+        if out and s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return out
+```'''
+
+_MERGE_WRONG = _MERGE_RIGHT.replace('''    out = []
+    for s, e in sorted(intervals):
+        if out and s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return out''', "    return intervals")
+
+
+def test_wrong_doctest_output_fails_the_check():
+    from evals.checks import check_code
+    r = check_code(_MERGE_WRONG, "python")
+    assert not r["pass"], "a function that fails its own doctests must not pass"
+    assert "doctest example" in r["detail"]
+
+
+def test_correct_doctests_still_pass():
+    from evals.checks import check_code
+    assert check_code(_MERGE_RIGHT, "python") == {"pass": True, "detail": ""}
+
+
+def test_answers_without_doctests_are_not_penalised():
+    """The prompt asks for doctests; the CHECK must not require them.
+
+    A short correct answer with no examples is the judge's call, not this
+    check's -- grading it here would be grading formatting, the bug fixed
+    three times already in checks.py."""
+    from evals.checks import check_code
+    assert check_code("```python\ndef f(x):\n    return x * 2\n```", "python")["pass"]
+
+
+def test_infinite_loop_doctest_times_out_instead_of_hanging():
+    from evals.checks import run_doctests
+    err = run_doctests(
+        'def f():\n    """\n    >>> f()\n    1\n    """\n    while True:\n        pass\n',
+        timeout_s=2.0)
+    assert err and "did not finish" in err
+
+
+def test_fragment_whose_examples_need_missing_names_is_not_failed():
+    """A doctest session pasted alone has no definitions to run against."""
+    from evals.checks import run_doctests
+    assert run_doctests(">>> merge([[1,3],[2,6]])\n[[1, 6]]\n") is None
+
+
+def test_doctests_run_only_for_python_blocks():
+    from evals.checks import check_code
+    js = '```javascript\ndef debounce():\n  """\n  >>> f()\n  9\n  """\n```'
+    assert check_code(js, "javascript")["pass"]

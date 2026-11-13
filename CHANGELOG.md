@@ -91,6 +91,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The README's security table and both limitation bullets were rewritten to say what
   the skip costs. A limitation stated precisely can still teach a false belief.
 
+- **v3.7.0 — the eval runs doctests instead of parsing them.** `code-intervals` asks
+  for "three doctest examples"; `validate_code` called `ast.parse` on them and never
+  executed a line. `doctest` appeared in the repo in one place, `_doctest_to_code`,
+  whose whole purpose was to make a pasted session **parseable**. Measured: a
+  `merge()` that returns its input unchanged — wrong on all three of its own examples
+  — came back `{'pass': True}`.
+
+  `run_doctests()` now executes the answer's examples and fails the check when their
+  stated output does not match. Scoped: only when the block contains `>>>` (answers
+  without examples are the judge's call, not this check's), a subprocess with a 5 s
+  timeout (model output is being executed), and `IMPORTERROR` is not a failure (a bare
+  doctest session has nothing to run against).
+
+  Six tests, one of which is the bug. One existing fixture —
+  `test_a_doctest_inside_a_function_still_parses` — asserted that the broken
+  `merge()` passes, because that was the checker's behaviour. It now uses a correct
+  body. **A test written against a checker's weakness will defend the weakness.**
+
+  `docs/AGENT_FINDINGS.md` finding 5 states plainly what is still open: the 1.25 has
+  not been re-measured (fixing an instrument does not re-score a past run), 23 of 60
+  cases still carry no `reference` note for the judge, and code without doctests is
+  still only syntax-checked.
+
 - **`docs/CASE_STUDIES.md` — the index the project was missing.** Four parts, four
   findings documents, one headline number each, and the through-line that connects
   them. The README now links it first, because until now a visitor had to find the
