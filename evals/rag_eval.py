@@ -195,11 +195,68 @@ def run_retrieval(index: Index, questions: List[Dict]) -> Dict:
     return report
 
 
-def retrieval_ok(rep: Dict, min_hit6: float = 0.0) -> bool:
-    """Pass/fail for CI: no cross-user leak, no broken label, hit@6 of the
-    deployed setup at or above the floor."""
+def retrieval_ok(rep: Dict, min_hit6: float = 0.0, min_hit1: float = 0.0,
+                 min_mrr: float = 0.0, require_reranker: bool = False) -> bool:
+    """Pass/fail for CI: no cross-user leak, no broken label, and the deployed
+    setup at or above each floor.
+
+    v3.6.0: three floors, because one was not enough. hit@6 cannot see the
+    reranker at all -- all three setups score 35/38 (README, 2026-10-25) -- so a
+    hit@6-only gate passed just as happily with the reranker switched off, which
+    is precisely the failure R1 in docs/RAG_FINDINGS.md describes. hit@1 and MRR
+    are the numbers the reranker moves (27/38 -> 31/38, 0.79 -> 0.86), so they
+    are what a reranker gate has to be made of. hit@6 stays as the separate
+    question "is the answer reachable at all".
+    """
+    if rep["leaks"] or rep["unreachable"]:
+        return False
     deployed = list(rep["setups"].values())[-1] if rep["setups"] else {}
-    return not rep["leaks"] and not rep["unreachable"] and deployed.get("hit@6", 0) >= min_hit6
+    if deployed.get("hit@6", 0) < min_hit6:
+        return False
+    if deployed.get("hit@1", 0) < min_hit1:
+        return False
+    if deployed.get("mrr", 0) < min_mrr:
+        return False
+    if require_reranker and not str(rep.get("reranker", "")).startswith("onnx"):
+        return False
+    return True
+
+
+def gate_verdicts(rep: Dict, **floors) -> Dict[str, bool]:
+    """Would this gate pass if each setup were the deployed one?
+
+    The gate is itself a measuring instrument, so it gets the same suspicion as
+    one. A gate that passes the vector-only setup is blind to the reranker: it
+    would stay green on the day the reranker silently fell back to keyword
+    overlap, which is the exact bug R1 records. `blind_to_reranker` below turns
+    that into a number instead of a paragraph.
+    """
+    out = {}
+    for name, scores in rep.get("setups", {}).items():
+        out[name] = retrieval_ok(
+            {"setups": {"deployed": scores}, "leaks": [], "unreachable": [],
+             "reranker": rep.get("reranker", "")}, **floors)
+    return out
+
+
+def gate_sensitivity(rep: Dict, **floors) -> Dict:
+    """The gate's own blind spot, measured.
+
+    `discriminates` is True when the gate rejects a setup that has no reranker
+    (vector or hybrid) and accepts the deployed one. False means the gate cannot
+    see the component it is supposed to protect.
+    """
+    verdicts = gate_verdicts(rep, **floors)
+    names = list(verdicts)
+    deployed = names[-1] if names else None
+    without = [n for n in names if n != deployed]
+    passed_without = [n for n in without if verdicts.get(n)]
+    return {
+        "verdicts": verdicts,
+        "deployed": deployed,
+        "would_pass_without_reranker": passed_without,
+        "discriminates": bool(deployed and verdicts.get(deployed) and not passed_without),
+    }
 
 
 def render_retrieval(rep: Dict) -> str:
@@ -219,6 +276,25 @@ def render_retrieval(rep: Dict) -> str:
     lines += ["", f"Missed by the deployed setup (not in top {rep['k']}): {', '.join(missed) or 'none'}",
               f"Cross-user leaks: **{len(rep['leaks'])}**",
               f"Unreachable labels (dataset errors): {', '.join(rep['unreachable']) or 'none'}"]
+
+    # The gate's own blind spot, printed. If "without reranker" rows say PASS,
+    # the gate cannot detect the reranker disappearing (R1, docs/RAG_FINDINGS.md).
+    verdicts = rep.get("gate", {}).get("verdicts") or {}
+    if verdicts:
+        sens = rep["gate"]
+        lines += ["", "**Gate sensitivity** — would the gate pass this setup alone?", "",
+                  "| Setup | Gate verdict |", "|---|---|"]
+        for name, ok in verdicts.items():
+            beat = " ← deployed" if name == sens.get("deployed") else ""
+            if name != sens.get("deployed"):
+                beat = " ← PASSES WITHOUT THE RERANKER" if ok else " ← correctly rejected"
+            lines.append(f"| {name}{beat} | {'PASS' if ok else 'FAIL'} |")
+        lines += ["",
+                  (f"Gate discriminates the reranker: **YES** — a setup without it is rejected."
+                   if sens.get("discriminates") else
+                   f"Gate discriminates the reranker: **NO** — `"
+                   f"{', '.join(sens.get('would_pass_without_reranker') or [])}` passes with no "
+                   f"reranker, so this gate cannot detect R1 recurring.")]
     return "\n".join(lines)
 
 
@@ -360,7 +436,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--pause", type=float, default=20.0,
                     help="answers: seconds between questions (free-tier token window)")
     ap.add_argument("--min-hit6", type=float, default=0.0,
-                    help="retrieval: fail if the deployed setup's hit@6 is below this")
+                    help="retrieval: fail if the deployed setup's hit@6 is below this "
+                         "(reachability: can the answer be found at all)")
+    ap.add_argument("--min-hit1", type=float, default=0.0,
+                    help="retrieval: fail if the deployed setup's hit@1 is below this "
+                         "(ranking quality: this, not hit@6, is what the reranker moves)")
+    ap.add_argument("--min-mrr", type=float, default=0.0,
+                    help="retrieval: fail if the deployed setup's MRR is below this")
+    ap.add_argument("--require-reranker", action="store_true",
+                    help="retrieval: fail unless the live reranker backend is ONNX. "
+                         "Without this, the fallback chain can go to keyword overlap "
+                         "and hit@6 will not notice (docs/RAG_FINDINGS.md, R1)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
 
@@ -373,10 +459,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.mode == "retrieval":
         index = Index()
         rep = run_retrieval(index, questions)
-        rep.update(created=time.strftime("%Y-%m-%dT%H:%M:%S%z"), git_sha=sha)
+        floors = dict(min_hit6=args.min_hit6, min_hit1=args.min_hit1,
+                      min_mrr=args.min_mrr, require_reranker=args.require_reranker)
+        rep["gate"] = gate_sensitivity(rep, **floors)
+        rep.update(created=time.strftime("%Y-%m-%dT%H:%M:%S%z"), git_sha=sha,
+                   thresholds={k: v for k, v in floors.items() if v})
         _write(args.out or os.path.join(tempfile.gettempdir(), "rag-retrieval.json"),
                rep, render_retrieval(rep))
-        return 0 if retrieval_ok(rep, args.min_hit6) else 1
+        return 0 if retrieval_ok(rep, **floors) else 1
 
     from modules.rag_optimizations import GroqLLMClient
     llm = GroqLLMClient()

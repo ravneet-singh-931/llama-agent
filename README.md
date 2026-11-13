@@ -151,7 +151,7 @@ prices for these Groq models; spend is tracked in Prometheus (panels above).
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Live status of every part: what is done, what is open, and in what order the rest happens |
 | [docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md) | 18 findings from building the eval harness — the suite reported 35% when the real figure was 72.4% |
 | [docs/AGENT_FINDINGS.md](docs/AGENT_FINDINGS.md) | 4 agent findings fixed, 5 open — what the agents get wrong and why |
-| [docs/RAG_FINDINGS.md](docs/RAG_FINDINGS.md) | 5 RAG findings — a reranker that was keyword overlap, and four features that did nothing |
+| [docs/RAG_FINDINGS.md](docs/RAG_FINDINGS.md) | 6 RAG findings — a reranker that was keyword overlap, and the CI gate that could not see it |
 | [docs/OBSERVABILITY_FINDINGS.md](docs/OBSERVABILITY_FINDINGS.md) | 3 findings — a 2.0 s stream measured as 0.002 s, and two more like it |
 | [docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md) | 5 checks against a live cluster, with runnable commands |
 | [docs/SLO.md](docs/SLO.md) | Chat SLOs per route, and what "failed" means for a streamed answer |
