@@ -148,6 +148,7 @@ prices for these Groq models; spend is tracked in Prometheus (panels above).
 | Document | What it covers |
 |----------|---------------|
 | **[docs/CASE_STUDIES.md](docs/CASE_STUDIES.md)** | **Start here: the four parts of this project, each with its findings document and headline number** |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Live status of every part: what is done, what is open, and in what order the rest happens |
 | [docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md) | 18 findings from building the eval harness — the suite reported 35% when the real figure was 72.4% |
 | [docs/AGENT_FINDINGS.md](docs/AGENT_FINDINGS.md) | 4 agent findings fixed, 5 open — what the agents get wrong and why |
 | [docs/OBSERVABILITY_FINDINGS.md](docs/OBSERVABILITY_FINDINGS.md) | 3 findings — a 2.0 s stream measured as 0.002 s, and two more like it |
