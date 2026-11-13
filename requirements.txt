@@ -27,7 +27,9 @@ rank_bm25==0.2.2  # BM25 keyword half of hybrid search (modules/rag_optimization
 # server package dragged in strawberry-graphql/pydantic-ai-slim CVEs and its phoenix/__init__
 # crashes on Python 3.11 (dataclass mappingproxy default), which silently disabled tracing.
 arize-phoenix-otel==0.17.2
-opentelemetry-instrumentation-fastapi==0.66b1  # -> opentelemetry-api 1.45.1 (CVE-2026-114603)
+opentelemetry-instrumentation-fastapi==0.66b2  # -> opentelemetry-api 1.45.2 (CVE-2026-114603 fixed; 0.66b1 pinned 1.45.1)
+opentelemetry-api==1.45.2  # CVE-2026-126360 (published 2026-11-13, fixed in 1.45.2)
+opentelemetry-sdk==1.45.2  # must match opentelemetry-api exactly; sdk 1.45.1 pins api==1.45.1
 openinference-instrumentation-llama-index==4.4.5
 
 # --- Data Processing ---
