@@ -1,6 +1,6 @@
 # Llama Agent
 
-[![CI](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml/badge.svg)](https://github.com/ravneet-png/llama-agent/actions/workflows/main.yml)
+[![CI](https://github.com/ravneet-singh-931/llama-agent/actions/workflows/main.yml/badge.svg)](https://github.com/ravneet-singh-931/llama-agent/actions/workflows/main.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009639.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
@@ -66,9 +66,32 @@ on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 730 passed, 6 skipped, 17 deselected (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 828 passed, 6 skipped, 17 deselected (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
 | **Cost** | $0.24 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (row 22) |
-| **Bugs found and fixed** | 38 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
+| **Bugs found and fixed** | 39 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
+
+### The seven parts, and what backs each one
+
+Every part of this project has its own findings document, and every claim in it traces to
+something a reader can rerun: a test that fails if the bug is put back, or a committed
+command whose output is quoted next to it. **This table is the audit** — if a row has no
+proof type, the row does not belong here.
+
+| # | Part | Document | Findings | The proof, concretely |
+|---|---|---|---|---|
+| 1 | **Measurement** | [`EVAL_FINDINGS.md`](docs/EVAL_FINDINGS.md) | 19 | 60 cases, rule checks + figure grounding + LLM judge; every fix has a named test; the suite refuses to print a pass rate below 90% coverage |
+| 2 | **The agents** | [`AGENT_FINDINGS.md`](docs/AGENT_FINDINGS.md) | 5 fixed, 4 open | 4 open items named and sized, not hidden; finding 5 fixed with 6 tests |
+| 3 | **Observability** | [`OBSERVABILITY_FINDINGS.md`](docs/OBSERVABILITY_FINDINGS.md) | 4 | a 2.0 s stream recorded as 0.002 s → 2.008 s; tracing cost measured at ~5 µs/span across 5 points |
+| 4 | **RAG** | [`RAG_FINDINGS.md`](docs/RAG_FINDINGS.md) | 6 | a retrieval table with three *negative* results published; 0 cross-user leaks across every run |
+| 5 | **Security** | [`SECURITY_FINDINGS.md`](docs/SECURITY_FINDINGS.md) | 4 | four questions answered in both directions; containment verified on both chat paths |
+| 6 | **The dark modules** | [`DARK_MODULES.md`](docs/DARK_MODULES.md) | 23 dead names | 61 public names checked by reference, not by line count; 13 also untested |
+| 7 | **The cluster** | [`KUBERNETES_CHECKS.md`](docs/KUBERNETES_CHECKS.md) | 7 checks | live-cluster commands; re-audited against all 31 manifests, which caught one wrong claim |
+
+**What that adds up to:** 39 fixed bugs, 23 dead public names, 7 findings documents, and
+**828 tests**. The number that matters is not any one of those — it is that each of them
+was **checked twice**, once when it was found and once when the document was re-read
+against the artefacts. The cluster re-audit above exists because that second pass found a
+sentence that had been wrong for weeks.
 
 ### What still fails
 
@@ -147,15 +170,15 @@ prices for these Groq models; spend is tracked in Prometheus (panels above).
 
 | Document | What it covers |
 |----------|---------------|
-| **[docs/CASE_STUDIES.md](docs/CASE_STUDIES.md)** | **Start here: the four parts of this project, each with its findings document and headline number** |
+| **[docs/CASE_STUDIES.md](docs/CASE_STUDIES.md)** | **Start here: the seven parts of this project, each with its findings document and headline number** |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Live status of every part: what is done, what is open, and in what order the rest happens |
-| [docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md) | 18 findings from building the eval harness — the suite reported 35% when the real figure was 72.4% |
-| [docs/AGENT_FINDINGS.md](docs/AGENT_FINDINGS.md) | 4 agent findings fixed, 5 open — what the agents get wrong and why |
+| [docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md) | 19 findings from building the eval harness — the suite reported 35% when the real figure was 72.4% |
+| [docs/AGENT_FINDINGS.md](docs/AGENT_FINDINGS.md) | 5 agent findings fixed, 4 open — what the agents get wrong and why |
 | [docs/RAG_FINDINGS.md](docs/RAG_FINDINGS.md) | 6 RAG findings — a reranker that was keyword overlap, and the CI gate that could not see it |
 | [docs/SECURITY_FINDINGS.md](docs/SECURITY_FINDINGS.md) | 4 security findings — the safety claim described the wrong path, and citations are filenames, not evidence |
 | [docs/DARK_MODULES.md](docs/DARK_MODULES.md) | 11 modules, 2,928 lines — 23 of 61 public names unreachable, 13 of those untested |
 | [docs/OBSERVABILITY_FINDINGS.md](docs/OBSERVABILITY_FINDINGS.md) | 4 findings — a 2.0 s stream measured as 0.002 s, and the one claim that had no number behind it |
-| [docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md) | 5 checks against a live cluster, with runnable commands |
+| [docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md) | 7 checks against a live cluster, with runnable commands, re-audited 2026-11-13 |
 | [docs/SLO.md](docs/SLO.md) | Chat SLOs per route, and what "failed" means for a streamed answer |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Full system design, data flow, and decision records |
 | [API_DOCUMENTATION.md](API_DOCUMENTATION.md) | Every REST/WebSocket endpoint with payloads and examples |
@@ -383,20 +406,22 @@ version that fixed it and a test or a before/after number as proof; details are 
 [CHANGELOG](CHANGELOG.md).
 
 **Rows 19–39 are the eval work: 21 rows, and they are not all eval bugs.** Being precise about
-this matters, because the section's whole claim rests on the count:
+this matters, because the section's whole claim rests on the count. The three groups add to 21:
 
-- **18 are findings about the measurement** — the grader, the runner, the report, the diff, the
-  regression gate, the token budget.
-- **2 are in the app**: row 21 (a per-future timeout in `multi_agent.py`) and row 39 (a request
-  the guard made too large).
+- **17 are findings about the measurement itself** — the grader, the runner, the report, the
+  diff, the regression gate, the token budget.
+- **2 are app bugs the eval found**: row 21 (a per-future timeout in `multi_agent.py`) and row
+  39 (a request the guard made too large). Both are still *eval work* — they exist here because
+  the suite surfaced them — but the defect is in the product.
 - **2 are neither**: rows 22 and 23, the cost-tracking bugs — a duplicated spend record and a
   missing `import os` that priced every call at $0.
 
-Of the 18 measurement findings, **16 are in the harness itself**. The other two (rows 21, 39) are
-app bugs the eval *found*. None was in the model's behaviour, which is the point of the section:
-the measuring stick was wrong far more often than the thing being measured — and twice it was
-wrong about its **own verdict**, calling the best run a regression (row 38, 2026-11-12) and the
-worst run a pass. The long-form write-up,
+**17 + 2 + 2 = 21.** The earlier version of this paragraph said 18 + 2 + 2, which is 22, and a
+reader who counted would have been right to stop trusting the rest of the table. *None* of the
+21 was in the model's behaviour, which is the point of the section: the measuring stick was
+wrong far more often than the thing being measured — and twice it was wrong about its **own
+verdict**, calling the best run a regression (row 38, 2026-11-12) and the worst run a pass. The
+long-form write-up,
 with the corrected headline figures, is in
 [docs/EVAL_FINDINGS.md](docs/EVAL_FINDINGS.md).
 
@@ -526,7 +551,7 @@ and the document-upload flow use it automatically — no code changes needed.
 
 ### 1️⃣ Clone
 ```bash
-git clone https://github.com/ravneet-png/llama-agent.git
+git clone https://github.com/ravneet-singh-931/llama-agent.git
 cd llama-agent
 ```
 
@@ -737,8 +762,9 @@ Both keep ChromaDB cluster-internal (no published host port).
 **Known gaps (not fixed yet):**
 - The client IP for rate limiting is the first `X-Forwarded-For` value, which a client can set
   itself, so per-IP limits can be bypassed by sending a fake header.
-- `chromadb` and `phoenix` run on `:latest` image tags (the app images use immutable
-  `:<git sha>` tags).
+- **Only 2 of 13 images are digest-pinned** (`chromadb`, `phoenix`). The other eleven use
+  tags (`v7`, `15-alpine`, `10.4.0`, …), and a tag can be re-pushed. The app images are the
+  better ones (`:<git sha>`, rendered per deploy); the observability images are the weak spot.
 - The monitoring UIs share one basic-auth login in the local lab (SSO is scaffolded, not on).
 - CORS allows `*` when `ENVIRONMENT` is not `production` (the committed k8s and Compose
   configs set `production`).
@@ -961,8 +987,8 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status:** 730 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
-30 test modules. The 4 skipped tests need the reranker model file, which CI downloads
+**Current status:** 828 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
+39 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
 the Phoenix span-instrumentation path, the Point 9 multi-provider chain/fallback logic, and
@@ -1095,7 +1121,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 730 passed, 6 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 828 passed, 6 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89
@@ -1180,6 +1206,45 @@ Three known problems, none blocking, listed so they are not discovered by a read
   - `chromadb` 1.5.9, 5 advisories, no fixed release yet. The code-injection ones run in Chroma's Python server (this stack runs Chroma's Rust server) or in a client reading a poisoned collection config, which needs write access to Chroma. The cross-tenant ones are about Chroma's own tenants and RBAC; the app keeps users apart with an owner filter on every query (RAG eval: 0 cross-user leaks).
   - `transformers` 4.57.6, 9 advisories. Only pulled in by `llama-index-llms-openai-like`; the app never imports it (embeddings and the reranker run on ONNX).
   - Same audit, other scans: Bandit 0 High (4 Medium, all B104, the default host 0.0.0.0 that servers inside containers need), flake8 no real errors (102 style warnings), MCP server tests 17/17.
+
+---
+
+## 🧾 What this project is actually about
+
+Seven parts, seven documents, and one sentence that every one of them arrives at from a
+different direction:
+
+> **Nothing here was broken. Everything here was configured, written or measured in a way
+> that looked correct until someone checked it a second time.**
+
+The eval suite published its own outage as its quality. The "cross-encoder reranker" was
+keyword overlap. The safety guard was on the endpoint the UI does not use. The tracing
+dashboard measured a 2.0 s stream as 0.002 s. Eleven modules nobody had written about were
+assumed to be unused, and 23 of their 61 public names really were. The nightly backup failed
+for three nights against a schedule nobody had questioned — and then the document describing
+that fix turned out to contain a claim the manifest contradicted.
+
+Every one of those was found the same way: **by comparing two records of the same thing.**
+A report against its own numbers. A comment against its manifest. A test name against the
+thing it claims to test. The bug was never in the code being looked at; it was in the gap
+between the code and the claim about it.
+
+That is why the deliverables here are documents and not features. A feature can be believed.
+A document with a number, a command, and a test that fails when the bug is restored can be
+**checked** — and being checkable is the only property this project is really claiming.
+
+### What is honestly not done
+
+- **@team latency** is 90–155 s per case; the fix needs profiling, not a guess.
+- **The judge is never validated against a human.** 60 cases, one run each, no human labels.
+  Every agent-quality number in this README inherits that weakness.
+- **Four agent findings and one security finding (S4) are open**, and they are named in
+  their documents rather than omitted.
+- **The cluster is one machine.** No HA, no cloud, `ReadWriteOnce` disks that cannot move.
+- **Eleven of thirteen images are tag-pinned, not digest-pinned.**
+
+None of that is a footnote. A project that publishes which of its own claims it cannot
+defend is more useful than one that publishes only the claims it can.
 
 ---
 

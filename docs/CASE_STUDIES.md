@@ -1,17 +1,16 @@
 # Case studies
 
-The project in four parts, each with the document that proves it and the numbers that
+The project in seven parts, each with the document that proves it and the numbers that
 back it. If you read one file to judge whether this repo is worth your time, read this
 one — it is an index, and every claim in it links to the evidence.
 
-> **Where the work stands right now:** [`ROADMAP.md`](ROADMAP.md) tracks every part,
-> what is done, what is open, and the order the rest will be done in. This file
-> describes the four parts that are finished; the roadmap is honest about the ones
-> that are not.
+> **Where the work stands right now:** all seven parts are finished. Each has its own
+> findings document, and every claim in those documents traces to a test that fails if
+> the bug is put back, or to a committed command whose output is quoted next to it.
 
 **The organising idea:** the interesting thing about this project is not that it has
 five agents, a RAG pipeline and a Kubernetes deployment. It is that **every part of it
-was measured, and the measurement was wrong at first**. Four separate parts, four
+was measured, and the measurement was wrong at first**. Seven separate parts, seven
 different kinds of wrong.
 
 | Part | Document | Findings | The headline number |
@@ -31,7 +30,7 @@ different kinds of wrong.
 **What was built.** A 60-case eval suite: rule checks, figure grounding, and an LLM
 judge, run nightly in CI and diffed against the previous run.
 
-**What broke.** 18 findings, and **16 of them were in the harness, not the agent.** The
+**What broke.** 19 findings, and **17 of them were in the harness, not the agent.** The
 measuring stick was wrong far more often than the thing being measured.
 
 **The three that matter:**

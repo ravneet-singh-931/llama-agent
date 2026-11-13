@@ -171,6 +171,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code change, not a triage, and deleting plausible planned work is the owner's call.
   What changed is that every dead name is now listed instead of assumed absent.
 
+- **README rewritten against the artefacts, and it was carrying ten stale or false claims.**
+  Every one was checked against the file that owns it, not against another sentence in the
+  README. The two that matter most were **outside the prose**:
+
+  - **The `git clone` command and the CI badge pointed at `ravneet-png`**, an org that does
+    not own this repo and returns 404. Anyone following the Quick Start failed at step 1, and
+    the badge at the top of the page was a broken image on every render. Both now point at
+    `ravneet-singh-931`.
+  - **`## Known limits` still said `chromadb` and `phoenix` run on `:latest`.** They have
+    been digest-pinned for some time; the security section was contradicting the manifests.
+
+  The rest were counts that had drifted: **730 → 828 tests**, 30 → 39 test modules, 38 → 39
+  bug rows, "four parts" → seven, eval findings 18 → 19, agent findings "4 fixed / 5 open" →
+  **5 fixed / 4 open** (backwards), cluster checks 5 → 7.
+
+- **The bugs section's own arithmetic did not add up.** It claimed *"Rows 19–39: 21 rows"*
+  and then partitioned them as 18 + 2 + 2 = **22**. A reader who counted would have been
+  right to distrust the table. The partition is now 17 + 2 + 2 = 21, and the correction is
+  stated in place rather than quietly recomputed.
+
+- **There is no Finding 16.** `EVAL_FINDINGS.md` numbers 15 → 17. It was reserved for a
+  candidate that got merged into 15, and the renumber never happened. Rather than renumber
+  17–20 and invalidate ~20 cross-references across four files, the gap is now documented at
+  the point a reader would hit it, with the honest count (**19**) stated everywhere.
+
+- **README now audits itself.** A new *"seven parts, and what backs each one"* table gives
+  every part's document, finding count and proof type, so a reader can check the one claim
+  the project actually makes. A closing section states what the seven documents have in
+  common and then lists what is honestly **not** done — @team latency, the unvalidated
+  judge, the five open findings, the single-node cluster, the eleven tag-pinned images.
+
+- **`docs/CASE_STUDIES.md` had the same drift**, and contradicted itself in adjacent
+  paragraphs: "the project in four parts" above a seven-row table, and *"18 findings, 16 of
+  them in the harness"* above its own row that said 20. Both now read 19 / 17 / seven.
+
 - **`docs/KUBERNETES_CHECKS.md` re-audited — and one of its own claims was wrong.**
   No cluster is available here, so all 31 manifests (89 resources) were parsed and every
   statically-checkable claim re-verified. **Six of seven checks stand**; the header, which
