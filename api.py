@@ -284,29 +284,25 @@ _is_db_unavailable = is_db_unavailable
 
 # ============ Request identity + per-user document scoping ============
 
-UPLOAD_ROOT = os.getenv("UPLOAD_DIR", "uploads")
-GUEST_COOKIE = "guest_id"
-_GUEST_ID_RE = re.compile(r"^[a-f0-9]{32}$")
-# Set by guest_identity_middleware for every HTTP request.
-_guest_id_ctx: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
-    "guest_id", default=None
+# Request identity moved to modules/doc_identity.py (#15 step 3). Re-exported so
+# the 11 route handlers below and the middleware keep using these exact names.
+#
+# _guest_id_ctx is IMPORTED, not recreated: identity_middleware sets it here and
+# _request_uid reads it in the other module, so it has to be one object. Two
+# context variables would give every anonymous visitor a fresh identity per
+# request.
+from modules.doc_identity import (      # noqa: E402,F401
+    GUEST_COOKIE,
+    _GUEST_ID_RE,
+    _guest_id_ctx,
+    _guest_uid,
+    _request_uid,
 )
-def _guest_uid(guest_id: Optional[str]) -> str:
-    gid = guest_id if guest_id and _GUEST_ID_RE.match(guest_id) else uuid.uuid4().hex
-    return f"guest-{gid}"
 
 
-def _request_uid(user: Optional[Dict[str, Any]]) -> str:
-    """Stable identity for the current request, bound for downstream code.
+UPLOAD_ROOT = os.getenv("UPLOAD_DIR", "uploads")
 
-    - Registered user -> their UUID.
-    - Anonymous       -> "guest-<per-browser id>" from the HttpOnly guest
-      cookie, so two anonymous visitors NEVER share history, facts or
-      documents (pg_store skips persistence for non-UUID ids).
-    """
-    uid = str(user["id"]) if user and user.get("id") else _guest_uid(_guest_id_ctx.get())
-    bind_owner(uid)
-    return uid
+
 
 
 def _user_rag(user_id: str):

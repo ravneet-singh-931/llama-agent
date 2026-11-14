@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard test that fails if they are ever split again.
 - `BoundedLRUCache` moved to `modules/api_utils.py` (it was declared in `api.py`).
 
+### Changed (maintenance audit #15, step 3) — request identity
+
+- `_guest_uid`, `_request_uid` and the guest-cookie names
+  (`GUEST_COOKIE`, `_GUEST_ID_RE`, `_guest_id_ctx`) moved to
+  `modules/doc_identity.py`. `api.py` 2,776 → **2,772 lines**; 39 routes
+  unchanged; 929 tests pass (+17).
+- `_guest_id_ctx` is **imported, not copied**: `identity_middleware` writes it
+  in `api.py` and `_request_uid` reads it in the new module, so a second copy
+  would reset every anonymous visitor's identity on each request and silently
+  lose their documents and history. Guarded by an identity (`is`) test.
+- `_user_rag` did **not** move — it reads `app.state.rag`.
+
 ### Security (maintenance audit, 2026-11-13)
 
 - **A 7-day refresh token authenticated requests as a 30-minute access token.**

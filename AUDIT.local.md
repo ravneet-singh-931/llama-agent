@@ -30,7 +30,7 @@ in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/a
 | 12 | No coverage floor in CI — the suite reported coverage but never gated on it | `.github/workflows/main.yml` | 🟢 **DONE** | `--cov-fail-under=74`, set 4 points under the measured **78.61%** on CI's `--cov=.` scope. A ratchet, with the scope written into the comment |
 | 13 | Two full UIs (Next.js + Streamlit "legacy") | `frontend/`, `app.py` | 🟢 **DONE** | **Streamlit deleted entirely** — see PART 20 |
 | 14 | Three monitoring modules, 1,353 lines | `monitoring.py`, `advanced_monitoring.py`, `prometheus_metrics.py` | 🟢 **DONE** | **Three findings came out of it, all in `OBSERVABILITY_FINDINGS.md` 7–9.** `AgentLogger` was a second metrics system that rewrote two files per request (two of its fields were never true: every caller passes `tools_used=[]`). Three placeholder notifiers were registered as real channels — a firing alert printed three times and was delivered nowhere. `SLAMonitor` scored a service whose first request failed as **0% errors, met** — divide-by-zero returning the *best* value for a badness metric. Metrics half deleted; log files kept. Suite 846 → **847** |
-| 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🟡 **IN PROGRESS** | Scope **A: helpers only** (user decision). Step 1: 5 leaf helpers → `modules/api_utils.py` (`cae2f9a`). Step 2: 23 doc/RAG functions + 19 constants → `modules/doc_answers.py` — **3,373 → 2,776 lines**, 39 routes unchanged, 912 passed. Writing the guard test found a **real bug I had just introduced**: two copies of the cache-invalidation counter, so uploads bumped a dict nobody read — **stale answers after re-upload**, and the 908-test suite did not notice |
+| 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🟡 **IN PROGRESS** | Scope **A: helpers only** (user decision). Step 1: 5 leaf helpers → `modules/api_utils.py` (`cae2f9a`). Step 2: 23 doc/RAG functions + 19 constants → `modules/doc_answers.py` — **3,373 → 2,776 lines**, 39 routes, 912 passed. Step 3: request identity → `modules/doc_identity.py` — **2,772 lines**, 39 routes, 929 passed (a copied contextvar would silently reset every guest's identity per request; guard test fails if split). Writing the guard test found a **real bug I had just introduced**: two copies of the cache-invalidation counter, so uploads bumped a dict nobody read — **stale answers after re-upload**, and the 908-test suite did not notice |
 | 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🟢 **DONE** | **Coverage 53% → 93%** (61 tests). Writing them found **three security bugs**, all of which crashed instead of refusing: (1) a 7-day **refresh token authenticated as a 30-minute access token** — `authenticate_user` never checked `type`; (2) any password over **72 bytes crashed registration** with a 500 (bcrypt's limit, `max_length=128` let it through); (3) a **corrupt stored hash crashed login** (`Invalid salt`). Plus: the length rule was optional — `"aA1!"` passed strength validation. `SECURITY_FINDINGS.md` S7/S8 |
 | 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🟢 **DONE** | stdio client (230 lines) deleted with the UI; only the SSE client ships |
 | 18 | `except Exception: pass` in live paths — **60 handlers, not 32** (my first count was of the audit, not the code) | 19 files, mostly `prometheus_metrics.py` | 🟢 **DONE** | **59 converted to `degrade(what, exc)`; 1 left (a queue timeout, which is control flow, not a fallback).** The message names what is lost and the failure is logged at DEBUG. `modules/silent.py` + 10 tests. Coverage 81.81% → **81.94%** |
@@ -1638,3 +1638,96 @@ app.state.doc_followup in code: NONE
 
 Remaining `F401`s in `api.py` are deliberate re-exports (11 external files reach
 in by name) and are annotated as such. The one `F541` is pre-existing in HEAD.
+
+---
+
+# PART 26 — #15 step 3: who is asking? (the contextvar that must not be copied)
+
+## What moved
+
+`_guest_uid` + `_request_uid` and the three names they depend on
+(`GUEST_COOKIE`, `_GUEST_ID_RE`, `_guest_id_ctx`) → `modules/doc_identity.py`
+(76 lines). `api.py` 2,776 → **2,772 lines**; routes 39 → **39, identical**.
+
+Small by line count and the most delicate step so far, for one reason:
+
+## The difference between moving code and moving *state*
+
+Steps 1 and 2 moved functions. Functions are easy: each module gets its own
+copy of the code and a copy of a function is harmless, because a function has no
+identity beyond what it does.
+
+`_guest_id_ctx` is not a function. It is **one object that two modules must both
+touch**: `identity_middleware` in `api.py` *writes* it, `_request_uid` in the new
+module *reads* it. Copy it and you get two context variables — the middleware
+sets one, the reader reads the other. Result: **every anonymous visitor becomes a
+brand-new guest on every request**, so their documents, remembered facts and
+conversation history silently vanish between requests. Both halves of the code
+look perfectly correct. Each is used by exactly one side.
+
+So the fix is to move the *object* and import it back:
+
+```python
+from modules.doc_identity import _guest_id_ctx   # the same object, not a copy
+```
+
+## The bug I hit doing it — and why the suite was blind twice
+
+My deletion pass removed plain `Assign` nodes (`GUEST_COOKIE = ...`) but not the
+**annotated** one:
+
+```python
+_guest_id_ctx: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(...)
+```
+
+That is an `ast.AnnAssign`, a different node type. It survived the edit, sat
+*below* the import, and **overwrote it**. The identity check
+(`api._guest_id_ctx is doc_identity._guest_id_ctx`) returned `False` and the
+behavioural spot-check still passed — because both halves worked, just not
+together. Same shape of failure as step 2's split counter, arriving by a
+different route.
+
+> A deletion script is a filter, and a filter only removes what it was told to
+> look for. "I deleted the definitions" is a claim about a filter, not about a
+> file.
+
+## What the tests now do
+
+17 tests in `tests/test_doc_identity.py`. Three of them are about the *move*
+rather than the *logic*:
+
+- `test_api_and_module_share_the_same_context_variable` — `is`, not `==`.
+- `test_what_the_middleware_sets_is_what_request_uid_reads` — write via api's
+  name, read via the module's function.
+- `test_doc_identity_does_not_import_api` — a cycle would be invisible at runtime.
+
+Verified by reintroducing the duplicate contextvar: **3 tests fail** —
+two of mine **and the pre-existing `test_multitenancy.py::test_guests_are_isolated`**.
+Restored, all pass. This time the suite would have caught it on its own.
+
+The other 14 cover the identity rules, including the one that is a security
+property rather than a convention: a **forged guest cookie is not trusted**.
+`"admin"`, `"A"*32`, `"g"*32` and 31-hex all get a fresh random id, and two
+requests with the same bad cookie do not collide.
+
+## `_user_rag` deliberately stayed
+
+It reads `app.state.rag`. Moving it would mean the identity module importing the
+API module — a cycle. It stays where its only dependency lives, and a test
+asserts the boundary so nobody moves it later without noticing.
+
+## Proof
+
+| check | before | after |
+|---|---|---|
+| `api.py` | 2,776 lines | **2,772** |
+| `modules/doc_identity.py` | — | **76** (new) |
+| routes | 39 | **39, identical** |
+| tests | 912 passed | **929 passed**, 6 skipped |
+| bandit / flake8 (CI gate) | 0 / 0 | **0 / 0** |
+| `_guest_uid` / `_request_uid` AST | — | **identical to originals** |
+| shared contextvar | — | `api._guest_id_ctx is doc_identity._guest_id_ctx` → **True** |
+
+Behaviour verified end to end: valid cookie honoured; forged cookie rejected;
+middleware→reader round-trip; registered user beats cookie; two anonymous
+visitors never share an identity.
