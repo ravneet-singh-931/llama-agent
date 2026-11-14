@@ -71,6 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that step from the YAML with PyYAML and runs it through `bash -e -c`, the way CI does.
   Verified by reintroducing the quoting bug and watching it fail identically.
 
+  A third CI failure followed from the same root cause, this time in the guard itself:
+  `B607` because it called `bash` rather than `/bin/bash`. It was invisible locally
+  because the local bandit invocation excluded `./tests` while CI runs `bandit -r .`
+  with no exclusions. Verification now reproduces the CI commands exactly — same bandit
+  tree, same 11 `pip-audit` ignores, same `flake8 --select`.
+
 ### Changed (maintenance audit, 2026-11-13)
 
 - **Every silent exception handler now names what it loses. 59 handlers across 19 files.**

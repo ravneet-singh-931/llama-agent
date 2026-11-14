@@ -1177,6 +1177,31 @@ proved it, and it is what the new test does.
 Verified by sabotage: reintroducing the escaped-quote version fails the test with the
 same `NameError`, and restoring it passes.
 
+### Three CI failures, one cause: I verified with a different command than CI runs
+
+| # | failure | why local was green |
+|---|---|---|
+| 1 | `track_request` gone | no pytest test calls CI's inline snippet |
+| 2 | `NameError: name 'status' is not defined` | my throwaway check used single quotes; I committed double |
+| 3 | `B607 start_process_with_partial_path` | my local bandit used `-x ./tests`; **CI's `bandit -r .` has no exclusions** |
+
+All three are the same defect this audit is about: **a check that does not test the
+artifact.** Not "I forgot to run it" — I ran it every time, with a *nearby* command.
+
+The verification loop now reproduces the CI invocation exactly:
+
+```
+bandit -r . -f json --skip B101,B104,B105,B106,B107,B110          # no -x
+pip-audit -r requirements.txt --ignore-vuln ... (all 11)          # full list
+flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+```
+
+The published-CVE failure earlier in this series was also a false alarm from my side: I
+initially assumed the red Security Scan was an external advisory because `requirements.txt`
+had not changed. It was my own `B607`. **"It passed six minutes ago" is evidence, not a
+conclusion** — the actual difference was in the command, and running CI's exact command
+found it in one attempt.
+
 ## Wrong claim of mine, recorded
 
 I wrote **32** in the status board and repeated it. The real count is **60**. The
