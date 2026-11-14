@@ -16,13 +16,13 @@ interests you. You do not need to read them in order.
 | 2 | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | The five agents, the critic, the team orchestrator | 5 fixed, 4 open |
 | 3 | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | Tracing, metrics, the log module, alert rules | 9 |
 | 4 | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | Retrieval, reranking, caches, cross-user leaks | 6 |
-| 5 | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | Auth, CORS, containment, PII, fact input limits | 6 |
+| 5 | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | Auth, CORS, containment, PII, fact input limits, WebSocket tickets | 10 |
 | 6 | [`DARK_MODULES.md`](DARK_MODULES.md) | 23 dead public names, verified by reference not line count | 23 + addenda |
 | 7 | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 9 live-cluster checks against all 31 manifests | 9 |
 | 8 | [`CODE_QUALITY.md`](CODE_QUALITY.md) | Env vars, silent handlers, unused locals, the Streamlit deletion, the route split | 8 |
 | 9 | [`E2E_JOURNEY.md`](E2E_JOURNEY.md) | The first end-to-end test, and the four wrong assumptions it caught | 4 |
 | 10 | [`MIGRATIONS.md`](MIGRATIONS.md) | `create_all` cannot add a column; Alembic baseline; the logging bug | 3 |
-| 11 | [`COVERAGE_API.md`](COVERAGE_API.md) | What is actually missing in `api.py`, measured, and the ownership tests | 2 |
+| 11 | [`COVERAGE_API.md`](COVERAGE_API.md) | What is missing in `api.py`, measured; ownership, `/chat/stream`, WebSocket and startup tests | 5 |
 | 12 | [`CASE_STUDIES.md`](CASE_STUDIES.md) | The long-form write-ups of the bugs worth reading in full | 6 |
 | 13 | [`CI_FINDINGS.md`](CI_FINDINGS.md) | The pipeline: what it claimed, what it did, and the three times it broke | 8 |
 | 14 | [`MY_ERRORS.md`](MY_ERRORS.md) | **My own nine mistakes**, kept deliberately — the audit applies to the auditor | 9 |

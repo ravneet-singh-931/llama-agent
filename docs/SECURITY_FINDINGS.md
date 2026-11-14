@@ -421,3 +421,42 @@ exercised inside an imported module.
 No change to token lifetimes, algorithms or the secret-loading path. The
 production guard (`ENVIRONMENT=production` with a default secret raises at import)
 was already correct and is unchanged.
+
+---
+
+## 10. The WebSocket ticket: the two properties that make it safe, both untested
+
+**What the design does.** A browser cannot attach an `Authorization` header to a
+WebSocket handshake, so the credential has to go in the query string — where it
+lands in proxy logs, browser history and `Referer` headers. The mitigation is a
+short-lived, **single-use** ticket, issued over HTTPS by `POST /ws/ticket`, and
+the endpoint `/ws/{user_id}` that deliberately **ignores the path segment**.
+
+**What was wrong.** Nothing — the code was correct. **Both properties were
+untested**, which means either could be "simplified" away without a single red
+test:
+
+- Change `pop` to `get` and stop honouring `used` → the ticket becomes replayable,
+  i.e. a password with a 60-second life sitting in a log line.
+- Trust the path segment → **every user can connect as every other user**, and no
+  existing test would notice.
+
+Untested correctness is one edit away from being untested incorrectness.
+
+**Fix.** `tests/test_ws_ticket.py`, 9 tests. The identity test does not settle
+for "the connection opened": it wraps `handler.manager.connect` and asserts
+**which user id was bound**, with a random UUID in the path so a failure names
+the spoofed id.
+
+**Proof (sabotage).** Taking `user_id` from the path fails 1 test; making the
+ticket replayable fails 1; removing the expiry check fails 1; opening
+`/ws/ticket` to unauthenticated callers fails 1. An invalid or expired ticket
+closes with **1008** — fail closed, never a silent anonymous fallback.
+
+**The lesson.** For an auth boundary, "the happy path works" is not the property
+you care about. The properties are *replay* and *identity source*, and each needs
+its own assertion because each fails silently and independently.
+
+**Not covered.** The Redis path (`pop_json`, `GETDEL` + transactional fallback) is
+atomic by construction but is not exercised here — Redis is not configured in
+tests, so only the in-memory path runs.

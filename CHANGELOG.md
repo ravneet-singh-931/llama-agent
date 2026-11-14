@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-14) — WebSocket tickets and startup degradation, both untested at the security boundary
+
+- **The WebSocket ticket had no tests.** A browser cannot send an `Authorization`
+  header on a handshake, so the credential travels in the query string — where it
+  lands in proxy logs and `Referer` headers. The mitigation is a short-lived,
+  single-use ticket. Neither property was tested: changing `pop` to `get` makes
+  the ticket replayable, and trusting the `/ws/{user_id}` path segment would let
+  **any user connect as any other** — both silently, with every existing test
+  green. 9 tests in `tests/test_ws_ticket.py`; the identity test asserts **which
+  user id was bound**, not merely that a connection opened.
+- **Startup degradation had no tests.** The design promise is that a dead database
+  produces memory-only mode, not a boot loop. Verified for `init_db()` raising,
+  `get_db_manager()` raising, and a broken `OptimizedRAG` falling back to
+  `SimpleRAG` — including that startup does **not** print
+  `✅ Database initialized` after a failed init, since an operator trusts that line.
+- `api.py` **58.7% → 61.9%** (46% when the audit started).
+- **A test-isolation bug found this way:** `test_a_fresh_boot_serves_the_endpoints
+  _the_frontend_calls` passed alone and failed in the full suite with **429**. The
+  rate limiter is a process-wide singleton keyed on client IP and every request
+  shares the TestClient's address; it now resets the counters, as
+  `test_conversation_isolation.py` already had to. A test that passes alone and
+  fails together is not flaky — it is sharing state it did not declare.
+- Sabotage-verified: path-wins-over-ticket → 1 fail, replayable ticket → 1,
+  expiry ignored → 1, `/ws/ticket` unauthenticated → 1, uncaught `init_db` → all 5
+  startup tests, false success message → 1, no `SimpleRAG` fallback → 1.
+
 ### Fixed (2026-11-14) — the general chat route had no empty-answer guard, and /chat/stream had no tests
 
 - `/chat/stream` had **133 unexecuted lines** — the largest untested block in the

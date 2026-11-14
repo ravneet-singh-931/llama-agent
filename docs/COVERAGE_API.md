@@ -144,6 +144,68 @@ The lesson is the one this project keeps relearning: **coverage output is not
 evidence that a line did not run.** A test that fails when the line is touched is.
 Where the two disagree, the failing test wins.
 
+## WebSocket tickets — a URL-borne credential, now tested
+
+`tests/test_ws_ticket.py`, 9 tests. A browser cannot send an `Authorization`
+header on a WebSocket handshake, so the token has to travel in the query string —
+where it lands in proxy logs, browser history and `Referer` headers. The design
+avoids that with a short-lived, single-use ticket.
+
+Two properties make it safe, and **neither was tested**:
+
+| property | why it matters | test |
+|---|---|---|
+| a ticket works **once** | otherwise it is a password with a 60 s life sitting in a log | `test_a_ticket_can_be_consumed_exactly_once` |
+| identity comes from the **ticket**, not the URL path | `/ws/{user_id}` is deliberately ignored; trusting it lets anyone connect as anyone | `test_the_websocket_takes_its_identity_from_the_ticket_not_the_path` |
+
+The identity test does not settle for "the connection opened". It wraps
+`handler.manager.connect` and asserts **which user id was bound** — the path
+segment is a random UUID, so if the path ever wins, the assertion names it.
+
+Sabotages, each reverted:
+
+| sabotage | result |
+|---|---|
+| `user_id` taken from the path instead of the ticket | 1 fails |
+| ticket made replayable (`get` instead of `pop`, `used` ignored) | 1 fails |
+| expiry check removed | 1 fails |
+| `/ws/ticket` opened to unauthenticated callers | 1 fails |
+
+Also verified: an invalid or expired ticket closes with **1008** (fail closed,
+never a silent anonymous fallback), the store purges expired entries, and tickets
+are unique per call and bound to the caller.
+
+The Redis path is atomic by construction — `pop_json` uses `GETDEL` with a
+transactional fallback — but it is **not exercised here**: Redis is not configured
+in tests, so the in-memory path is the one under test.
+
+## Startup degradation — the promise that the app still boots
+
+`tests/test_startup_degradation.py`, 5 tests. The design promise is that a dead
+database produces **memory-only mode, not a boot loop**, so an operator can still
+reach `/health` and read what is wrong. `test_boot_without_key.py` covered only
+the missing-LLM-key case.
+
+Verified:
+
+* startup survives `init_db()` raising, and `get_db_manager()` itself raising
+* the failure does **not** print `✅ Database initialized` — an operator trusts
+  that line, so printing it after a failed init is the same defect as the CORS
+  test that printed a checkmark
+* the app is *usable* in the degraded state, not merely running: the endpoints the
+  frontend calls answer instead of crashing
+* `USE_OPTIMIZED_RAG=true` with a broken vector store falls back to `SimpleRAG`
+
+Sabotages: uncaught `init_db` failure → all 5 fail; printing the success line
+after a failure → 1 fails; removing the `SimpleRAG` fallback → 1 fails.
+
+**A test-isolation bug found this way.** `test_a_fresh_boot_serves_the_endpoints_
+the_frontend_calls` passed alone and failed in the full suite with **429**. The
+rate limiter is a process-wide singleton keyed on client IP, and every request in
+the suite shares the TestClient's address. It now resets the counters — the same
+fix `tests/test_conversation_isolation.py` needed. A test that passes alone and
+fails together is not flaky; it is sharing state it did not declare.
+
 ## What is still untested, in priority order
 
 1. **The agent and team routes (98 lines).** The budget refusal, command parsing
@@ -152,8 +214,9 @@ Where the two disagree, the failing test wins.
 2. **`/chat` (the non-streaming route) command branches (76 lines).** `remember` / `recall` / `show facts`
    parsing. `remember` and `recall` are covered indirectly by the facts tests;
    the failure modes (empty key, oversized value, unknown key) are not.
-3. **`lifespan` (37 lines).** Startup wiring under failure: database
-   unreachable, re-index of the uploads directory failing.
+3. **`lifespan` (29 lines).** The database-down and OptimizedRAG-fallback paths
+   are now covered; what remains is the uploads re-index loop (lines 565–584) and
+   the baseline alert sweep.
 4. **WebSocket ticket lifecycle (28 lines).** Issue → consume → replay. A ticket
    that can be consumed twice is an auth hole, and nothing checks it.
 5. **Error branches (106 lines).** Lowest value of the five. These mostly
