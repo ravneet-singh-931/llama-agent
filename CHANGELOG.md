@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-14) — the first end-to-end test: does signing up and asking work?
+
+- `tests/test_e2e_journey.py` (7 tests): register → log in → `/auth/me` →
+  upload a real file → list it → ask about it → chat → log out, against the real
+  FastAPI app with its real lifespan, middleware, cookies, auth and per-owner
+  document scoping. Only the LLM is faked, at its narrowest point.
+- **Nothing tested this before.** Every part was individually proven; the
+  assembly never was. `api.py` route coverage **46% → 51%**.
+- The test found four wrong assumptions while being written (register needs
+  `email`; `/auth/me` nests the user; three separate `get_db_manager` bindings;
+  and **`register` also sets cookies, so a register-then-login test was passing
+  on registration's cookies** — login could have been entirely broken). The
+  guard test now clears cookies between the steps and fails if login stops
+  setting them.
+- It also caused a **test-pollution bug that was fixed**: booting the lifespan
+  installs a global OTel TracerProvider, which silently broke
+  `test_provider_client`'s span assertion in the full suite while passing in
+  isolation. `phoenix.otel.register` is now stubbed in the fixture. Details in
+  `docs/E2E_JOURNEY.md`.
+
 ### Changed (maintenance audit #15, step 2) — `api.py` split, document cluster
 
 - **658 lines left `api.py`**: 23 functions and 19 constants covering document
