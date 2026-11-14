@@ -189,44 +189,36 @@ def _mcp_record_success() -> None:
     _MCP_FAILURES = 0
 
 
-# ============ DSA utilities: heap top-k + bounded LRU cache ============
+# ============ Re-exported helpers (moved to modules/api_utils.py) ============
+#
+# These live in modules/api_utils.py so a future route module can import them
+# without importing `api` (which would be a cycle). They are re-exported here
+# because 11 files — tests, evals/rag_eval.py, modules/routing.py — reach them
+# as `from api import X` / `api.X`. The private aliases preserve the old names
+# exactly; nothing outside this file has to change.
+
+from modules.api_utils import (          # noqa: E402
+    aiter_in_thread,
+    chunk_score,
+    escape_sse,
+    heap_top_k,
+    is_db_unavailable,
+)
+
+# Old private names, kept as aliases so existing imports keep working.
+from modules.api_utils import (          # noqa: E402,F401
+    _STREAM_END,
+    StreamFailure as _StreamFailure,
+)
+
+_aiter_in_thread = aiter_in_thread
+_is_db_unavailable = is_db_unavailable
+
+# ============ DSA utilities: bounded LRU cache ============
 
 
-def heap_top_k(items, key=lambda x: x, k: int = 5):
-    """Return the k items with the largest ``key`` value in O(n log k).
-
-    Uses a min-heap of size k, so it scales far better than a full sort when
-    n >> k (e.g. ranking hundreds of retrieved chunks down to the top few).
-    """
-    if k <= 0:
-        return []
-    heap = []
-    # (value, -seq, item): the sequence number breaks ties so the items
-    # themselves (often dicts, which are not orderable) are never compared,
-    # and among equal scores the EARLIER item wins (stable, deterministic).
-    for seq, it in enumerate(items):
-        v = key(it)
-        entry = (v, -seq, it)
-        if len(heap) < k:
-            heapq.heappush(heap, entry)
-        elif (v, -seq) > heap[0][:2]:
-            heapq.heapreplace(heap, entry)
-    # Min-heap -> return largest-first.
-    heap.sort(key=lambda e: (e[0], e[1]), reverse=True)
-    return [it for _, _, it in heap]
 
 
-def chunk_score(chunk: Dict[str, Any]) -> float:
-    """Best available relevance signal for a retrieved chunk.
-
-    SimpleRAG emits ``relevance_score``; OptimizedRAG emits ``rerank_score``
-    (cross-encoder), ``similarity`` (vector) and ``bm25_score``.
-    """
-    for field in ("relevance_score", "rerank_score", "similarity", "bm25_score"):
-        val = chunk.get(field)
-        if isinstance(val, (int, float)):
-            return float(val)
-    return 0.0
 
 
 class BoundedLRUCache:
@@ -882,22 +874,6 @@ async def health_check():
 # ============ AUTH ENDPOINTS ============
 
 
-def _is_db_unavailable(e: BaseException) -> bool:
-    """True for "can't reach/auth to the database" errors (DNS, refused,
-    timeout, bad password) as opposed to bugs. Walks the cause chain because
-    SQLAlchemy wraps the driver error."""
-    seen = 0
-    while e is not None and seen < 5:
-        name = type(e).__name__
-        if isinstance(e, (OSError, ConnectionError, asyncio.TimeoutError)) or name in {
-            "OperationalError", "InterfaceError", "InvalidPasswordError",
-            "InvalidAuthorizationSpecificationError", "CannotConnectNowError",
-            "ConnectionDoesNotExistError", "TooManyConnectionsError",
-        }:
-            return True
-        e = e.__cause__ or e.__context__
-        seen += 1
-    return False
 
 
 def _auth_error(action: str, e: Exception) -> HTTPException:
@@ -2833,74 +2809,12 @@ def _redacted_stream(chunks):
         yield tail
 
 
-def escape_sse(text: str) -> str:
-    """Escape text for SSE.
-
-    SSE data lines must not contain raw CR/LF (they would break the
-    line framing). Escape both so multi-line tokens stream safely, and
-    escape backslashes first so a literal backslash-n in model output
-    (e.g. ``print("a\\nb")`` in code) is not turned into a real newline.
-    The Next.js client reverses this in one pass (frontend/src/lib/api.ts).
-    """
-    return (text.replace("\\", "\\\\")
-            .replace("\r", "\\r").replace("\n", "\\n"))
 
 
-class _StreamFailure:
-    __slots__ = ("exc",)
-
-    def __init__(self, exc: BaseException):
-        self.exc = exc
 
 
-_STREAM_END = object()
 
 
-async def _aiter_in_thread(make_iter):
-    """Consume a *blocking* iterator (Groq token streams, agent tool loops)
-    on a worker thread and yield its items asynchronously.
-
-    Iterating a sync generator directly inside an async SSE generator blocks
-    the event loop for every network read, stalling all other users' requests
-    and streams. The worker carries the caller's contextvars (tenant/owner).
-    If the consumer stops early (client disconnect, timeout) the worker is
-    told to stop at the next item; the queue is unbounded so it never blocks.
-    """
-    import threading
-
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue = asyncio.Queue()
-    stop = threading.Event()
-    ctx = contextvars.copy_context()
-
-    def _put(item):
-        try:
-            loop.call_soon_threadsafe(queue.put_nowait, item)
-        except RuntimeError:  # loop closed
-            stop.set()
-
-    def _worker():
-        try:
-            for item in make_iter():
-                if stop.is_set():
-                    break
-                _put(item)
-        except BaseException as e:  # surfaced to the consumer
-            _put(_StreamFailure(e))
-        finally:
-            _put(_STREAM_END)
-
-    loop.run_in_executor(None, ctx.run, _worker)
-    try:
-        while True:
-            item = await queue.get()
-            if item is _STREAM_END:
-                return
-            if isinstance(item, _StreamFailure):
-                raise item.exc
-            yield item
-    finally:
-        stop.set()
 
 
 # ============ FACTS ENDPOINTS ============
