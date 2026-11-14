@@ -32,10 +32,34 @@ proves the fix.
 | 6 | **Dark modules** (4,629 lines, 12 files) | [`DARK_MODULES.md`](DARK_MODULES.md) | **23 dead names** | ✅ **DONE** — premise was wrong: all 11 are imported by live code |
 | 7 | **k8s / Docker** (31 manifests, 14 services) | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | **8 checks** | ✅ **DONE** — re-audited 2026-11-13, which caught one wrong claim |
 | 8 | **Publishing** (posts 1–4 written) | `docs/posts/` | 4 posts | ⏸ **UNPUBLISHED** — the user's decision, not work outstanding |
+| 9 | **The audit itself** (13 parts) | [`AUDIT_OVERVIEW.md`](AUDIT_OVERVIEW.md) | 13 parts | ✅ **DONE** — see below |
+| 10 | **Code quality** (env vars, silent handlers, dead files) | [`CODE_QUALITY.md`](CODE_QUALITY.md) | 8 | ✅ **DONE** |
+| 11 | **CI** (what it claimed vs what it ran) | [`CI_FINDINGS.md`](CI_FINDINGS.md) | 8 | ✅ **DONE** |
+| 12 | **Database migrations** | [`MIGRATIONS.md`](MIGRATIONS.md) | 3 | ✅ **DONE** — verified on SQLite only, stated in the doc |
+| 13 | **End-to-end test** | [`E2E_JOURNEY.md`](E2E_JOURNEY.md) | 4 | ✅ **DONE** |
+| 14 | **`api.py` coverage** | [`COVERAGE_API.md`](COVERAGE_API.md) | 2 | 🟡 **PARTIAL** — 55.5%, remaining gap measured |
+| 15 | **Frontend tests** | — | — | ❌ **NOT STARTED — 0 tests across 34 `.tsx` files** |
 
 Legend: ✅ done · 🟡 partial · ❌ not started · ⏸ waiting on a person
 
-Legend: ✅ done · 🟡 partial · ❌ not started
+### Rows 9–15, added after the original seven parts
+
+The seven original parts were finished when this file was written. Everything
+above row 9 happened **afterwards**, and the additions are recorded separately so
+the original claims are not quietly rewritten:
+
+- **Row 9, the audit.** Thirteen parts covering verification bugs, coverage,
+  over-engineering, wiring, correctness, dead code, feature flags, the route
+  split, and my own errors. `AUDIT_OVERVIEW.md` is the single page.
+- **Rows 10–13** each have a document that did not exist before: the silent
+  exception handlers, the CI job that installed a different dependency set, the
+  `create_all` trap that cannot add a column, and the first end-to-end test.
+- **Row 14 is honest about being incomplete.** `api.py` is 55.5%. The gap is
+  measured (588 lines, only 18% of them error handling), and the untested parts
+  are named in priority order at the end of `COVERAGE_API.md`.
+- **Row 15 is the largest gap in the repository and is deferred by decision, not
+  by oversight.** 34 `.tsx` files, zero tests, and a CI job that typechecks and
+  builds them but verifies no behaviour.
 
 ---
 

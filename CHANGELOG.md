@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs (2026-11-14) — the audit had no entry point, and four of its thirteen parts had no document
+
+- **`docs/README.md`** — an index for all 15 findings documents. There were 13 documents
+  and nothing that said which to read, in what order, or why.
+- **`docs/AUDIT_OVERVIEW.md`** — the whole 13-part audit on one page, in order, with a
+  verdict per part and the numbers attached. The original working record
+  (`AUDIT.local.md`, 630 lines, 13 parts) was **deleted and never replaced in `docs/`**,
+  so the audit trail for parts 1–13 existed nowhere in the repository.
+- **`docs/CODE_QUALITY.md`** — parts 3, 4, 5 and 8 had no document at all: over-engineering,
+  wiring, silent exception handlers, and the two feature-flag systems.
+- **`docs/CI_FINDINGS.md`** — eight pipeline findings. The job that installed a different
+  dependency set than the image, the test that asserted nothing, the smoke test calling a
+  deleted method, and the deploy gate that was **deliberately** left skipped.
+- **`docs/MY_ERRORS.md`** — my own nine mistakes, kept on purpose. Calling a working Docker
+  job decorative; repeating "mostly error branches" when it was 18%; sabotaging the first
+  of five identical lines and reading the pass as a weak test.
+- `docs/ROADMAP.md` gained rows 9–15 and no longer claims every part is done.
+- Three claims in the new documents were **wrong on first write and corrected by checking
+  them**: a deleted test cited as if it existed, `api.py:457` (actual: `:476`), and
+  103 lines (actual: 104). Test names cited are now verified against the files, and
+  `docs/` has 0 broken links.
+- README: the test count said **839**; the measured number is **1020**.
+
 ### Added (2026-11-14) — conversation CRUD was untested, and that is where a silent data leak would live
 
 - `create_conversation`, `get_conversation`, `delete_conversation`,

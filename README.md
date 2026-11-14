@@ -69,6 +69,12 @@ on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 | **Cost** | $0.24 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (row 22) |
 | **Bugs found and fixed** | 44 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
 
+> **Looking for the full audit?** The seven parts below are the original work. Everything
+> after it — the code-quality audit, the CI findings, the database migrations, the
+> end-to-end test, the `api.py` coverage, and my own nine mistakes — is indexed in
+> **[`docs/README.md`](docs/README.md)**, with a one-page summary in
+> **[`docs/AUDIT_OVERVIEW.md`](docs/AUDIT_OVERVIEW.md)**.
+
 ### The seven parts, and what backs each one
 
 Every part of this project has its own findings document, and every claim in it traces to
@@ -87,7 +93,9 @@ proof type, the row does not belong here.
 | 7 | **The cluster** | [`KUBERNETES_CHECKS.md`](docs/KUBERNETES_CHECKS.md) | 9 checks | live-cluster commands; re-audited against all 31 manifests, which caught one wrong claim; check 8 boots the app with no key |
 
 **What that adds up to:** 44 fixed bugs, 23 dead public names, 7 findings documents, and
-**839 tests**. The number that matters is not any one of those — it is that each of them
+**1020 tests** (was 839 when this table was written; the additions came with the audit in
+[`docs/AUDIT_OVERVIEW.md`](docs/AUDIT_OVERVIEW.md)). The number that matters is not any one
+of those — it is that each of them
 was **checked twice**, once when it was found and once when the document was re-read
 against the artefacts. The cluster re-audit above exists because that second pass found a
 sentence that had been wrong for weeks.
