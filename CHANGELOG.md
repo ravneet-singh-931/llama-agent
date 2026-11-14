@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-14) — conversation CRUD was untested, and that is where a silent data leak would live
+
+- `create_conversation`, `get_conversation`, `delete_conversation`,
+  `list_conversations`, `get_memory`, `clear_memory`, `get_facts` and
+  `delete_fact` had **no tests at all**. 10 new tests in
+  `tests/test_conversation_isolation.py` boot the real app and check that one
+  user cannot read, delete or list another user's conversations, memory or facts
+  — and that an unknown id is a 404, not a 500.
+- **Corrected a claim I had been repeating:** the remaining `api.py` gap is
+  *not* "mostly error branches". Measured, only **18% (106/588)** of the missing
+  lines are inside `except` blocks; the other 482 were untested features. Both
+  numbers are in `docs/COVERAGE_API.md`.
+- `api.py` **51.1% → 55.5%**.
+- The `journey` fixture moved from `tests/test_e2e_journey.py` into
+  `tests/conftest.py`, so other files can boot the same real application instead
+  of hand-building a fake one.
+- Verified by sabotage, not by assertion: dropping the owner scope in
+  `get_conversation` fails 4 tests, removing the inner ownership check in
+  `memory.delete_conversation` fails 1, removing `except HTTPException: raise`
+  fails 2, and un-scoping `/facts` fails 1.
+- Two sabotages initially "passed" and both were instructive. `delete_conversation`
+  re-checks ownership internally, so there are **two** layers and the inner one
+  is the load-bearing one. And `replace(old, new, 1)` patched the **first** of
+  five identical `get_all_facts` lines — a different handler — so the code was
+  never changed. A sabotage that does not change the code proves nothing.
+
 ### Added (2026-11-14) — database migrations, and a schema trap that would have bitten on a real deploy
 
 - **`create_all` was the only schema tool, and it cannot add a column.** It
