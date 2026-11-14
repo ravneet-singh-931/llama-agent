@@ -178,3 +178,59 @@ Which is the argument for the method the whole audit ended up using: **break it
 and watch it fail.** Reading code, re-reading my own notes, and reasoning from
 configuration all produced confident, wrong answers above. Only sabotage, or
 counting, or reading the actual run, produced the right one.
+
+---
+
+## 10. I patched a name that did not exist, six times, and called it a test
+
+**What I did.** Wrote six tests for the startup uploads re-index loop, each
+patching `api.SimpleRAG`:
+
+```python
+import api as _api
+monkeypatch.setattr(_api, "SimpleRAG", SpyRAG, raising=False)
+```
+
+`raising=False` meant no error if the attribute was absent — and it was absent.
+The lifespan does its import **inside the function**:
+
+```python
+async def lifespan(app):
+    ...
+    from modules.rag import SimpleRAG          # api.py:504
+    app.state.rag = SimpleRAG()
+```
+
+So the name lives in `modules.rag`, not on `api`. All six tests patched nothing,
+ran the real `SimpleRAG`, re-indexed nothing, and failed — for the wrong reason.
+Fixing the target to `modules.rag.SimpleRAG` made all six pass.
+
+**The rule.** `raising=False` turns a patch that matches nothing into a silent
+no-op. When a patch is the setup of a test, assert the target exists first —
+otherwise "the test fails" and "the patch missed" look identical.
+
+**The same family as three earlier entries** (#3 patched the first of five
+identical lines, #6 asserted on a fixture that already satisfied itself, and the
+sabotage that produced an `IndentationError` and so tested nothing). In every
+case **a check ran against something other than what it claimed to check**, and
+the failure looked like a result.
+
+## 11. I "confirmed" a bug that was dead code
+
+**What I did.** Found `streamed += _tail` in the agent branch of `/chat/stream`
+and reported it as a live `UnboundLocalError` — `streamed` is assigned only in the
+team branch. The static reasoning was correct: the name is a team-branch local.
+
+**What was true.** The line is **unreachable**. It sits behind a second
+`_redactor.flush()`, and `flush()` swaps the buffer out and returns it, so the
+second call is always empty. Verified by flushing twice after feeding a card
+number: first `'4111 1111'`, then `''`.
+
+**How I caught it.** I wrote the test that was supposed to prove the crash, and it
+passed. Instead of deleting the test I checked *why* — and the "why" was that the
+branch cannot run.
+
+**The rule.** "This variable is undefined on this path" is a hypothesis about
+reachability, and reachability has to be measured. Confirming a bug requires
+making it happen, not showing that it could.
+

@@ -55,11 +55,12 @@ checked, and the README then cites it as proof.
 could fall and stay green while the build passed.
 
 **Fixed so far.** `--cov-fail-under=74` in CI, with the floor set 4 points below
-the measured value as a ratchet. `api.py` went **46% → 51% → 55.5% → 58.7% →
-61.9%**, and the order matters: the last three steps were conversations,
-`/chat/stream`, and the WebSocket/startup paths.
+the measured value as a ratchet. `api.py` went
+**46% → 51% → 55.5% → 58.7% → 61.9% → 64.4%**. The order matters more than the
+number: conversations, `/chat/stream`, WebSocket/startup, then the agent and
+`@team` streaming bodies and the uploads re-index.
 
-**Still open.** `api.py` is 61.9%. The remaining gap is measured, not guessed —
+**Still open.** `api.py` is 64.4%. The remaining gap is measured, not guessed —
 see `COVERAGE_API.md`, including the correction that it is **not** "mostly error
 branches" (only 18% is).
 
@@ -238,8 +239,8 @@ See [`ROADMAP.md`](ROADMAP.md). Current order:
 
 | | |
 |---|---|
-| Tests | **1048 passed, 6 skipped** |
-| `api.py` coverage | **61.9%** (was 46% when this audit started) |
+| Tests | **1070 passed, 6 skipped** |
+| `api.py` coverage | **64.4%** (was 46% when this audit started) |
 | Repo coverage (CI scope `--cov=.`) | **85%**, gate at 74 |
 | Test files | 51 |
 | Frontend tests | **0 across 34 `.tsx` files** |

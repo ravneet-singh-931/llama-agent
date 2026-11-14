@@ -206,17 +206,103 @@ the suite shares the TestClient's address. It now resets the counters — the sa
 fix `tests/test_conversation_isolation.py` needed. A test that passes alone and
 fails together is not flaky; it is sharing state it did not declare.
 
+## The `agent` and `@team` streaming bodies
+
+`tests/test_agent_stream_branch.py` (9 tests) and `tests/test_team_stream_branch.py`
+(7 tests). `api.py` **61.9% → 64.4%**.
+
+`test_chat_slo_metrics.py` already posted to both routes — but only to assert that
+the **counters** moved. That is a test of the metric, not of the branch: the whole
+body ran unexecuted. What is now asserted:
+
+| behaviour | why it matters if it breaks |
+|---|---|
+| answer tokens stream, `[DONE]` exactly once | the client hangs or ends twice |
+| tool/reasoning events go to the **reasoning view**, never into the answer text | a user reads tool output as if it were the reply |
+| the per-agent `### Name` header is emitted for each team step | a team answer loses all structure |
+| the `final` text is what gets persisted | the sidebar shows a different answer from the one on screen |
+| only agents that emitted `agent_start` are recorded as used | usage metrics inflated for agents that never ran |
+| the `@team` / `@Coder Agent` prefix is stripped from the task the model sees | the model is asked to act on the routing directive |
+| the empty-answer guard fires on **both** routes | an empty bubble with no explanation |
+| a failing agent/team emits a readable message and still terminates | a hung stream |
+| the critic's note is reasoning, not answer text, and is **skipped** for failure notices | a critique of an error message shown as the reply |
+| a failing critic does not lose the answer | an add-on takes down the main path |
+
+Sabotages, each reverted and each caught:
+
+| sabotage | tests that failed |
+|---|---|
+| team: `### header` not sent | 1 |
+| team: final answer persisted as `""` | 1 |
+| team: every configured agent recorded as used | 1 |
+| team: empty-answer guard removed | 1 |
+| agent: tool events glued into the answer | 1 |
+| agent: failure `except` removed | 1 |
+| agent: empty-answer guard removed | 1 |
+| agent: critic reviews failure notices | 1 |
+| agent: critic note appended to the answer | 1 |
+
+### Finding: dead code, measured rather than assumed
+
+The agent branch calls `_redactor.flush()` **twice** (lines 2065 and 2087), and
+the second one does `streamed += _tail` — but `streamed` is only ever assigned
+inside the **team** branch (line 1971), which never runs for the same request.
+
+Read on its own, that looks like a live `UnboundLocalError` waiting to happen.
+It is not: `StreamRedactor.flush()` swaps the buffer out and returns it
+(`modules/pii.py:128`), so the second call is **always** empty. Verified by
+feeding a card number and flushing twice:
+
+```
+flush() after a normal reply   -> '4111 1111'
+flush() immediately again      -> ''            (always)
+```
+
+So the branch is unreachable, not a crash. Recorded by
+`test_the_repeated_flush_branch_is_unreachable_dead_code` rather than deleted —
+deleting it is a code change, and the finding has to be visible first.
+
+**This is the second time in this audit that a line looked like a bug and was
+not.** The first was lines 2144–2145, which coverage reported as missing while
+they demonstrably ran. Both were settled by making the line *do something
+observable* and checking, not by reading it harder.
+
+## Uploads re-index at startup
+
+`tests/test_uploads_reindex.py`, 6 tests. The loop at `api.py:559-584` had never
+executed. It runs on **every boot**, and it decides whether a restart keeps or
+loses a user's documents.
+
+| behaviour | why it matters |
+|---|---|
+| an owner's files are re-added when missing from the vector store | a restart silently empties a user's document knowledge |
+| files already indexed are **skipped** | every restart re-embeds and re-summarises the whole library, at cost |
+| an unowned legacy file is reported and **never indexed** | it would land in a namespace nobody owns |
+| one unreadable file does not stop the walk | one corrupt document would lose everyone's library, every boot |
+| a missing `uploads/` directory is not an error | a fresh clone has none |
+| a subdirectory is not passed to `add_document()` | a directory is not a document |
+
+Sabotages: skipping `has_document` → 1 fails; indexing the orphan → 1; swallowing
+per-file errors → 1; treating a directory as a file → 1.
+
+**A trap worth recording.** The lifespan does `from modules.rag import SimpleRAG`
+*inside the function*, so `monkeypatch.setattr(api, "SimpleRAG", ...)` does
+nothing at all — it patches a name that does not exist on `api`. My first version
+of all six tests did exactly that and silently tested the real `SimpleRAG`
+(nothing was re-indexed, so every test failed for the wrong reason). The patch has
+to target `modules.rag.SimpleRAG`. **A patch that matches nothing is not a patch**;
+assert the target exists before relying on it.
+
 ## What is still untested, in priority order
 
-1. **The agent and team routes (98 lines).** The budget refusal, command parsing
-   and the general path are now covered; the `@team` and explicit-agent streaming
-   bodies are covered only for their metrics, not their behaviour.
+1. **`/chat` — the non-streaming route (67 missing lines).** The streaming twin is
+   now well covered; this one is not, and it shares the same command parsing.
 2. **`/chat` (the non-streaming route) command branches (76 lines).** `remember` / `recall` / `show facts`
    parsing. `remember` and `recall` are covered indirectly by the facts tests;
    the failure modes (empty key, oversized value, unknown key) are not.
-3. **`lifespan` (29 lines).** The database-down and OptimizedRAG-fallback paths
-   are now covered; what remains is the uploads re-index loop (lines 565–584) and
-   the baseline alert sweep.
+3. **`lifespan` (13 missing lines).** Database-down, OptimizedRAG fallback and the
+   uploads re-index are covered; what remains is the baseline alert sweep and the
+   success-path prints.
 4. **WebSocket ticket lifecycle (28 lines).** Issue → consume → replay. A ticket
    that can be consumed twice is an auth hole, and nothing checks it.
 5. **Error branches (106 lines).** Lowest value of the five. These mostly

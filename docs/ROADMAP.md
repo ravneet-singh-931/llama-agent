@@ -37,7 +37,7 @@ proves the fix.
 | 11 | **CI** (what it claimed vs what it ran) | [`CI_FINDINGS.md`](CI_FINDINGS.md) | 8 | ✅ **DONE** |
 | 12 | **Database migrations** | [`MIGRATIONS.md`](MIGRATIONS.md) | 3 | ✅ **DONE** — verified on SQLite only, stated in the doc |
 | 13 | **End-to-end test** | [`E2E_JOURNEY.md`](E2E_JOURNEY.md) | 4 | ✅ **DONE** |
-| 14 | **`api.py` coverage** | [`COVERAGE_API.md`](COVERAGE_API.md) | 5 | 🟡 **PARTIAL** — 61.9%, remaining gap measured |
+| 14 | **`api.py` coverage** | [`COVERAGE_API.md`](COVERAGE_API.md) | 8 | 🟡 **PARTIAL** — 64.4%, remaining gap measured line by line |
 | 15 | **Frontend tests** | — | — | ❌ **NOT STARTED — 0 tests across 34 `.tsx` files** |
 
 Legend: ✅ done · 🟡 partial · ❌ not started · ⏸ waiting on a person

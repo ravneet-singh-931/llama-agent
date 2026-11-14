@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-14) — the agent and @team streaming bodies, and the startup re-index
+
+- `test_chat_slo_metrics.py` posted to `/chat/stream` with `agent=` and `@team`, but
+  only asserted that the **counters** moved. The whole streaming body ran
+  unexecuted. 16 tests now cover it (`tests/test_agent_stream_branch.py`,
+  `tests/test_team_stream_branch.py`): tool events routed to the reasoning view
+  instead of into the answer, the `### Name` team headers, which text is actually
+  persisted, that only agents which ran are recorded as used, the `@team` prefix
+  stripped from the task, the empty-answer guard on both routes, the failure paths,
+  and the critic note being reasoning rather than reply text.
+- The startup **uploads re-index loop** had never executed. 6 tests
+  (`tests/test_uploads_reindex.py`): files re-added when missing, already-indexed
+  files skipped (otherwise every restart re-embeds the whole library at cost), an
+  unowned legacy file reported and never indexed, one unreadable file not aborting
+  the walk, a missing directory tolerated, and a subdirectory not passed to
+  `add_document()`.
+- `api.py` **61.9% → 64.4%** (46% when the audit started).
+- **Dead code measured, not assumed:** the agent branch's second
+  `_redactor.flush()` looks like an `UnboundLocalError` (`streamed` is a team-branch
+  local) but is unreachable — `flush()` empties the buffer, verified by flushing
+  twice. Recorded by a test rather than deleted.
+- **Two of my own test errors, caught by the sabotage step:** `@coder x` is not the
+  routing syntax (`@Coder Agent x` is), and patching `api.SimpleRAG` patches a name
+  that does not exist because the lifespan imports it *inside* the function — the
+  patch must target `modules.rag.SimpleRAG`. The first version of all six re-index
+  tests silently tested the real class.
+- Sabotage-verified: 13 separate sabotage runs, each caught by a named test.
+
 ### Added (2026-11-14) — WebSocket tickets and startup degradation, both untested at the security boundary
 
 - **The WebSocket ticket had no tests.** A browser cannot send an `Authorization`
