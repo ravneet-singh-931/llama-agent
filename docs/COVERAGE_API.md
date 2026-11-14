@@ -87,12 +87,69 @@ passed an unchanged program.
 
 Patching line 2215 by line number made the test fail immediately.
 
+## `/chat/stream` — the biggest gap, now covered
+
+`tests/test_chat_stream_branches.py`, 14 tests, driving the **real app** with only
+`run_agent_stream` faked. `api.py` **55.5% → 58.7%**; unexecuted lines inside
+`chat_stream` went from 133 to 98.
+
+Covered for the first time: the SSE contract (`[DONE]` exactly once, the
+`text/event-stream` and `X-Accel-Buffering` headers), `remember`/`recall`/`show
+facts` and their usage messages, that a local command never reaches the model,
+the budget refusal, `STREAM_MAX_DURATION`, the empty-answer guard, and the PII
+redactor surviving a token boundary inside a card number.
+
+Sabotages, each reverted:
+
+| sabotage | tests that failed |
+|---|---|
+| general route's `[DONE]` removed | 2 |
+| general empty-answer guard removed | 1 |
+| budget refusal bypassed (`if False`) | 1 |
+| general duration cap disabled | 1 |
+| `_redactor.feed(token)` replaced with the raw token | 1 |
+
+### Finding: the general route had no empty-answer guard
+
+The team route and the agent route both guard against an empty model answer
+(`if not final_text`, `if not full.strip()`) — measured at two sites. The general
+route, the one a plain "hello" takes, had none.
+
+Consequence: a model that streams nothing produces a stream with **no answer text
+at all** and a `[DONE]`. The browser renders an empty bubble with no explanation.
+It also mirrors an empty assistant message into the conversation history.
+
+Fixed by applying the same guard and message the other two routes use, so
+`chat_outcome()` classifies it identically. The test fails on the old code and
+passes on the new.
+
+### Finding, recorded not fixed: no error handling around the model call
+
+When `run_agent_stream` raises, the client receives the two preamble frames
+(`config`, `reasoning`) and then **nothing** — no error event, no `[DONE]`. The
+agent route has an `except` that emits a readable message and still terminates.
+
+`test_an_exception_mid_stream_is_an_open_finding_NOT_a_guarantee` records this.
+Its assertions are written to **fail when the gap is fixed**, so the fix cannot be
+made without updating the record.
+
+### A measurement mistake worth recording
+
+While measuring this I reported that lines 2144–2145 never execute, because the
+coverage JSON listed them as missing while line 2143 was covered. That was wrong,
+and the way it was caught is the point: **replacing line 2145 with a `raise`
+broke the test**, which is only possible if the line runs.
+
+The lesson is the one this project keeps relearning: **coverage output is not
+evidence that a line did not run.** A test that fails when the line is touched is.
+Where the two disagree, the failing test wins.
+
 ## What is still untested, in priority order
 
-1. **`/chat/stream` (133 lines).** The main streaming path: agent-team fan-out,
-   token-budget refusal, `STREAM_MAX_DURATION` timeout, streamed error handling.
-   No test drives it with a fake agent.
-2. **`/chat` command branches (76 lines).** `remember` / `recall` / `show facts`
+1. **The agent and team routes (98 lines).** The budget refusal, command parsing
+   and the general path are now covered; the `@team` and explicit-agent streaming
+   bodies are covered only for their metrics, not their behaviour.
+2. **`/chat` (the non-streaming route) command branches (76 lines).** `remember` / `recall` / `show facts`
    parsing. `remember` and `recall` are covered indirectly by the facts tests;
    the failure modes (empty key, oversized value, unknown key) are not.
 3. **`lifespan` (37 lines).** Startup wiring under failure: database

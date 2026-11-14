@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-11-14) — the general chat route had no empty-answer guard, and /chat/stream had no tests
+
+- `/chat/stream` had **133 unexecuted lines** — the largest untested block in the
+  codebase, on the path every user touches. 14 new tests in
+  `tests/test_chat_stream_branches.py` drive the real app with only
+  `run_agent_stream` faked. `api.py` **55.5% → 58.7%**.
+- **Fixed:** the team route and the agent route both guard against an empty model
+  answer; the **general** route — the one a plain "hello" takes — did not. A model
+  that streamed nothing produced a stream with no answer text and a `[DONE]`, which
+  the browser renders as an empty bubble with no explanation, and mirrored an empty
+  assistant message into the history. Same guard and message as the other two routes
+  so `chat_outcome()` classifies it identically. The test fails on the old code.
+- **Recorded, not fixed:** when `run_agent_stream` raises, the client gets the two
+  preamble frames and then nothing — no error event, no `[DONE]`. The agent route has
+  an `except` that emits a readable message; the general route has none. The test
+  asserts the current behaviour and **fails when the gap is fixed**, so the record
+  cannot go stale.
+- Sabotage-verified: removing `[DONE]` fails 2 tests, removing the new guard fails 1,
+  bypassing the budget refusal fails 1, disabling the duration cap fails 1, and
+  skipping the PII redactor fails 1.
+- One measurement mistake corrected: I reported lines 2144–2145 as never executing
+  because the coverage JSON said so, then found that replacing 2145 with a `raise`
+  **broke the test** — they do run. Coverage output is not evidence; a failing test
+  is. Recorded in `docs/COVERAGE_API.md`.
+
 ### Docs (2026-11-14) — the audit had no entry point, and four of its thirteen parts had no document
 
 - **`docs/README.md`** — an index for all 15 findings documents. There were 13 documents

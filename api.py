@@ -2127,6 +2127,16 @@ async def chat_stream(
             if _tail:
                 full_response += _tail
                 yield f"data: {escape_sse(_tail)}\n\n"
+            if not full_response.strip():
+                # The team and agent routes already guard this (lines 2008 and
+                # 2070 above); the general route did not. A model that returns
+                # nothing therefore produced a stream with no answer text at
+                # all, which the browser renders as an empty bubble with no
+                # explanation. Same message as the other two routes so
+                # `chat_outcome()` classifies it the same way.
+                full_response = ("⚠️ The model returned an empty answer. "
+                                 "Please try again, or rephrase the question.")
+                yield f"data: {escape_sse(full_response)}\n\n"
             # The agent already wrote both messages to the JSON memory store;
             # mirror them to PostgreSQL (durable history the sidebar reads) and
             # refresh the Redis caches so the sidebar/conversation views agree.
