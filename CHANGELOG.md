@@ -38,6 +38,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lose their documents and history. Guarded by an identity (`is`) test.
 - `_user_rag` did **not** move — it reads `app.state.rag`.
 
+### Changed (maintenance audit #15, step 4) — streaming helpers, and the untested PII boundary
+
+- `_redacted_stream`, `_reasoning_sse` and `_mirror_message` moved to
+  `modules/api_utils.py`. `api.py` 2,772 → **2,735 lines**; 39 routes unchanged;
+  **950 tests pass** (+21).
+- **These three had no tests at all** — 0 direct references, 0% coverage of the
+  moved block. `_redacted_stream` is the *output* half of the PII boundary: it
+  stops a model from echoing an SSN or card number from an uploaded document to
+  the browser. That path was completely unverified. It now has 21 tests,
+  including the case the function exists for — a card number split across two
+  streamed chunks must still be redacted whole.
+- Verified by sabotage: removing redaction fails 4 tests, dropping the final
+  flush fails 2, and replacing the holdback with per-chunk redaction (which
+  leaks a split number) fails 2.
+
 ### Security (maintenance audit, 2026-11-13)
 
 - **A 7-day refresh token authenticated requests as a 30-minute access token.**

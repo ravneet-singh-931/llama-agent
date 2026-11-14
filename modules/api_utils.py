@@ -23,14 +23,29 @@ Why each one lives here:
 * `aiter_in_thread`
                  — consume a blocking iterator without stalling the event
                    loop; carries contextvars to the worker.
+
+The three streaming helpers added in step 4 (`_redacted_stream`,
+`_reasoning_sse`, `_mirror_message`) are the same shape: nothing about them
+touches the app, the request, or a route. They were only *near* the streaming
+endpoint because that is where they are used.
+
+Their dependencies are all deferred on purpose — `StreamRedactor`,
+`pg_store` and `redis_store` are imported inside the function bodies. That
+keeps this module importable without a database, a Redis connection or the PII
+package, which matters because every one of those imports is late-bound at
+call time and patching them still works from a test.
 """
 
 import asyncio
 import contextvars
 import heapq
+import json
+import logging
 import time
 from collections import OrderedDict
 from typing import Any, Dict
+
+_log = logging.getLogger(__name__)
 
 
 def heap_top_k(items, key=lambda x: x, k: int = 5):
@@ -192,3 +207,55 @@ class BoundedLRUCache:
 
     def __contains__(self, key: str) -> bool:
         return self.get(key) is not None
+
+
+async def _mirror_message(user_id: str, conversation_id: str, role: str, content: str) -> str:
+    """Mirror one chat message to PostgreSQL + invalidate the Redis caches.
+
+    Used when the message was ALREADY written to the JSON memory store by
+    another component (the general ReAct agent writes to memory itself), so we
+    only add the durable Postgres copy the sidebar reads. Never raises:
+    Postgres/Redis are best-effort mirrors.
+    """
+    from modules import pg_store, redis_store
+    try:
+        await pg_store.add_message(user_id, conversation_id, role, content)
+        norm = pg_store.normalize_conversation_id(conversation_id)
+        await redis_store.invalidate_user(user_id)
+        await redis_store.invalidate_conversation(norm)
+    except Exception as e:
+        _log.warning("persist mirror failed (chat continues on memory store): %s", e)
+    return conversation_id
+
+
+def _reasoning_sse(event: Dict[str, Any]) -> str:
+    """Forward an agent tool/reasoning event as a structured `reasoning`
+    SSE event, so tool markers never get glued into the answer text."""
+    if event.get("type") == "tool":
+        payload = {"type": "reasoning", "stage": "tool",
+                   "content": str(event.get("content", "")).strip()}
+    else:
+        payload = {"type": "reasoning", "stage": event.get("stage", "note"),
+                   "content": event.get("content", "")}
+    return "data: " + json.dumps(payload) + "\n\n"
+
+
+def _redacted_stream(chunks):
+    """Wrap a token stream so PII is redacted before the user sees it.
+
+    Redaction used to happen only on the way into logs (modules/monitoring.py,
+    modules/security_hardening.py). A model that echoes an SSN or a card number
+    out of an uploaded document sent it straight to the browser. This is the
+    output half of that boundary, and it is stream-aware: StreamRedactor holds
+    back enough text that a number split across two tokens is still redacted
+    whole.
+    """
+    from modules.pii import StreamRedactor
+    redactor = StreamRedactor()
+    for chunk in chunks:
+        out = redactor.feed(chunk)
+        if out:
+            yield out
+    tail = redactor.flush()
+    if tail:
+        yield tail

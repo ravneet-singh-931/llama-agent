@@ -30,7 +30,7 @@ in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/a
 | 12 | No coverage floor in CI — the suite reported coverage but never gated on it | `.github/workflows/main.yml` | 🟢 **DONE** | `--cov-fail-under=74`, set 4 points under the measured **78.61%** on CI's `--cov=.` scope. A ratchet, with the scope written into the comment |
 | 13 | Two full UIs (Next.js + Streamlit "legacy") | `frontend/`, `app.py` | 🟢 **DONE** | **Streamlit deleted entirely** — see PART 20 |
 | 14 | Three monitoring modules, 1,353 lines | `monitoring.py`, `advanced_monitoring.py`, `prometheus_metrics.py` | 🟢 **DONE** | **Three findings came out of it, all in `OBSERVABILITY_FINDINGS.md` 7–9.** `AgentLogger` was a second metrics system that rewrote two files per request (two of its fields were never true: every caller passes `tools_used=[]`). Three placeholder notifiers were registered as real channels — a firing alert printed three times and was delivered nowhere. `SLAMonitor` scored a service whose first request failed as **0% errors, met** — divide-by-zero returning the *best* value for a badness metric. Metrics half deleted; log files kept. Suite 846 → **847** |
-| 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🟡 **IN PROGRESS** | Scope **A: helpers only** (user decision). Step 1: 5 leaf helpers → `modules/api_utils.py` (`cae2f9a`). Step 2: 23 doc/RAG functions + 19 constants → `modules/doc_answers.py` — **3,373 → 2,776 lines**, 39 routes, 912 passed. Step 3: request identity → `modules/doc_identity.py` — **2,772 lines**, 39 routes, 929 passed (a copied contextvar would silently reset every guest's identity per request; guard test fails if split). Writing the guard test found a **real bug I had just introduced**: two copies of the cache-invalidation counter, so uploads bumped a dict nobody read — **stale answers after re-upload**, and the 908-test suite did not notice |
+| 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🟡 **IN PROGRESS** | Scope **A: helpers only** (user decision). Step 1: 5 leaf helpers → `modules/api_utils.py` (`cae2f9a`). Step 2: 23 doc/RAG functions + 19 constants → `modules/doc_answers.py` — **3,373 → 2,776 lines**, 39 routes, 912 passed. Step 3: request identity → `modules/doc_identity.py` — **2,772 lines**, 39 routes, 929 passed (a copied contextvar would silently reset every guest's identity per request; guard test fails if split). Step 4: streaming helpers → `modules/api_utils.py` — **2,735 lines**, 39 routes, 950 passed. **Scope A complete** — helper extraction is finished; what remains is route handlers + lifespan, which need `app` injected (deferred). Found the output PII boundary (`_redacted_stream`) had **0 tests, 0% coverage**; now 21 tests, 3 sabotages all caught. Writing the guard test found a **real bug I had just introduced**: two copies of the cache-invalidation counter, so uploads bumped a dict nobody read — **stale answers after re-upload**, and the 908-test suite did not notice |
 | 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🟢 **DONE** | **Coverage 53% → 93%** (61 tests). Writing them found **three security bugs**, all of which crashed instead of refusing: (1) a 7-day **refresh token authenticated as a 30-minute access token** — `authenticate_user` never checked `type`; (2) any password over **72 bytes crashed registration** with a 500 (bcrypt's limit, `max_length=128` let it through); (3) a **corrupt stored hash crashed login** (`Invalid salt`). Plus: the length rule was optional — `"aA1!"` passed strength validation. `SECURITY_FINDINGS.md` S7/S8 |
 | 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🟢 **DONE** | stdio client (230 lines) deleted with the UI; only the SSE client ships |
 | 18 | `except Exception: pass` in live paths — **60 handlers, not 32** (my first count was of the audit, not the code) | 19 files, mostly `prometheus_metrics.py` | 🟢 **DONE** | **59 converted to `degrade(what, exc)`; 1 left (a queue timeout, which is control flow, not a fallback).** The message names what is lost and the failure is logged at DEBUG. `modules/silent.py` + 10 tests. Coverage 81.81% → **81.94%** |
@@ -1731,3 +1731,92 @@ asserts the boundary so nobody moves it later without noticing.
 Behaviour verified end to end: valid cookie honoured; forged cookie rejected;
 middleware→reader round-trip; registered user beats cookie; two anonymous
 visitors never share an identity.
+
+---
+
+# PART 27 — #15 step 4: the PII boundary nobody was testing
+
+## What moved
+
+`_redacted_stream`, `_reasoning_sse`, `_mirror_message` (46 lines) → the
+existing `modules/api_utils.py`, which is the module for helpers that touch
+neither the app nor a request. `api.py` 2,772 → **2,735 lines**; routes 39 →
+**39, identical**; all three AST-identical to the originals.
+
+Small, clean move. The finding is what it exposed.
+
+## The finding: 0% coverage on the output PII boundary
+
+Before writing any test for this step I checked what already covered the three
+functions. Answer: **nothing.** `grep -rc` over `tests/` returned zero direct
+references to any of them, and coverage of the moved block was **0%** — the
+doc suite exercises the document path and the chat tests go through HTTP, so
+neither calls these directly.
+
+That matters most for `_redacted_stream`. It is the **output half of the PII
+boundary**: redaction already happened on the way into logs, but a model echoing
+an SSN or card number out of an uploaded document sent it straight to the
+browser. The function's own docstring says so. Nothing tested it.
+
+Now 21 tests, and coverage of `modules/api_utils.py` went **79% → 90%**.
+
+## Three sabotages, all caught
+
+Writing tests is not proof. Breaking the code and watching them fail is:
+
+| sabotage | result |
+|---|---|
+| `out = redactor.feed(chunk)` → `out = chunk` (redaction removed) | **4 failed** |
+| `flush()` dropped (held-back tail silently discarded) | **2 failed** |
+| per-chunk `redact()`, no holdback (split number leaks) | **2 failed** |
+
+The third is the one that matters and the one a careless refactor would
+introduce: redacting each chunk independently looks completely reasonable, and
+`"4111 1111 1111 1111"` arriving as `"4111 1111"` + `" 1111 1111"` matches
+neither pattern, so the card number leaks in two pieces. That is the exact
+failure mode `StreamRedactor`'s docstring was written about.
+
+## A vacuous assertion I caught in my own test
+
+One of my tests read:
+
+```python
+assert "\n\n" not in frame[len("data: "):-2] or True
+```
+
+`or True` makes the whole assertion unfalsifiable — it passes no matter what the
+code does. Removed, and the test now also asserts the newline *survives inside
+the decoded payload*, so it checks both halves: framing safe, content intact.
+Verified separately that a naive f-string re-implementation **does** leak a
+newline into the frame, so the test has something real to catch.
+
+## The `_log` handoff
+
+`_mirror_message` logs with `_log`, which used to be `api.py`'s logger. After
+the move it is `modules.api_utils`' logger. A missing `_log` would have been a
+`NameError` *inside an `except` block* — i.e. the error path raising. Tested
+directly: the function returns the conversation id, the warning is emitted on the
+new logger's name, and a Postgres failure costs the user nothing.
+
+## Proof
+
+| check | before | after |
+|---|---|---|
+| `api.py` | 2,772 lines | **2,735** |
+| `modules/api_utils.py` | 194 lines | **261** |
+| routes | 39 | **39, identical** |
+| tests | 929 passed | **950 passed**, 6 skipped (+21) |
+| `modules/api_utils.py` coverage | 79% | **90%** |
+| bandit / flake8 (CI gate) | 0 / 0 | **0 / 0** |
+| direct tests of the 3 helpers | **0** | **21** |
+
+E501 (line length) is not enforced by CI — repo baseline is 2,181 — so style was
+left alone rather than churned.
+
+## Status of #15 after step 4
+
+Helper extraction (scope A) is now **complete**: everything that can leave
+`api.py` without dragging `app` with it has left. What remains is 39 route
+handlers (1,324 lines) and `lifespan`, which all read `app` / `app.state` and
+therefore require injecting the app into route modules — the re-architecture the
+user explicitly deferred ("go for A for now").
