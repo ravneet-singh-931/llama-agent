@@ -58,7 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   described fields the API has never returned (`requests_last_hour` exists in no
   backend file) and had zero importers.
 
-  Suite 844 → **845 passed**, coverage 81.94% → **82.01%**.
+  Suite 844 → **846 passed**, coverage 81.94% → **82.01%**.
+
+- **CI's own inline Python was untested, and it broke.** Removing
+  `PerformanceMonitor.track_request()` turned the **Integration** job red while the full
+  local suite stayed green, because the method's only caller was an inline `python -c`
+  block inside `.github/workflows/main.yml` — code no pytest test executes. The first fix
+  was also wrong (escaped double quotes inside a double-quoted `python -c` are stripped
+  by the shell: `NameError: name 'status' is not defined`).
+
+  New `tests/test_deploy_routing.py::test_inline_ci_python_snippets_actually_run` extracts
+  that step from the YAML with PyYAML and runs it through `bash -e -c`, the way CI does.
+  Verified by reintroducing the quoting bug and watching it fail identically.
 
 ### Changed (maintenance audit, 2026-11-13)
 

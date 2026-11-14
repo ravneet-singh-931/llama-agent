@@ -121,3 +121,42 @@ def test_rollout_strategy_fits_single_node(name, surge, unavailable):
 
 def test_wait_budget_matches_progress_deadline():
     assert '"llama-agent-api:1200"' in _read("k8s/wait-rollout.sh")
+
+
+# ============ CI'S OWN PYTHON SNIPPETS ============
+
+def test_inline_ci_python_snippets_actually_run():
+    """The Integration job's inline `python -c` blocks must execute as written.
+
+    These snippets are the one part of the repo no pytest test exercises: they
+    live inside the workflow YAML and only run in CI. That is not theoretical --
+    a change removed `PerformanceMonitor.track_request()` and the Integration
+    job broke while the full local suite stayed green, because the only caller
+    of that method was one of these blocks.
+
+    The block is a `python -c "..."` wrapped in double quotes, so shell
+    quoting is part of the contract. Escaped double quotes inside it were
+    stripped by bash before python saw them, producing
+    `NameError: name 'status' is not defined` -- invisible to a local run that
+    used single quotes. This test runs the extracted script verbatim through
+    the same shell, so a quoting mistake fails here instead of in CI.
+    """
+    import yaml
+
+    wf = yaml.safe_load(_read(".github/workflows/main.yml"))
+    steps = wf["jobs"]["integration"]["steps"]
+    blocks = [s["run"] for s in steps
+              if "python -c" in s.get("run", "") and "Test integration" in s.get("name", "")]
+    assert blocks, "the integration smoke-test step is gone"
+
+    env = dict(os.environ, GROQ_API_KEY="test_key_for_ci")
+    proc = subprocess.run(  # nosec B603 - fixed argv, repo's own script
+        ["bash", "-e", "-c", blocks[0]],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, (
+        "the Integration job's inline python snippet fails when run directly, "
+        "so the CI job will fail:\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+    )
+    assert "All integrations passed!" in proc.stdout

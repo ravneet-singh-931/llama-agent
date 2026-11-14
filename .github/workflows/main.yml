@@ -326,8 +326,11 @@ jobs:
           # (prometheus_middleware). Assert the contract the class now has,
           # so this smoke test fails if the counters ever come back.
           _h = monitor.get_health()
-          assert _h["status"] == "healthy" and _h["uptime_human"]
-          assert "total_requests" not in _h
+          # Single quotes: this whole block is inside a double-quoted
+          # python -c, and escaped double quotes were stripped by bash before
+          # python saw them (NameError: name 'status' is not defined).
+          assert _h['status'] == 'healthy' and _h['uptime_human']
+          assert 'total_requests' not in _h
 
           store = get_vector_store(persist_directory='data/test_ci_chromadb')
           import shutil, os

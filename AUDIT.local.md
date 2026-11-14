@@ -12,7 +12,7 @@
 in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/after.
 🔴 OPEN means still present in the repo, with the effort estimated.
 
-**Last updated:** #20 closed — one owner for request/error counts, and four dead alert rules.
+**Last updated:** #20 closed, plus two CI failures it caused and the guard that now catches them.
 
 | # | Problem | Where | Status | Proof / note |
 |---|---|---|---|---|
@@ -1140,6 +1140,43 @@ and verified with `grep -rn '#.*as _e:'` → 0 hits.
 | bandit (CI flags) | 0 | **0** |
 | flake8 F/E7/E9/W6 on touched files | — | **0 new** (5 pre-existing F541/E741, identical at `HEAD`) |
 
+## What the commit broke, and the second-order lesson
+
+`03a5bce` turned the **Integration** job red. The local suite was green at the time and
+the pytest suite still is — because the only caller of the deleted method was not a
+test at all. It was an inline `python -c` block inside
+`.github/workflows/main.yml`, which no test executes and which only runs in CI, after
+the commit.
+
+That is a real coverage hole, and it is the same defect this audit keeps finding: **a
+check that does not test the artifact**. The repo had 845 tests and none of them looked
+at the 20 lines of Python that CI itself runs.
+
+### Then my first fix was also wrong, and CI caught it
+
+I replaced `monitor.track_request()` with an assertion on the new contract. It passed
+locally. CI failed again with `NameError: name 'status' is not defined`.
+
+The block is a `python -c "..."` wrapped in double quotes, so the shell quoting is part
+of the contract. I wrote `_h["status"]` inside that block, and bash stripped the
+backslashes before python ever saw them. **My local "verification" used single quotes in
+a throwaway snippet — it verified a different string than the one I committed.** The fix
+was single quotes (`_h['status']`).
+
+Worth stating plainly: I ran the CI block verbatim the first time, saw it pass, and
+still shipped a broken line, because I checked the *class* of thing rather than the
+*exact text*. Extracting the step out of the YAML and executing that is what actually
+proved it, and it is what the new test does.
+
+### The guard
+
+`tests/test_deploy_routing.py::test_inline_ci_python_snippets_actually_run` parses
+`main.yml`, pulls the Integration step's script out with PyYAML, and runs it through
+`bash -e -c` — the same way CI does. It asserts exit 0 and the expected output line.
+
+Verified by sabotage: reintroducing the escaped-quote version fails the test with the
+same `NameError`, and restoring it passes.
+
 ## Wrong claim of mine, recorded
 
 I wrote **32** in the status board and repeated it. The real count is **60**. The
@@ -1261,7 +1298,7 @@ belonging to #14, and it is recorded here so it is not lost.
 
 | check | before | after |
 |---|---|---|
-| suite | 844 passed / 6 skipped | **845 passed / 6 skipped** |
+| suite | 844 passed / 6 skipped | **846 passed / 6 skipped** |
 | coverage (`--cov=.`) | 81.94% | **82.01%** |
 | bandit (CI flags) | 0 | **0** |
 | TypeScript (`tsc --noEmit`) | clean | **clean** |
