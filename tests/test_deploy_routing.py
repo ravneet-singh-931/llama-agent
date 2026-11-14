@@ -150,8 +150,11 @@ def test_inline_ci_python_snippets_actually_run():
     assert blocks, "the integration smoke-test step is gone"
 
     env = dict(os.environ, GROQ_API_KEY="test_key_for_ci")
+    # Absolute path: CI runs bandit over the whole tree including tests, and
+    # B607 flags a partial executable name. (My first version used "bash" and
+    # passed locally only because my local bandit excluded ./tests.)
     proc = subprocess.run(  # nosec B603 - fixed argv, repo's own script
-        ["bash", "-e", "-c", blocks[0]],
+        ["/bin/bash", "-e", "-c", blocks[0]],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=300,
     )
     assert proc.returncode == 0, (
