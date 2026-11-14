@@ -322,7 +322,12 @@ jobs:
           rag.add_text('test content')
 
           monitor = PerformanceMonitor()
-          monitor.track_request()
+          # Process health only: request/error counting moved to Prometheus
+          # (prometheus_middleware). Assert the contract the class now has,
+          # so this smoke test fails if the counters ever come back.
+          _h = monitor.get_health()
+          assert _h["status"] == "healthy" and _h["uptime_human"]
+          assert "total_requests" not in _h
 
           store = get_vector_store(persist_directory='data/test_ci_chromadb')
           import shutil, os
