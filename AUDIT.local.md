@@ -30,14 +30,14 @@ in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/a
 | 12 | No coverage floor in CI — the suite reported coverage but never gated on it | `.github/workflows/main.yml` | 🟢 **DONE** | `--cov-fail-under=74`, set 4 points under the measured **78.61%** on CI's `--cov=.` scope. A ratchet, with the scope written into the comment |
 | 13 | Two full UIs (Next.js + Streamlit "legacy") | `frontend/`, `app.py` | 🟢 **DONE** | **Streamlit deleted entirely** — see PART 20 |
 | 14 | Three monitoring modules, 1,353 lines | `monitoring.py`, `advanced_monitoring.py`, `prometheus_metrics.py` | 🟢 **DONE** | **Three findings came out of it, all in `OBSERVABILITY_FINDINGS.md` 7–9.** `AgentLogger` was a second metrics system that rewrote two files per request (two of its fields were never true: every caller passes `tools_used=[]`). Three placeholder notifiers were registered as real channels — a firing alert printed three times and was delivered nowhere. `SLAMonitor` scored a service whose first request failed as **0% errors, met** — divide-by-zero returning the *best* value for a badness metric. Metrics half deleted; log files kept. Suite 846 → **847** |
-| 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🔴 **OPEN** | days; do last |
+| 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🟡 **IN PROGRESS** | Scope **A: helpers only** (user decision). Step 1: 5 leaf helpers → `modules/api_utils.py` (`cae2f9a`). Step 2: 23 doc/RAG functions + 19 constants → `modules/doc_answers.py` — **3,373 → 2,776 lines**, 39 routes unchanged, 912 passed. Writing the guard test found a **real bug I had just introduced**: two copies of the cache-invalidation counter, so uploads bumped a dict nobody read — **stale answers after re-upload**, and the 908-test suite did not notice |
 | 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🟢 **DONE** | **Coverage 53% → 93%** (61 tests). Writing them found **three security bugs**, all of which crashed instead of refusing: (1) a 7-day **refresh token authenticated as a 30-minute access token** — `authenticate_user` never checked `type`; (2) any password over **72 bytes crashed registration** with a 500 (bcrypt's limit, `max_length=128` let it through); (3) a **corrupt stored hash crashed login** (`Invalid salt`). Plus: the length rule was optional — `"aA1!"` passed strength validation. `SECURITY_FINDINGS.md` S7/S8 |
 | 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🟢 **DONE** | stdio client (230 lines) deleted with the UI; only the SSE client ships |
 | 18 | `except Exception: pass` in live paths — **60 handlers, not 32** (my first count was of the audit, not the code) | 19 files, mostly `prometheus_metrics.py` | 🟢 **DONE** | **59 converted to `degrade(what, exc)`; 1 left (a queue timeout, which is control flow, not a fallback).** The message names what is lost and the failure is logged at DEBUG. `modules/silent.py` + 10 tests. Coverage 81.81% → **81.94%** |
 | 19 | 31 unused local variables (`F841`) — invisible to CI | repo-wide | 🟢 **DONE** | **31 → 0.** 24 were `except … as e` bindings; **7 were real dead assignments**, two of which changed what the rate limiter's hour window means. F401 unchanged at 29, none introduced |
 | 20 | Metrics counted twice; 3 ways to view them | `api.py`, `monitoring.py`, `advanced_monitoring.py` | 🟢 **DONE** | **Worse than recorded.** The duplicate counters were also the input to `/health`'s `status`, and `/health` is the k8s probe — so probe traffic inflated the denominator and the health verdict **improved the more it was polled**. Counters deleted; `PerformanceMonitor` keeps uptime only. Also found and fixed in the same knot: **4 of 5 in-app alert rules read keys the feed never sends** (`error_rate` vs `failure_rate`, `daily_cost`, `uptime_percent`, `memory_usage_percent`) — they could never fire, and `.get(key,0)` made that look like "no alerts". Suite 844 → **845**; coverage 81.94% → **82.01%** |
 
-**15 DONE, 5 OPEN.** Every 🟢 row has a test that fails when the fix is reverted, or a
+**16 DONE, 4 OPEN.** Every 🟢 row has a test that fails when the fix is reverted, or a
 measured before/after. Every 🔴 row has an effort estimate and a reason for its position.
 
 ---
@@ -1542,3 +1542,99 @@ A wrong test that fails is cheap. A wrong test that passes is the expensive kind
 The remaining 16 uncovered statements are the `ENVIRONMENT=production` import
 guard (unreachable inside an already-imported module) and defensive `return None`
 branches in the cookie helper.
+
+---
+
+# PART 25 — #15 step 2: the 658-line document cluster, and the bug the tests missed
+
+## What moved
+
+23 functions + 19 constants out of `api.py` into `modules/doc_answers.py`. This
+is the largest single cluster in the file and the most tangled: the routing
+predicates (`is_document_question`, `is_doc_follow_up`), the answering path
+(`answer_from_documents`, 120 lines) and the citation checker were interleaved
+with unrelated route handlers across 3,300 lines.
+
+**All 23 functions are AST-identical to the originals** — verified by dumping
+`ast.dump()` for each name on both sides and comparing. Nothing was rewritten.
+
+| | before | after |
+|---|---|---|
+| `api.py` | 3,373 lines | **2,776** |
+| `modules/doc_answers.py` | — | **743** (new) |
+| routes | 39 | **39, identical** |
+| tests | 908 passed | **912 passed**, 6 skipped |
+| bandit / flake8 (CI gate) | 0 / 0 | **0 / 0** |
+
+## The five dependencies that made it non-trivial
+
+The cluster's free names were found with `symtable`, not grep — `grep` gives you
+local variables and misses shadowing. Five needed real decisions:
+
+1. **`_load_shared_dict` / `_save_shared_dict`** — Redis-backed helpers that live
+   in the API's persistence layer. Importing them from the new module would be a
+   cycle, so they are **injected** at import (`bind_shared_dict_store`), with an
+   in-memory default so the module stands alone. The injection passes
+   *forwarders*, not the functions: a forwarder resolves `api._load_shared_dict`
+   at call time, so patching it still takes effect inside the doc module. Passing
+   the function objects directly would silently freeze the original.
+2. **`_doc_generation`** — the cache-invalidation counter, read only by
+   `_doc_cache_key`. It moved with the key it feeds. This is where the bug was.
+3. **`DocAnswerUnavailable`** — defined 1,200 lines *below* its users in `api.py`;
+   the exception belongs with the code that raises it.
+4. **`BoundedLRUCache`** — I assumed it lived in `modules/rag_optimizations.py`
+   and the import failed: it was declared in `api.py` itself. Moved to
+   `modules/api_utils.py` (self-contained: `OrderedDict` + `time.monotonic`).
+5. **`app.state.doc_followup`** — the only `app` reference in the whole cluster,
+   and it was **write-only dead code**: assigned in three places, read in none.
+   Deleted; the Redis round-trip is what actually carries the state.
+
+## The bug: two counters, one of them dead
+
+Deleting `_doc_generation` from `api.py` left `_bump_doc_generation` still
+referring to it. A `str.replace` I ran did not match, so instead of delegating,
+the function kept writing to a name that no longer existed at module scope.
+
+**The full suite passed: 908 green.** The suite did not notice, because no test
+exercised cache invalidation — the very behaviour the counter exists for. The
+symptom would have been: a user re-uploads a document, asks the same question,
+and gets the **old answer** for up to 10 minutes (the LRU's TTL), or forever when
+the semantic cache is the one holding it. A cross-tenant leak it is not — the
+owner is in the key — but stale-after-upload is exactly what the bump is for.
+
+It surfaced only because I wrote a test asserting the *observable* consequence
+(the cache key changes, so the model is asked again) rather than asserting where
+the dict lives. With the bug reintroduced, that test fails; restored, it passes.
+
+> A refactor that moves state is a refactor that can split state in two. Nothing
+> about the code *looks* wrong afterwards — both halves are valid, and each one
+> is used by one side.
+
+## New tests (4, in `tests/test_doc_answers.py`)
+
+- `test_a_bump_changes_the_cache_key_for_that_owner_only` — and not for other owners.
+- `test_api_bump_reaches_the_module_that_owns_the_counter` — **the regression guard.**
+- `test_a_cached_answer_is_not_served_after_a_bump` — end to end, model re-asked.
+- `test_the_doc_module_has_no_import_of_api` — a cycle would be invisible at runtime.
+
+## Two of my own test bugs, recorded
+
+1. `calls_after_first = client.calls` aliased a **list**, so the assertion compared
+   it to itself and passed vacuously. Needed `len(client.calls)`.
+2. `_Client` takes response *objects*, not strings — I passed `GOOD` directly and
+   got `'str' object has no attribute 'choices'`.
+
+## Proof
+
+```
+routes: before=39 after=39 identical=True
+api.py lines: 3373 -> 2776
+api.answer_from_documents is modules.doc_answers.answer_from_documents: True
+api.DocAnswerUnavailable is modules.doc_answers.DocAnswerUnavailable: True
+doc_answers imports api: NO
+app.state.doc_followup in code: NONE
+912 passed, 6 skipped | bandit 0 | flake8 (E9,F63,F7,F82) 0
+```
+
+Remaining `F401`s in `api.py` are deliberate re-exports (11 external files reach
+in by name) and are annotated as such. The one `F541` is pre-existing in HEAD.

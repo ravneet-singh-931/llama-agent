@@ -11,7 +11,6 @@ Features:
 """
 
 import asyncio
-import heapq
 import json
 import logging
 import os
@@ -22,7 +21,6 @@ import uuid
 import contextvars
 from datetime import datetime, timezone
 from typing import Any, Optional, List, Dict
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 
 from modules.silent import degrade
@@ -46,7 +44,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 # Import new modules
 from modules.config import get_config
 from modules.database import get_db_manager
-from modules.model_tiers import resolve_model, should_fallback
 from modules.auth import (
     get_current_user,
     optional_auth,
@@ -136,15 +133,8 @@ async def _save_shared_dict(key: str, value: dict) -> None:
 
 # Lazy singleton Groq client (P2 #7): avoid rebuilding the client on every
 # document question.
-_groq_client = None
 
 
-def _get_groq_client(api_key: str):
-    global _groq_client
-    if _groq_client is None:
-        from multi_agent import InstrumentedGroqClient
-        _groq_client = InstrumentedGroqClient(api_key=api_key, component="doc_answer")
-    return _groq_client
 
 
 # ============ P2 #8: downstream timeouts + MCP circuit breaker ============
@@ -189,6 +179,71 @@ def _mcp_record_success() -> None:
     _MCP_FAILURES = 0
 
 
+# ============ Document answering (moved to modules/doc_answers.py) ============
+#
+# 23 functions, 19 constants, ~660 lines of document routing / retrieval /
+# answer / citation-checking. Re-exported here because tests and
+# evals/rag_eval.py reach them as `from api import X` / `api.X`:
+#   answer_from_documents, _ask_doc_question, is_document_question,
+#   is_doc_follow_up, is_thin_answer, _DOC_*_NOTE, _WHOLE_DOC_RE, ...
+#
+# The persistence helpers are injected rather than imported, so
+# modules/doc_answers.py does not import api (which would be a cycle).
+
+from modules.doc_answers import (        # noqa: E402,F401
+    answer_from_documents,
+    DocAnswerUnavailable,
+    is_doc_follow_up,
+    is_document_question,
+    is_thin_answer,
+    _ask_doc_question,
+    _check_doc_citations,
+    _compare_documents,
+    _detect_compare_documents,
+    _distill_compare_query,
+    _doc_answer_tokens,
+    _doc_cache_key,
+    _doc_completion_text,
+    _doc_followup_query,
+    _doc_match_score,
+    _get_doc_followup,
+    _get_groq_client,
+    _is_document_inventory_question,
+    _names_uploaded_document,
+    _reformulate_doc_query,
+    _retrieve_context,
+    _set_doc_followup,
+    _usable_doc_answer,
+    _complete_with_fallback,
+    _DOC_BAD_CITATION_NOTE,
+    _DOC_CUT_NOTE,
+    _DOC_FOLLOWUP_PHRASES,
+    _DOC_INVENTORY_PHRASES,
+    _DOC_QUESTION_INTENTS,
+    _DOC_QUESTION_PHRASES,
+    _DOC_QUESTION_REF_WORDS,
+    _DOC_REF_RE,
+    _DOC_UNSOURCED_NOTE,
+    _DOC_UNVERIFIED_NOTE,
+    _LEGACY_DOC_ERRORS,
+    _THIN_ANSWER_PHRASES,
+    _WHOLE_DOC_RE,
+    _COMPARE_NOISE_WORDS,
+    _COMPARE_SIGNALS,
+    _CREATE_REQUEST_RE,
+    _GENERIC_NAME_TOKENS,
+)
+
+# Give the module the real Redis-backed helpers (it defaults to in-memory).
+from modules import doc_answers as _doc_answers_module   # noqa: E402
+# Forwarders, not the functions themselves: they resolve the names at call time,
+# so patching api._load_shared_dict still takes effect inside the doc module.
+_doc_answers_module.bind_shared_dict_store(
+    lambda key, default: _load_shared_dict(key, default),
+    lambda key, value: _save_shared_dict(key, value),
+    _DOC_FOLLOWUP_KEY,
+)
+
 # ============ Re-exported helpers (moved to modules/api_utils.py) ============
 #
 # These live in modules/api_utils.py so a future route module can import them
@@ -197,11 +252,12 @@ def _mcp_record_success() -> None:
 # as `from api import X` / `api.X`. The private aliases preserve the old names
 # exactly; nothing outside this file has to change.
 
-from modules.api_utils import (          # noqa: E402
+from modules.api_utils import (          # noqa: E402,F401
+    BoundedLRUCache,   # only external users now (evals/rag_eval.py, tests)
     aiter_in_thread,
-    chunk_score,
+    chunk_score,       # only external users now (evals/rag_eval.py, tests)
     escape_sse,
-    heap_top_k,
+    heap_top_k,        # only external users now (evals/rag_eval.py, tests)
     is_db_unavailable,
 )
 
@@ -221,42 +277,9 @@ _is_db_unavailable = is_db_unavailable
 
 
 
-class BoundedLRUCache:
-    """Bounded LRU cache with optional TTL.
-
-    Evicts the least-recently-used entry when full and treats entries older
-    than ``ttl`` seconds as misses. Used to cache repeated document answers so
-    identical questions skip the LLM call without growing memory unbounded.
-    """
-
-    def __init__(self, maxsize: int = 256, ttl: float = 600.0):
-        self.maxsize = maxsize
-        self.ttl = ttl
-        self._store: "OrderedDict[str, tuple]" = OrderedDict()
-
-    def get(self, key: str):
-        if key not in self._store:
-            return None
-        val, ts = self._store[key]
-        if self.ttl and (time.monotonic() - ts) > self.ttl:
-            del self._store[key]
-            return None
-        self._store.move_to_end(key)
-        return val
-
-    def put(self, key: str, val) -> None:
-        if key in self._store:
-            self._store.move_to_end(key)
-        self._store[key] = (val, time.monotonic())
-        while len(self._store) > self.maxsize:
-            self._store.popitem(last=False)
-
-    def __contains__(self, key: str) -> bool:
-        return self.get(key) is not None
 
 
 # Fast in-memory LRU for repeated document questions (exact-match, TTL-bounded).
-_doc_answer_cache = BoundedLRUCache(maxsize=256, ttl=600)
 
 
 # ============ Request identity + per-user document scoping ============
@@ -268,11 +291,6 @@ _GUEST_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _guest_id_ctx: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
     "guest_id", default=None
 )
-# owner -> generation counter; bumped on upload so exact-match answer-cache
-# entries for that owner are never served after their documents change.
-_doc_generation: Dict[str, int] = {}
-
-
 def _guest_uid(guest_id: Optional[str]) -> str:
     gid = guest_id if guest_id and _GUEST_ID_RE.match(guest_id) else uuid.uuid4().hex
     return f"guest-{gid}"
@@ -297,12 +315,15 @@ def _user_rag(user_id: str):
 
 
 def _bump_doc_generation(user_id: str) -> None:
-    _doc_generation[user_id] = _doc_generation.get(user_id, 0) + 1
+    """Invalidate this owner's cached document answers (see modules/doc_answers).
+
+    Delegates rather than keeping its own dict: the counter is part of the cache
+    key computed in that module, so a second copy here would be bumped by uploads
+    and read by nobody, leaving stale answers served after a re-upload.
+    """
+    _doc_answers_module.bump_doc_generation(user_id)
 
 
-def _doc_cache_key(rag, query: str) -> str:
-    owner = getattr(rag, "owner", None) or "_global"
-    return f"{owner}|{_doc_generation.get(owner, 0)}|{query}"
 
 
 def _match_fact_question(all_facts: Dict, message: str):
@@ -524,7 +545,6 @@ async def lifespan(app: FastAPI):
     # the last message that asked about an uploaded document. Used to route
     # "what about X?" / "and the Y column?" follow-ups back to the RAG
     # answerer instead of general chat. In-memory like agent_stats.
-    app.state.doc_followup = {}
     
     # Re-index previously uploaded files so RAG knowledge survives restarts.
     # Uploads live in uploads/<owner>/<file>; each file is indexed for its
@@ -1425,715 +1445,98 @@ async def _list_conversations_for(user_id: str, memory) -> List[Dict]:
     return convs
 
 
-_DOC_QUESTION_PHRASES = [
-    "summarize the uploaded", "summarize uploaded", "summary of the uploaded",
-    "summarize the file", "summarize the document", "summarize file",
-    "sumarize the uploaded", "sumarize uploaded", "sumarize the file",
-    "sumarize the document", "sumarize file",
-    "about the uploaded", "about the document", "about the file",
-    "from the document", "from the file", "in the document", "in the file",
-    "from the uploaded", "document says", "file says", "uploaded file",
-    "uploaded document", "what does the file", "what does the document",
-    "tell me about the file", "tell me about the document",
-]
 
 
 # Questions asking WHAT documents/files are uploaded (an inventory question)
 # rather than about the CONTENT of one specific file. These route to RAG so
 # the answer lists the user's actual uploads instead of a generic agent guess.
-_DOC_INVENTORY_PHRASES = (
-    "what documents", "which documents", "what files", "which files",
-    "list my documents", "list the documents", "list documents",
-    "list my files", "list the files", "list files",
-    "show my documents", "show the documents", "show documents",
-    "show my files", "show the files", "show files",
-    "uploaded documents", "uploaded files",
-    "what have i uploaded", "what did i upload",
-    "documents have i uploaded", "files have i uploaded",
-    "how many documents", "how many files",
-    "what is uploaded", "what are the documents", "what are the files",
-    "what documents are", "what files are", "see my documents", "see my files",
-)
 
 
-def _is_document_inventory_question(message: str) -> bool:
-    """True if the message asks to LIST the user's uploaded documents/files
-    (e.g. "what documents have I uploaded?") instead of asking about the
-    content of one specific file."""
-    m = (message or "").lower()
-    return any(p in m for p in _DOC_INVENTORY_PHRASES)
 
 
-def is_document_question(message: str, rag=None) -> bool:
-    """True if the user is asking about their uploaded documents/files.
-
-    When a RAG store is supplied, a multi-document comparison ("compare X
-    and Y", both uploaded files) also counts as a document question so it
-    routes to the RAG answerer instead of a generic agent.
-    """
-    m = message.lower()
-    if any(p in m for p in _DOC_QUESTION_PHRASES):
-        return True
-    if _is_document_inventory_question(m):
-        return True
-    # Generic pattern: a document-intent phrase + a reference to a file.
-    # Catches forms the exact phrase list misses, e.g. "summarize the CRM
-    # file" or "what is the Captainassistant.py file?".
-    if (
-        any(w in m for w in _DOC_QUESTION_REF_WORDS)
-        and any(i in m for i in _DOC_QUESTION_INTENTS)
-    ):
-        return True
-    if rag is not None and _detect_compare_documents(message, rag)[0]:
-        return True
-    # A question that names one of the user's uploaded files ("what does the
-    # crm file say about X?", "according to the CRM-3 document, ...").
-    if rag is not None and not _CREATE_REQUEST_RE.match(m) and _names_uploaded_document(m, rag):
-        return True
-    return False
 
 
 # Whole words that refer to a file/document (no "doc" inside "docker").
-_DOC_REF_RE = re.compile(r"\b(files?|documents?|docs?|pdfs?|spreadsheets?|sheets?|uploads?|uploaded)\b")
 
 # "write/create/generate ... a file" is a task for an agent, not a document question.
-_CREATE_REQUEST_RE = re.compile(
-    r"^\s*(please\s+|can\s+you\s+|could\s+you\s+)?"
-    r"(write|create|generate|build|make|code|implement|draft|design)\b")
 
 # File-name words too generic to identify a document.
-_GENERIC_NAME_TOKENS = frozenset(
-    "the and for with file files doc docs document documents copy final new untitled".split())
 
 
-def _names_uploaded_document(message_lower: str, rag) -> bool:
-    """True if the message names one of the uploaded files: its full file name,
-    or a distinctive word of its name within 3 words of a file/document word
-    ("the crm file", "the CRM-3 document", "the sales sheet") - not just both
-    words somewhere ("what file format suits sales data?"). Pure helper."""
-    tokens = re.findall(r"[a-z0-9]+", message_lower)
-    ref_pos = [i for i, t in enumerate(tokens) if _DOC_REF_RE.fullmatch(t)]
-    try:
-        docs = rag.list_documents() or []
-    except Exception:
-        return False
-    for path in docs:
-        base = os.path.basename(str(path)).lower()
-        if base and base in message_lower:
-            return True
-        if not ref_pos:
-            continue
-        stem = os.path.splitext(base)[0]
-        name_words = {t for t in re.findall(r"[a-z0-9]+", stem)
-                      if len(t) >= 3 and not t.isdigit() and t not in _GENERIC_NAME_TOKENS}
-        if any(t in name_words and any(abs(i - r) <= 3 for r in ref_pos)
-               for i, t in enumerate(tokens)):
-            return True
-    return False
 
 
 # Words that point at an uploaded file/document.
-_DOC_QUESTION_REF_WORDS = (
-    "file", "document", "uploaded", "upload", "doc", "docs",
-    ".txt", ".csv", ".docx", ".pdf", ".py", ".md", ".json",
-)
 
 # Phrases that signal the user wants information ABOUT that file.
-_DOC_QUESTION_INTENTS = (
-    "summarize", "summary", "summarise", "sumarize", "describe",
-    "what is", "what's", "tell me about", "explain", "show me",
-    "read", "give me", "info about", "information about",
-)
 
 
 # Phrases that indicate a message continues a previous document conversation
 # (e.g. "what about the pricing column?" right after "summarize the CRM
 # file"). The check additionally requires that a document question was asked
 # before in THIS conversation, otherwise nothing routes here.
-_DOC_FOLLOWUP_PHRASES = [
-    "what about", "how about", "and the", "and what", "tell me more",
-    "more about", "what else", "anything else", "explain", "regarding",
-    "about that", "that file", "this document", "the document", "the file",
-    "does it", "what does it", "it says", "in it", "in the doc",
-    "from the doc", "in that document", "show me", "can you show",
-    "any details",
-]
 
 
-def is_doc_follow_up(message: str, last_doc_query: str) -> bool:
-    """True if `message` continues a previous document conversation.
-
-    Pure helper (testable offline): `last_doc_query` is the last message in
-    this conversation that asked about an uploaded document ("" if none).
-    """
-    if not message or not last_doc_query:
-        return False
-    m = message.lower()
-    return any(p in m for p in _DOC_FOLLOWUP_PHRASES)
 
 
-async def _get_doc_followup() -> Dict[str, str]:
-    """Lazily-loaded, replica-shared per-conversation doc-follow-up anchors."""
-    shared = await _load_shared_dict(_DOC_FOLLOWUP_KEY, {})
-    app.state.doc_followup = shared
-    return shared
 
 
-async def _set_doc_followup(conversation_id: str, message: str) -> None:
-    """Remember that this conversation last asked a document question.
-
-    Mirrored to Redis so follow-ups route correctly on any replica (P0 #2).
-    """
-    shared = await _load_shared_dict(_DOC_FOLLOWUP_KEY, {})
-    shared[conversation_id] = message
-    app.state.doc_followup = shared
-    await _save_shared_dict(_DOC_FOLLOWUP_KEY, shared)
 
 
-async def _doc_followup_query(conversation_id: str, message: str) -> str:
-    """RAG query for a follow-up message, or "" if it is not a follow-up.
-
-    Combines the original document question with the new message so the
-    retriever still finds the right chunks ("summarize the CRM file
-    what about the pricing column?").
-    """
-    last = (await _get_doc_followup()).get(conversation_id, "")
-    if is_doc_follow_up(message, last):
-        return f"{last} {message}".strip()
-    return ""
 
 
 # Answer shapes that mean "the retrieval did not actually answer the
 # question". When a first-pass document answer looks like one of these, the
 # question is reformulated and the documents are queried once more.
-_THIN_ANSWER_PHRASES = (
-    "doesn't contain", "does not contain", "doesn't mention", "does not mention",
-    "doesn't include", "does not include", "don't have", "do not have",
-    "not found", "no information", "cannot find", "can't find", "could not find",
-    "couldn't find", "not available in", "not in the document", "not in the excerpts",
-    "not covered", "doesn't say", "does not say", "no mention", "no details",
-    "no such", "unable to find", "not included in",
-)
-
-
-def is_thin_answer(text: str, min_chars: int = 60) -> bool:
-    """True if a document answer is too thin to trust (no real content).
-
-    Pure helper (testable offline). An answer is thin when it is missing,
-    extremely short, or explicitly says the documents don't contain the
-    information.
-    """
-    if not text:
-        return True
-    lowered = text.lower()
-    if len(lowered.strip()) < min_chars:
-        return True
-    return any(p in lowered for p in _THIN_ANSWER_PHRASES)
-
-
-def _complete_with_fallback(client, messages, max_tokens):
-    """Run a chat completion on the STRONG tier; on rate-limit/availability
-    errors retry once on the FAST tier so strong-model quota limits never
-    break one-shot answers."""
-    model = resolve_model("strong")
-    try:
-        return client.chat.completions.create(
-            model=model, messages=messages, max_tokens=max_tokens
-        )
-    except Exception as e:
-        if should_fallback(e, "strong"):
-            return client.chat.completions.create(
-                model=resolve_model("fast"), messages=messages, max_tokens=max_tokens
-            )
-        raise
-
-
-def _reformulate_doc_query(query: str, context: str, client) -> str:
-    """Ask the fast model to rephrase a document question into a more
-    specific search query for the second retrieval pass. Returns "" if no
-    usable reformulation is produced (then the second pass is skipped)."""
-    prompt = (
-        "You are helping search the user's uploaded documents.\n\n"
-        f"Document excerpts:\n{context[:3000]}\n\n"
-        f"The user asked: {query}\n\n"
-        "The first retrieval did not answer this well. Rephrase the user's "
-        "question into ONE more specific search query that would match the "
-        "details they are after (include the exact topic terms from the "
-        "question). Reply with only the query text, nothing else."
-    )
-    try:
-        resp = client.chat.completions.create(
-            model=resolve_model("fast"),
-            messages=[
-                {"role": "system", "content": "You reformulate search queries. Reply with one query only."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=120,
-        )
-        q = (resp.choices[0].message.content or "").strip()
-    except Exception:
-        return ""
-    # Keep only plausible queries (a bare "the" is useless).
-    if len(q) < 6:
-        return ""
-    # Strip a leading bullet/number/dash/quote if the model added one.
-    q = q.lstrip("-*•0123456789).\"'").strip()
-    return q
-
-
-class DocAnswerUnavailable(Exception):
-    """The model could not answer (rate limit, outage). ``str(e)`` is a
-    user-facing message; such results are never cached."""
 
 
 # User-facing text for a failed model call (shared with general chat).
-from modules.llm_guard import friendly_llm_error  # noqa: E402
+# Re-exported: tests/test_doc_answers.py reaches it as `from api import ...`.
+from modules.llm_guard import friendly_llm_error  # noqa: E402,F401
 
 
 # Questions about a document AS A WHOLE ("summarize it", "what is this
 # file?") - only these get a one-line description of the document first.
-_WHOLE_DOC_RE = re.compile(
-    r"\b(summar\w*|sumar\w*|overview|outline|describe|"
-    r"what\s+(is|'s)\s+(this|that|the|my)\s+(\w+\s+)?(file|document|doc)\b|"
-    r"what\s+(are|is)\s+(these|those|the|my)\s+(\w+\s+)?(files|documents|docs)\b|"
-    r"what\s+(does|do)\s+(it|they|this|the\s+\S+\s+(file|document|doc))\s+(contain|cover)|"
-    r"tell\s+me\s+about\s+(this|the|my)\s+(\w+\s+)?(file|document|doc))",
-    re.I,
-)
 
 # Marks an answer cut off by the token limit (such answers are not cached).
-_DOC_CUT_NOTE = "_(The answer was cut off at the length limit. Ask a narrower question for the rest.)_"
 
 
 # Marks an answer Corrective RAG could not verify against the excerpts
 # (shown so the user knows, never cached so asking again retries).
-_DOC_BAD_CITATION_NOTE = (
-    "_(Citation check: this answer cites {bad}, which is not among the "
-    "excerpts it was given. Treat that citation as unverified.)_")
-_DOC_UNSOURCED_NOTE = (
-    "_(Citation check: this answer makes claims without citing a document. "
-    "Treat it as unverified.)_")
-_DOC_UNVERIFIED_NOTE = ("_(Some statements in this answer could not be verified "
-                        "against the document excerpts - please double-check them.)_")
 
 
 # Error texts older versions returned as answers - and cached (the semantic
 # cache lives in ChromaDB and survives deploys). Never serve them.
-_LEGACY_DOC_ERRORS = ("Could not summarize the documents right now",
-                      "Could not compare the documents right now")
 
 
-def _usable_doc_answer(text) -> bool:
-    """True for a real answer that may be cached or served from the cache:
-    not empty, not cut off, not an error message."""
-    if not isinstance(text, str) or not text.strip():
-        return False
-    t = text.strip()
-    return (_DOC_CUT_NOTE not in t and _DOC_UNVERIFIED_NOTE not in t
-            and not t.startswith("⚠️")
-            and not t.startswith(_LEGACY_DOC_ERRORS))
 
 
-def _doc_answer_tokens() -> int:
-    """Answer budget for document questions (DOC_ANSWER_MAX_TOKENS). The fast
-    model is a reasoning model: its hidden thinking counts against this
-    budget, and at 1024 a tricky question could end mid-sentence."""
-    try:
-        return max(512, int(os.getenv("DOC_ANSWER_MAX_TOKENS", "2048")))
-    except ValueError:
-        return 2048
 
 
-def _doc_completion_text(resp) -> str:
-    """The answer text; a truncated answer with almost nothing written is
-    returned as '' (thin -> the caller's second pass retries), a long one
-    keeps what was written plus a visible note."""
-    choice = resp.choices[0]
-    text = (choice.message.content or "").strip()
-    if getattr(choice, "finish_reason", None) == "length":
-        if len(text) < 200:
-            return ""
-        text += "\n\n" + _DOC_CUT_NOTE
-    return text
 
 
-def _check_doc_citations(answer: str, context: str) -> str:
-    """Validate the answer's citations against the excerpts it was given.
-
-    Detector, not blocker: an invented citation is appended to the answer as a
-    visible note and counted in a metric. Silently stripping or rewording the
-    citation would hide the model's mistake; showing it lets the reader judge
-    and makes the failure countable.
-
-    Returns ``answer`` unchanged when the citations hold up.
-    """
-    try:
-        from modules.citations import check_citations
-        report = check_citations(answer, context)
-    except Exception:
-        return answer                      # never break an answer over this
-    if report["ok"]:
-        return answer
-    try:
-        from modules.prometheus_metrics import record_citation_failure
-        if report["invented_files"]:
-            record_citation_failure("invented_file")
-        elif report["invalid"]:
-            record_citation_failure("wrong_chunk")
-        elif report["unsourced"]:
-            record_citation_failure("unsourced")
-    except Exception as _e:
-        degrade("citation quality metric not recorded for this answer", _e)
-    if report["unsourced"]:
-        return answer + "\n\n" + _DOC_UNSOURCED_NOTE
-    # Spell the citation the way the prompt asks the model to write it, so the
-    # note reads as a quote of what the answer did rather than a new format.
-    bad = ", ".join(f"{f} (chunk {c})"
-                    for f, c in (report["invented_files"] or report["invalid"]))
-    return answer + "\n\n" + _DOC_BAD_CITATION_NOTE.format(bad=bad)
 
 
-def _ask_doc_question(client, query: str, context: str) -> str:
-    """One LLM answer about uploaded documents from the retrieved context.
-    Raises DocAnswerUnavailable (friendly message) when the model can't answer."""
-    if _WHOLE_DOC_RE.search(query or ""):
-        opening = (
-            "First, in one short line, state exactly what this document IS: its "
-            "type (e.g. Python application, CSV dataset, Word/Markdown/PDF "
-            "document), its purpose, and the main technology or content it "
-            "involves. Use the file names and excerpt content shown above - do "
-            "not guess beyond what the excerpts show.\n"
-            "Then answer"
-        )
-    else:
-        opening = ("Answer the question directly - do not start by describing "
-                   "the document. Answer")
-    prompt = (
-        "You are answering a question about the user's uploaded documents.\n\n"
-        f"Document excerpts:\n{context}\n\n"
-        f"Question: {query}\n\n"
-        f"{opening} the question using ONLY the excerpts above. Cite the "
-        "source for EVERY claim by appending the exact file name and chunk "
-        "from the 'Source:' labels in parentheses, e.g. (CRM-3.docx, chunk "
-        "2) - every sentence that makes a factual statement must end with "
-        "such a citation. Never cite a file that is not in the excerpts, "
-        "and never invent claims the excerpts do not support. Be concise "
-        "and clear, using short paragraphs or bullets where helpful. Never "
-        "dump raw excerpts. If the excerpts don't contain the answer, say "
-        "so plainly."
-    )
-    try:
-        resp = _complete_with_fallback(
-            client,
-            [
-                {"role": "system", "content": "You are a helpful assistant that answers questions about uploaded documents."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=_doc_answer_tokens(),
-        )
-    except Exception as e:
-        logging.getLogger(__name__).warning("document answer failed: %s", e)
-        raise DocAnswerUnavailable(friendly_llm_error(e)) from e
-    return _doc_completion_text(resp)
 
 
-def _doc_match_score(query_lower: str, path: str) -> int:
-    """How strongly a query references an uploaded document path.
-
-    Direct references (the full path or its file name appears in the query)
-    score 10; additionally, each query token that appears in the file name's
-    stem scores 1 (e.g. "crm" matches "CRM-3.docx", "sample" matches
-    "sample.txt"). Pure helper (testable offline).
-    """
-    base = os.path.basename(path).lower()
-    stem = os.path.splitext(base)[0]
-    score = 0
-    if path.lower() in query_lower or base in query_lower:
-        score += 10
-    stem_tokens = set(re.findall(r"[a-z0-9]+", stem))
-    query_tokens = set(re.findall(r"[a-z0-9]+", query_lower))
-    score += len(stem_tokens & query_tokens)
-    return score
 
 
 # Explicit comparison signals for multi-document questions.
-_COMPARE_SIGNALS = (
-    "compare", "comparison", "versus", " vs ", "vs.", "contrast",
-    "difference between", "differences between",
-)
 
 
-def _detect_compare_documents(query: str, rag) -> tuple:
-    """Detect a request to compare two uploaded documents.
-
-    Returns (True, [doc1, doc2]) with resolved store paths, or (False, []).
-
-    Works for ANY pair of uploaded files (nothing is hardcoded): it only
-    inspects the query text and the store's document list. Pure helper
-    (testable offline).
-    """
-    m = (query or "").lower()
-    if not any(sig in m for sig in _COMPARE_SIGNALS):
-        return False, []
-    available = rag.list_documents()
-    if len(available) < 2:
-        return False, []
-    scored = [(path, _doc_match_score(m, path)) for path in available]
-    scored = [(p, s) for p, s in scored if s > 0]
-    scored.sort(key=lambda x: -x[1])
-    if len(scored) < 2:
-        return False, []
-    return True, [p for p, _s in scored[:2]]
 
 
 # Words inside a comparison request that carry no retrieval signal. The
 # file names being compared are stripped separately in _distill_compare_query;
 # this set covers the comparison framing words themselves (stopwords are
 # handled by the RAG store's own tokenizer).
-_COMPARE_NOISE_WORDS = frozenset(
-    "compare comparison contrast versus vs differences difference between "
-    "doc docs document documents file files both each says say tell what "
-    "about and the of in for on with their they".split()
-)
 
 
-def _distill_compare_query(query: str, files) -> str:
-    """Extract the retrieval TOPIC from a comparison request.
-
-    Drops the file names being compared and the comparison framing words, so
-    per-document retrieval targets the actual subject instead of matching
-    generic words:
-
-    'Compare what the CRM doc and sample.txt say about pricing'
-        -> 'pricing'
-    'differences between the budget and the sales forecast' (files
-    financials.xlsx / other.xlsx) -> 'budget sales forecast'
-
-    Pure helper (testable offline).
-    """
-    m = (query or "").lower()
-    drop = set()
-    for p in files or []:
-        base = os.path.basename(p).lower()
-        stem = os.path.splitext(base)[0]
-        drop.add(base)
-        drop.add(stem)
-        # Each alphanumeric piece of the stem too (e.g. "crm-3" -> "crm").
-        drop.update(re.findall(r"[a-z0-9]+", stem))
-        # The file extension token (txt/csv/pdf/docx) is a generic type tag.
-        ext = os.path.splitext(base)[1].lstrip(".")
-        if ext:
-            drop.add(ext)
-    toks = [
-        t for t in re.findall(r"[a-z0-9]+", m)
-        if t not in drop and t not in _COMPARE_NOISE_WORDS
-    ]
-    return " ".join(toks)
 
 
-def _compare_documents(query: str, files, rag, client) -> str:
-    """Answer a multi-document comparison using per-document labeled context."""
-    parts = []
-    # Retrieve each document on the TOPIC (file names + comparison framing
-    # stripped) so retrieval is not diluted by the request's own words.
-    topic = _distill_compare_query(query, files)
-    for f in files:
-        ctx = rag.get_context_for_document(topic or query, f, top_k=4)
-        if ctx:
-            parts.append(ctx)
-    if not parts:
-        return "I could not find the documents to compare. Upload them on the Documents page first."
-    combined = "\n\n".join(parts)
-    prompt = (
-        "You are comparing two uploaded documents.\n\n"
-        f"Document excerpts (each labeled with its exact source file and "
-        f"chunk number):\n{combined}\n\n"
-        f"Comparison request: {query}\n\n"
-        "Answer in this structure:\n"
-        "1. One line about what each document IS (type, purpose) - label "
-        "each with its exact file name from the 'Source:' labels.\n"
-        "2. For EACH document, a short subsection headed by its exact file "
-        "name, stating what THAT document says about the topic. Quote the "
-        "relevant text word-for-word from the excerpt, then cite the exact "
-        "chunk number in parentheses, e.g. (CRM-3.docx, chunk 2).\n"
-        "3. Key similarities and differences, each cited the same way.\n"
-        "CRITICAL: a (file, chunk) citation may ONLY be attached to a claim "
-        "taken word-for-word from that exact labeled excerpt. Never attach "
-        "one document's chunk to a claim about the other document - if a "
-        "document does not discuss the topic, say so plainly instead of "
-        "guessing. Never invent facts, file names, or chunk numbers.\n"
-        "Use ONLY the excerpts above, and never dump raw excerpts into the "
-        "answer."
-    )
-    try:
-        resp = _complete_with_fallback(
-            client,
-            [
-                {"role": "system", "content": "You are a careful document analyst."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=_doc_answer_tokens(),
-        )
-    except Exception as e:
-        logging.getLogger(__name__).warning("document comparison failed: %s", e)
-        return friendly_llm_error(e)
-    return (_doc_completion_text(resp)
-            or "⚠️ The comparison couldn't be completed. Please ask again.")
 
 
-def _retrieve_context(rag, query: str, top_k: int = 6, history: str = "") -> str:
-    """Retrieve the top-k most relevant chunks for a query, ranked with a heap.
-
-    Uses ``rag.retrieve`` (OptimizedRAG: history-aware rewrite + optional
-    decomposition + hybrid/reranked search) or ``rag.search`` (scored
-    chunks), then ``heap_top_k`` for O(n log k) ranking on the best
-    available score (see ``chunk_score``). Falls back to ``rag.get_context``
-    (which returns all documents when nothing matches) if retrieval is
-    unavailable or empty.
-    """
-    try:
-        retrieve = getattr(rag, "retrieve", None)
-        if callable(retrieve):
-            chunks = retrieve(query, history=history, top_k=top_k * 3)
-        else:
-            chunks = rag.search(query, top_k * 3)
-    except Exception:
-        chunks = []
-    if not chunks:
-        try:
-            return rag.get_context(query, top_k=top_k)
-        except Exception:
-            return ""
-    top = heap_top_k(chunks, key=chunk_score, k=top_k)
-    context = "Relevant document excerpts:\n\n"
-    for c in top:
-        context += (
-            f"--- Source: {c.get('file', '?')} (chunk {c.get('chunk_index', '?')}) ---\n"
-            f"{c.get('content', '')}\n\n"
-        )
-    return context
 
 
-def answer_from_documents(query: str, rag) -> str:
-    """Answer a question about uploaded documents with a CLEAN, LLM-written
-    answer (instead of dumping raw chunk JSON / excerpts).
-
-    Handles multi-document comparisons ("compare X and Y") with per-document
-    retrieval, then a two-pass retrieval for regular questions: if the first
-    answer is "thin" (too short, or the model says the documents don't
-    contain the information), the question is reformulated into a more
-    specific query and the documents are searched once more before giving up.
-    """
-    # Inventory question ("what documents have I uploaded?") -> list the
-    # actual uploads straight from the index; no retrieval needed.
-    if _is_document_inventory_question(query):
-        try:
-            files = sorted(set(rag.list_documents()))
-        except Exception:
-            files = []
-        if not files:
-            return ("No documents have been uploaded yet. "
-                    "Upload a file on the Documents page first, then ask me about it.")
-        listing = "\n".join(f"- {os.path.basename(f) or f}" for f in files)
-        label = "document" if len(files) == 1 else "documents"
-        return f"You have {len(files)} uploaded {label}:\n{listing}"
-
-    # Fast in-memory LRU (exact-match, TTL-bounded) - checked before the LLM.
-    # Keyed by owner + that owner's upload generation: never cross-tenant,
-    # never stale after a re-upload.
-    cache_key = _doc_cache_key(rag, query)
-    cached = _doc_answer_cache.get(cache_key)
-    if _usable_doc_answer(cached):
-        return cached
-
-    # Semantic Cache (owner-scoped): serve a cached answer if one exists
-    # (an error cached by an older version is ignored -> answered fresh).
-    get_cached = getattr(rag, "get_cached_answer", None)
-    cached = get_cached(query) if callable(get_cached) else None
-    if _usable_doc_answer(cached):
-        _doc_answer_cache.put(cache_key, cached)
-        return cached
-
-    def _remember(answer: str) -> None:
-        # Never cache an empty, cut-off or error answer: asking again must retry.
-        if not _usable_doc_answer(answer):
-            return
-        cache = getattr(rag, "cache_answer", None)
-        if callable(cache):
-            try:
-                cache(query, answer)
-            except Exception as _e:
-                degrade("answer cache write failed (answer still returned)", _e)
-        _doc_answer_cache.put(cache_key, answer)
-
-    try:
-        context = _retrieve_context(rag, query)
-    except Exception:
-        context = ""
-    if not context or context == "No documents have been uploaded.":
-        return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
-    if "No documents" in context:
-        return "No documents have been uploaded yet. Upload a file on the Documents page first, then ask me about it."
-
-    from modules.secrets import get_secret
-    api_key = os.environ.get("GROQ_API_KEY", "") or get_secret("GROQ_API_KEY", default="")
-    if not api_key:
-        return context
-    client = _get_groq_client(api_key)
-
-    # Multi-document comparison: retrieve per document and answer with a
-    # comparison instead of a single mixed context.
-    is_compare, compare_files = _detect_compare_documents(query, rag)
-    if is_compare:
-        return _compare_documents(query, compare_files, rag, client)
-
-    try:
-        first = _ask_doc_question(client, query, context)
-    except DocAnswerUnavailable as e:
-        return str(e)  # friendly message; not cached, so asking again retries
-    retry_error = ""  # set if the second pass hits a rate limit/outage
-
-    # Two-pass RAG: retry with a reformulated search when the first answer is
-    # thin, or when Corrective RAG (OptimizedRAG.verify_answer, RAG_CRAG=1)
-    # finds claims the excerpts don't support. Thin answers skip the check.
-    verify = getattr(rag, "verify_answer", None)
-    thin = is_thin_answer(first)
-    unsupported = bool(not thin and callable(verify) and not verify(first, context))
-
-    if unsupported or thin:
-        reformulated = _reformulate_doc_query(query, context, client)
-        if reformulated and reformulated.lower() != query.strip().lower():
-            try:
-                context2 = _retrieve_context(rag, reformulated)
-            except Exception:
-                context2 = ""
-            if context2 and context2 != context and "No documents" not in context2:
-                # Combine both retrievals (skip if the second is just a
-                # substring of the first - i.e. nothing new was found).
-                combined = context if context2 in context else context + "\n\n" + context2
-                try:
-                    # The reformulation is a SEARCH query; the answer is still
-                    # to the user's own question.
-                    answer = _ask_doc_question(client, query, combined)
-                except DocAnswerUnavailable as e:
-                    answer = ""
-                    retry_error = str(e)
-                if answer and unsupported and not verify(answer, combined):
-                    return _check_doc_citations(answer, combined) + "\n\n" + _DOC_UNVERIFIED_NOTE
-                if answer:
-                    answer = _check_doc_citations(answer, combined)
-                    _remember(answer)
-                    return answer
-
-    if not first:
-        return retry_error or (
-            "⚠️ The answer couldn't be completed (the model ran out of room). "
-            "Please ask again, or ask a narrower question.")
-    if unsupported:
-        return _check_doc_citations(first, context) + "\n\n" + _DOC_UNVERIFIED_NOTE
-    first = _check_doc_citations(first, context)
-    _remember(first)
-    return first
 
 
 @app.post("/chat", response_model=ChatResponse)

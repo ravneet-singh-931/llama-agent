@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (maintenance audit #15, step 2) — `api.py` split, document cluster
+
+- **658 lines left `api.py`**: 23 functions and 19 constants covering document
+  routing, retrieval, answers and citation checks moved to
+  `modules/doc_answers.py`. All 23 are AST-identical to the originals.
+  `api.py` 3,373 → **2,776 lines**; all 39 routes unchanged. Names are
+  re-exported from `api`, so `from api import answer_from_documents` and
+  `api.is_document_question` keep working for the 11 files that use them.
+- **Deleted write-only dead state.** `app.state.doc_followup` was assigned in
+  three places and read in none (all reads go through Redis). Removed with the
+  extraction; the comment claiming it was "kept in app.state for speed" was
+  untrue.
+- **Fixed a regression introduced by the move itself:** `_bump_doc_generation`
+  kept writing to a `_doc_generation` dict that had moved, leaving two copies.
+  Uploads would have bumped the dead copy, so a re-uploaded document could still
+  be answered from the 10-minute answer cache. Now one counter, one home, and a
+  guard test that fails if they are ever split again.
+- `BoundedLRUCache` moved to `modules/api_utils.py` (it was declared in `api.py`).
+
 ### Security (maintenance audit, 2026-11-13)
 
 - **A 7-day refresh token authenticated requests as a 30-minute access token.**

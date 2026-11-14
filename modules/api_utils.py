@@ -28,6 +28,8 @@ Why each one lives here:
 import asyncio
 import contextvars
 import heapq
+import time
+from collections import OrderedDict
 from typing import Any, Dict
 
 
@@ -156,3 +158,37 @@ async def aiter_in_thread(make_iter):
             yield item
     finally:
         stop.set()
+
+
+class BoundedLRUCache:
+    """Bounded LRU cache with optional TTL.
+
+    Evicts the least-recently-used entry when full and treats entries older
+    than ``ttl`` seconds as misses. Used to cache repeated document answers so
+    identical questions skip the LLM call without growing memory unbounded.
+    """
+
+    def __init__(self, maxsize: int = 256, ttl: float = 600.0):
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._store: "OrderedDict[str, tuple]" = OrderedDict()
+
+    def get(self, key: str):
+        if key not in self._store:
+            return None
+        val, ts = self._store[key]
+        if self.ttl and (time.monotonic() - ts) > self.ttl:
+            del self._store[key]
+            return None
+        self._store.move_to_end(key)
+        return val
+
+    def put(self, key: str, val) -> None:
+        if key in self._store:
+            self._store.move_to_end(key)
+        self._store[key] = (val, time.monotonic())
+        while len(self._store) > self.maxsize:
+            self._store.popitem(last=False)
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(key) is not None
