@@ -3295,15 +3295,24 @@ async def get_metrics_prometheus(request: Request):
 
 @app.get("/metrics/json")
 async def get_metrics_json(user=Depends(require_admin)):
-    """JSON metrics endpoint for dashboards (admin only)"""
+    """JSON metrics endpoint for dashboards (admin only).
+
+    Process health plus the error log's own count. The running counters that
+    used to be returned here (total_queries, popular_tools, avg_response_time)
+    were a per-process second set of books for events Prometheus already
+    counts -- `/metrics` is the number to read for those.
+    """
     try:
         monitor = app.state.monitor
         logger = app.state.logger
-        
+
         health = monitor.get_health()
-        metrics = logger.get_metrics()
-        
-        return {"health": health, "metrics": metrics}
+        return {
+            "health": health,
+            "metrics": {
+                "total_errors": logger.get_error_count(),
+            },
+        }
     except Exception :
         raise HTTPException(status_code=500, detail="Internal server error")
 

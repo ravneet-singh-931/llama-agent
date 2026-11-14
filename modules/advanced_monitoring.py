@@ -317,8 +317,16 @@ class SLAMonitor:
             avg_response = 0
             p95_response = 0
         
-        # Calculate error rate
-        total_requests = len(self.response_times)
+        # Calculate error rate.
+        #
+        # The denominator used to be len(response_times) -- successful requests
+        # only -- and 0 when nothing had succeeded yet, so a service whose
+        # FIRST request failed reported "error rate 0%, met: True". Measured:
+        # one error and no successes gave current=0.0 met=True.
+        #
+        # Requests here are attempts: one recorded response time or one error.
+        # A non-zero error count against zero successes is 100%, not 0%.
+        total_requests = len(self.response_times) + len(self.errors)
         error_count = len(self.errors)
         error_rate = (error_count / total_requests * 100) if total_requests > 0 else 0
         
@@ -369,28 +377,20 @@ sla_monitor = SLAMonitor()
 # ============ NOTIFICATION CHANNELS ============
 
 
-def slack_notification(alert: Dict) -> None:
-    """Send alert to Slack (placeholder)."""
-    # In production, use Slack API
-    print(f"[SLACK] {alert['severity'].value.upper()}: {alert['message']}")
-
-
-def email_notification(alert: Dict) -> None:
-    """Send alert via email (placeholder)."""
-    # In production, use SMTP
-    print(f"[EMAIL] {alert['severity'].value.upper()}: {alert['message']}")
-
-
-def webhook_notification(alert: Dict) -> None:
-    """Send alert via webhook (placeholder)."""
-    # In production, use HTTP POST
-    print(f"[WEBHOOK] {alert['severity'].value.upper()}: {alert['message']}")
-
-
-# Register default notification channels
-alert_manager.add_notification_channel(slack_notification)
-alert_manager.add_notification_channel(email_notification)
-alert_manager.add_notification_channel(webhook_notification)
+# Notification channels.
+#
+# There used to be three functions here -- slack_notification,
+# email_notification, webhook_notification -- all of which only printed, and
+# all three were registered on alert_manager at import time. So a firing alert
+# printed the same line three times with a different prefix and was delivered
+# nowhere. That is worse than having no channel: the dashboard showed "alerts
+# are configured", and the only thing configured was stdout, which is already
+# the alert's own destination via the print in check_alerts().
+#
+# Deleted rather than implemented. Real delivery needs a webhook URL, retries,
+# a failure mode of its own, and somewhere for its own failures to go; that is
+# a feature with an env var and a test, not a placeholder. The channel list
+# stays, and add_notification_channel() is the hook for whoever adds one.
 
 
 # ============ MONITORING DASHBOARD ============

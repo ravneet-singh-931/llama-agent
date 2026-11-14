@@ -71,19 +71,27 @@ def test_strict_defaults_to_off():
 # 2. Real degraded paths emit a record
 # --------------------------------------------------------------------------
 
-def test_unreadable_metrics_file_degrades(tmp_path, caplog):
-    """monitoring.MetricsCollector._load_metrics with a corrupt file."""
+def test_corrupt_interaction_log_degrades(tmp_path, caplog):
+    """AgentLogger.log_interaction with an unreadable history file.
+
+    This used to exercise the metrics-file fallback. AgentLogger no longer
+    keeps a metrics file (its counters duplicated Prometheus), so the same
+    "corrupt file on disk" path is exercised through the interaction log,
+    which the logger still owns.
+    """
     from modules.monitoring import AgentLogger
 
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    (log_dir / "metrics.json").write_text("{not json", encoding="utf-8")
+    (log_dir / "interactions.json").write_text("{not json", encoding="utf-8")
+    logger = AgentLogger(log_dir=str(log_dir))
     with caplog.at_level(logging.DEBUG, logger="modules.silent"):
-        logger = AgentLogger(log_dir=str(log_dir))
-    assert any("metrics file missing or corrupt" in r.getMessage()
+        logger.log_interaction("hi", "hello", [], 0.1)
+    assert any("Corrupt/unreadable history" in r.getMessage()
+               or "history" in r.getMessage()
                for r in caplog.records), caplog.text
-    # And the documented fallback still holds: empty defaults, no exception.
-    assert logger.metrics["total_queries"] == 0
+    # The documented fallback still holds: the new interaction is kept.
+    assert logger.get_recent_interactions(1)[0]["user_input"] == "hi"
 
 
 def test_torn_recording_line_degrades(tmp_path, caplog):
@@ -110,10 +118,11 @@ def test_strict_mode_makes_a_real_path_fail(monkeypatch, tmp_path):
 
     log_dir = tmp_path / "strict"
     log_dir.mkdir()
-    (log_dir / "metrics.json").write_text("{not json", encoding="utf-8")
+    (log_dir / "interactions.json").write_text("{not json", encoding="utf-8")
+    logger = AgentLogger(log_dir=str(log_dir))
     monkeypatch.setattr(silent, "STRICT", True)
     with pytest.raises(silent.DegradedError):
-        AgentLogger(log_dir=str(log_dir))
+        logger.log_interaction("hi", "hello", [], 0.1)
 
 
 # --------------------------------------------------------------------------
@@ -123,6 +132,24 @@ def test_strict_mode_makes_a_real_path_fail(monkeypatch, tmp_path):
 # The one handler that is allowed to keep a bare body: a queue timeout is
 # normal control flow, not a degraded capability.
 _ALLOWED_SILENT = {("evals/run.py", "queue.Empty")}
+
+# Scope, stated deliberately: this census covers handlers whose body DISCARDS
+# control flow -- a bare `pass` or `continue`. It does not cover the much
+# larger set (~124 sites) that swallow into a visible default:
+#
+#     except (OSError, ValueError):
+#         return None          # or return [], return False, x = {}
+#
+# Those are a different thing and were deliberately left alone. `return None`
+# is a typed contract every caller can see and handle; `pass` is
+# indistinguishable from a handler someone added to make a red test go green,
+# because it changes nothing a reader can point at. Converting the ~124 would
+# add noise to 124 call sites and buy almost nothing -- that is the
+# over-engineering this audit exists to remove, not a gap in it.
+#
+# If one of those defaults is ever found to be WRONG (as `metrics.json` and
+# the alert rules were -- see docs/OBSERVABILITY_FINDINGS.md 5 and 6), the fix
+# belongs at that site, with the specific bug named, not as a blanket pass.
 
 
 def _silent_handlers():

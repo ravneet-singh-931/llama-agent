@@ -246,13 +246,34 @@ def test_monitor_health_is_process_health_only():
         assert not hasattr(monitor, gone), f"{gone} should be gone"
 
 
-def test_logger_metrics():
+def test_logger_records_interactions_and_errors():
+    """AgentLogger writes the forensic record; it does not keep counters.
+
+    It used to also maintain total_queries / total_tool_calls / avg_response_time
+    in a metrics.json rewritten on every request -- a per-process second set of
+    books for events Prometheus already counts. Those are gone; the log files
+    and a count derived from the error file remain.
+    """
     from modules.monitoring import AgentLogger
+
     with tempfile.TemporaryDirectory() as temp_dir:
         logger = AgentLogger(log_dir=temp_dir)
         logger.log_interaction("test", "response", ["tool"], 0.5)
-        metrics = logger.get_metrics()
-        assert metrics["total_queries"] == 1
+        logger.log_error(ValueError("boom"), context="unit test")
+
+        # The interaction is on record and readable back.
+        recent = logger.get_recent_interactions(1)
+        assert recent[0]["user_input"] == "test"
+        assert recent[0]["tools_used"] == ["tool"]
+
+        # The error count comes from the error log itself, so the count and
+        # the list can never disagree.
+        assert logger.get_error_count() == 1
+        assert logger.get_error_summary()["error_types"] == {"ValueError": 1}
+
+        # The counters are gone, not merely uncounted.
+        for gone in ("get_metrics", "get_popular_tools", "metrics_file"):
+            assert not hasattr(logger, gone), f"{gone} should be gone"
 
 
 # ============ TEST MULTI-AGENT ============
@@ -317,3 +338,39 @@ def test_multi_agent_agent_names():
     finally:
         if "GROQ_API_KEY" in os.environ:
             del os.environ["GROQ_API_KEY"]
+
+
+def test_agent_logger_does_not_keep_a_second_set_of_counts():
+    """The forensic log and the metrics must not drift back together.
+
+    AgentLogger used to rewrite a metrics.json on every request: total_queries,
+    total_tool_calls, avg_response_time, popular_tools. Those are Prometheus
+    counters now. Keeping a copy here meant two numbers for one event, two
+    replicas that disagreed, and a restart that erased one of them.
+
+    """
+    import inspect
+
+    from modules.monitoring import AgentLogger
+
+    # No metrics file, and no writer for one. (Check the API and the actual
+    # files written, not the docstring -- the docstring explains the removal.)
+    src = inspect.getsource(AgentLogger)
+    assert "_save_metrics" not in src
+    assert "self.metrics[" not in src
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        lg = AgentLogger(log_dir=d)
+        lg.log_interaction("hi", "hello", [], 0.1)
+        written = sorted(os.listdir(d))
+    assert "metrics.json" not in written, f"metrics file recreated: {written}"
+
+    # Its public surface is the log itself plus a count derived from the log.
+    assert hasattr(AgentLogger, "get_error_count")
+    assert hasattr(AgentLogger, "get_recent_interactions")
+    for gone in ("get_metrics", "get_popular_tools"):
+        assert not hasattr(AgentLogger, gone), f"{gone} should be gone"
+
+

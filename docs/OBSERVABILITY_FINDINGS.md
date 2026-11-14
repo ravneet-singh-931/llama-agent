@@ -4,6 +4,11 @@ The app calls itself "observable by design". This file is the evidence, in the s
 shape as [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md): what was wrong, what it cost, what
 fixed it, and the number that proves it.
 
+Three findings (7, 8, 9) came out of consolidating the three monitoring modules for
+problem #14 of the maintenance audit: the log module was keeping a second set of
+metrics, a firing alert printed three times and went nowhere, and the SLA monitor
+scored a failing service as compliant.
+
 Three surfaces are instrumented — Prometheus metrics, Phoenix traces, Loki logs —
 and three of them were measuring the wrong thing in ways that made the dashboard
 *look healthy*.
@@ -297,7 +302,100 @@ never publishes (it has ['avg_response_time', ..., 'failure_rate', ...,
 
 ---
 
-## The pattern, six for six
+## 7. The log module was also a second metrics system, rewriting two files per request
+
+**Symptom.** None visible. `AgentLogger` worked.
+
+**Cause.** It kept a running `metrics.json` — `total_queries`, `total_tool_calls`,
+`avg_response_time`, `popular_tools`, `last_seen` — and **rewrote it on every
+request**, after first re-reading the entire `interactions.json` to append one
+line. So every chat did: read the whole interactions file, rewrite it, rewrite
+metrics. Under the lock, inside the request handler.
+
+Two of its numbers were never true even in principle:
+
+| field | reality |
+|---|---|
+| `total_tool_calls` | incremented by looping over `tools_used` — and **every caller passes `[]`** |
+| `popular_tools` | same, therefore always `{}` |
+
+And the rest were a **per-process second set of books** for events Prometheus
+already counted: `total_queries` vs `record_chat`, `avg_response_time` vs
+`RESPONSE_TIME`, `total_errors` vs `ERROR_COUNT`. Same defect as finding 5, one
+layer down — two replicas, two totals, a restart erasing both.
+
+**Fix.** The log files stay, because Prometheus counts events and cannot tell you
+*what a user said* in the request that broke. The metrics half is deleted:
+`metrics.json`, `_load_metrics`, `_save_metrics`, `get_metrics`,
+`get_popular_tools`, and the two full-file metrics rewrites. `log_interaction`
+now appends and rewrites only the interaction history; `metrics.json` is never
+created.
+
+The one number worth keeping — how many exceptions this process logged — is now
+**derived from the error log itself** (`get_error_count()`), so the count and the
+list can never disagree. `/metrics/json` returns process health plus that count;
+`get_agent_health()` prints uptime and the error count instead of query totals
+that only one replica knew.
+
+> **A log file is a record. A counter is a claim about a population.** Keeping
+> both in one class is how the record and the claim drifted apart.
+
+## 8. A firing alert printed three times and was delivered nowhere
+
+**Symptom.** None. The dashboard said alerts were configured.
+
+**Cause.** Three functions — `slack_notification`, `email_notification`,
+`webhook_notification` — each of which only `print`ed, and **all three were
+registered on `alert_manager` at import time**. When a rule fired,
+`check_alerts` looped the channel list and printed the same message three times
+with a different prefix.
+
+This is worse than having no channel. A missing channel is visible. A channel
+that exists and prints looks like delivery in every config review, while the
+only actual destination — stdout — is already where `check_alerts` prints the
+alert on its own.
+
+**Fix.** Deleted, not implemented. Real delivery needs a webhook URL, retries, a
+failure mode of its own, and somewhere for *its* failures to go. That is a
+feature with an env var and a test. The channel list and
+`add_notification_channel()` stay as the hook. The limitation is already stated
+in "What is *not* measured": no Alertmanager, nobody is paged.
+
+> **A placeholder registered as a real thing is indistinguishable from a real
+> thing, until the day it matters.**
+
+## 9. The SLA monitor reported "met" for a service that had just errored
+
+**Symptom.** A service whose first request failed showed `error rate 0%,
+met: true`.
+
+**Cause.** The error rate divided by `len(response_times)` — **successful
+requests only** — and returned `0` when that list was empty:
+
+```python
+error_rate = (error_count / total_requests * 100) if total_requests > 0 else 0
+```
+
+So zero successes rendered as zero percent, which is the *best possible* score,
+and the compliance check read it as met. Measured before the fix: one error and
+no successes gave `current=0.0, met=True`.
+
+**Fix.** The denominator is attempts — recorded response times **plus** recorded
+errors. One error with no successes is now **100%**, correctly not met; one error
+in 100 successes is 0.99%, met. No traffic still reads 0% met, which is the one
+remaining ambiguity, and it is honest: there is nothing to be non-compliant
+about yet.
+
+Found while auditing this module for finding 7, not by any test — the SLA
+monitor had a test asserting `overall_status in ("COMPLIANT", "NON-COMPLIANT")`,
+which is true of every possible input.
+
+> **A divide-by-zero guard that returns zero chooses "perfect" as its fallback.**
+> For a *badness* metric, the neutral element is the worst value, not the best.
+
+---
+
+## The pattern, nine for nine
 
 | # | What the metric said | What was true | Why |
 |---|---|---|---|
@@ -307,11 +405,15 @@ never publishes (it has ['avg_response_time', ..., 'failure_rate', ...,
 | 4 | "traced cheaply" | ~5 µs/span — **true**, but unmeasured | the claim had no number behind it |
 | 5 | "healthy", ~2% errors | two uncoupled counters; the probe inflated the denominator | the same event counted twice, at two layers |
 | 6 | no alerts | four of five rules read keys the feed never sends | `.get(key, 0)` made absence look like health |
+| 7 | `total_queries: 41` | unknown; each replica had its own | a second counter for an event Prometheus counts, rewritten to disk per request |
+| 8 | "alerts configured" | printed three times, delivered nowhere | placeholder channels registered as real |
+| 9 | error rate 0%, met | 100% error rate | divide-by-zero guard returns 0 for a *badness* metric |
 
-Findings 1–3 and 5–6 were **read and trusted**. None was caught by looking at the
+Findings 1–3 and 5–9 were **read and trusted**. None was caught by looking at the
 code — each was caught by comparing the dashboard against a second source: the pods'
 raw metrics, the absence of failures in the logs, a stopwatch, a `grep` for call
-sites, and the list of keys a function actually returns.
+sites, the list of keys a function actually returns, and — for 7 and 9 — actually
+running the code on the input that breaks it.
 
 **Finding 4 is the odd one out and completes the pattern.** It found nothing
 broken. It was caught by asking which claims had no second source at all — and then
@@ -319,7 +421,7 @@ becoming one.
 
 **A dashboard is a measuring instrument, and it needs the same suspicion as a test
 suite.** The eval part of this project has 19 findings about the measuring stick.
-This part has six about the dashboard. They are the same kind of bug in different
+This part has nine about the dashboard. They are the same kind of bug in different
 clothes.
 
 Findings 5 and 6 are the sharpest form of it: in both, the broken instrument and the

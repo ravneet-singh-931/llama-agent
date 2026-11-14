@@ -525,15 +525,17 @@ def clear_memory() -> str:
 
 
 def get_agent_health() -> str:
-    """Get agent health and performance stats."""
+    """Get agent health and performance stats.
+
+    Query counts and latency live in Prometheus (`/metrics`), not in a
+    per-process counter: two replicas reported two different totals, and a
+    restart erased both.
+    """
     health = monitor.get_health()
-    log_metrics = logger.get_metrics()
     return (
         f"🏥 Health: {health['status']}\n"
         f"⏱️ Uptime: {health['uptime_human']}\n"
-        f"📊 Total queries: {log_metrics['total_queries']}\n"
-        f"❌ Total errors: {log_metrics['total_errors']}\n"
-        f"📈 Avg response time: {log_metrics['avg_response_time']:.2f}s"
+        f"❌ Errors logged: {logger.get_error_count()}"
     )
 
 

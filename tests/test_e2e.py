@@ -284,9 +284,9 @@ class TestMonitoringFlow:
 
         with tempfile.TemporaryDirectory() as tmp:
             logger = AgentLogger(log_dir=tmp)
-            before = logger.get_metrics()["total_errors"]
+            before = logger.get_error_count()
             logger.log_error(ValueError("boom"), context="test")
-            after = logger.get_metrics()["total_errors"]
+            after = logger.get_error_count()
         assert after == before + 1, "Error not tracked"
 
         print("  ✅ Error tracking works")

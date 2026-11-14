@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (maintenance audit, 2026-11-13)
 
+- **The log module was a second metrics system, and rewriting two files per
+  request.** `AgentLogger` kept a running `metrics.json` — `total_queries`,
+  `total_tool_calls`, `avg_response_time`, `popular_tools` — rewritten on every
+  request, after re-reading the whole `interactions.json` to append one line. Two
+  of those fields could never be true: `total_tool_calls` and `popular_tools`
+  were incremented by looping over `tools_used`, and every caller passes `[]`. The
+  rest were per-process copies of events Prometheus already counts (the same
+  defect as the `PerformanceMonitor` counters, one layer down).
+
+  The log files stay — Prometheus counts events, it cannot tell you what a user
+  said in the request that broke. `metrics.json`, `_load_metrics`,
+  `_save_metrics`, `get_metrics`, `get_popular_tools` and both per-request metrics
+  rewrites are deleted. The one number worth keeping is now **derived from the
+  error log itself** (`get_error_count()`), so the count and the list can never
+  disagree. `/metrics/json` returns process health plus that count;
+  `get_agent_health()` prints uptime and the error count.
+
+- **A firing alert printed three times and was delivered nowhere.** Three
+  "notification channels" (`slack_`/`email_`/`webhook_notification`) only printed,
+  and all three were registered on `alert_manager` at import. A missing channel is
+  visible; a printing channel looks like delivery in a config review, while stdout
+  is already where `check_alerts` prints. Deleted rather than implemented: real
+  delivery needs a webhook URL, retries, and somewhere for its own failures to go.
+  `add_notification_channel()` stays as the hook.
+
+- **The SLA monitor reported "met" for a service that had just errored.** The
+  error rate divided by successful requests only and returned `0` when there were
+  none — so a service whose *first* request failed read `0% errors, met: true`.
+  Measured before the fix: one error and no successes gave `current=0.0,
+  met=True`. The denominator is now attempts (responses **+** errors); the same
+  case reads **100%, not met**.
+
+  > A divide-by-zero guard that returns zero chooses "perfect" as its fallback.
+  > For a badness metric the neutral element is the worst value, not the best.
+
+  Suite 846 → **847 passed**. Bandit, flake8 and pip-audit (all CI-exact) clean.
+
+### Changed (maintenance audit, 2026-11-13)
+
 - **Two sets of books for the same request, and a health check whose verdict improved
   the more it was polled.** `PerformanceMonitor` kept its own `request_count` /
   `error_count` beside the Prometheus counters that `prometheus_middleware` already

@@ -12,7 +12,7 @@
 in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/after.
 🔴 OPEN means still present in the repo, with the effort estimated.
 
-**Last updated:** #20 closed, plus two CI failures it caused and the guard that now catches them.
+**Last updated:** #14 closed — the monitoring modules now have one owner per number.
 
 | # | Problem | Where | Status | Proof / note |
 |---|---|---|---|---|
@@ -29,7 +29,7 @@ in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/a
 | 11 | 74 of 111 env vars absent from `.env.example` (76 absent from README) | `.env.example` | 🟢 **DONE** | **111 → 120 documented, 0 missing.** Extracted from source, not a hand list. Found 9 more read via name-indirection + `SSL_CN` in a shell script. `test_env_documented.py` fails in both directions |
 | 12 | No coverage floor in CI — the suite reported coverage but never gated on it | `.github/workflows/main.yml` | 🟢 **DONE** | `--cov-fail-under=74`, set 4 points under the measured **78.61%** on CI's `--cov=.` scope. A ratchet, with the scope written into the comment |
 | 13 | Two full UIs (Next.js + Streamlit "legacy") | `frontend/`, `app.py` | 🟢 **DONE** | **Streamlit deleted entirely** — see PART 20 |
-| 14 | Three monitoring modules, 1,348 lines | `monitoring.py`, `advanced_monitoring.py`, `prometheus_metrics.py` | 🔴 **OPEN** | 2–3 h |
+| 14 | Three monitoring modules, 1,353 lines | `monitoring.py`, `advanced_monitoring.py`, `prometheus_metrics.py` | 🟢 **DONE** | **Three findings came out of it, all in `OBSERVABILITY_FINDINGS.md` 7–9.** `AgentLogger` was a second metrics system that rewrote two files per request (two of its fields were never true: every caller passes `tools_used=[]`). Three placeholder notifiers were registered as real channels — a firing alert printed three times and was delivered nowhere. `SLAMonitor` scored a service whose first request failed as **0% errors, met** — divide-by-zero returning the *best* value for a badness metric. Metrics half deleted; log files kept. Suite 846 → **847** |
 | 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🔴 **OPEN** | days; do last |
 | 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🔴 **OPEN** | days |
 | 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🟢 **DONE** | stdio client (230 lines) deleted with the UI; only the SSE client ships |
@@ -1356,3 +1356,103 @@ the frontend, and the duplicate was the *input to a health verdict*, not dead we
 I made that estimate before reading `get_health()` and the probe config, and stated
 it in the same breath as the recommendation to act. **Estimate after reading, not
 before.**
+
+---
+
+# PART 23 — #14: three monitoring modules, and three findings inside them
+
+## What the finding said
+
+*"Three monitoring modules, 1,348 lines — 2–3 h."* True about the size, and it
+suggested the job was **merging files**. It was not. Reading all three end to end
+produced three defects that no line count would have surfaced:
+
+**7. `AgentLogger` was a second metrics system.** It kept a running `metrics.json`
+and rewrote it on every request, after first re-reading the whole interactions
+file to append one line. Two of its fields could never be true: `total_tool_calls`
+and `popular_tools` were incremented by looping over `tools_used`, and **every
+caller passes `[]`**. The rest were per-process copies of events Prometheus
+already counts.
+
+**8. A firing alert printed three times and was delivered nowhere.** Three
+"notification channels" that only `print`, all three registered at import. Worse
+than having none: a missing channel is visible, a printing channel looks like
+delivery in a config review.
+
+**9. `SLAMonitor` scored a failing service as compliant.** The error rate divided
+by successful requests only and returned `0` when there were none, so a service
+whose first request failed reported **0% errors, met: true**. Measured, not
+reasoned about: `1 error, 0 successes -> current=0.0, met=True`.
+
+## Do it or don't
+
+**Do it** — and note that the value was *not* the consolidation. Deleting a
+duplicate counting system and finding that a monitoring module reports the
+opposite of the truth are the kinds of things that only surface when you read a
+file in full. The 1,353-line number was a reason to read it, not the work itself.
+
+## What was done
+
+| change | file |
+|---|---|
+| deleted `metrics.json`, `_load_metrics`, `_save_metrics`, `get_metrics`, `get_popular_tools`, and both per-request metrics rewrites | `monitoring.py` |
+| added `get_error_count()` — derived from the error log, so count and list cannot disagree | `monitoring.py` |
+| deleted the three placeholder notifiers and their import-time registration | `advanced_monitoring.py` |
+| error-rate denominator is attempts (responses **+** errors) | `advanced_monitoring.py` |
+| `/metrics/json` returns process health + error count instead of the dead counters | `api.py` |
+| `get_agent_health()` prints uptime + error count, not per-replica query totals | `llama_agent1.py` |
+
+**Kept deliberately:** the log files (`agent.log`, `interactions.json`,
+`errors.json`) and `BusinessMetrics`. Prometheus counts events; it cannot tell you
+what a user said in the request that broke, and `BusinessMetrics` is the input to
+the surviving alert rules.
+
+## Two things I claimed that were false
+
+**I said `active_users` (a `set`) would break `json.dump`.** It would — but
+`active_users` lives in `BusinessMetrics`, which is **never serialized to disk**.
+I inferred a bug from the type without checking which object held it. No such bug
+existed.
+
+**I said `record_document_upload` was uncalled, so `documents_uploaded` was
+permanently 0.** It is called at `api.py:3061`. Also wrong.
+
+**I said the SLA monitor's error rate was "not consumed".** It is, via
+`get_monitoring_dashboard()` → `/monitoring/dashboard`. Wrong.
+
+Three false claims in the same message, all from reading one file's shape and
+inferring the rest. The defects that survived that check (7, 8, 9) are the ones I
+ran, not the ones I reasoned about.
+
+## A hole in the #18 census, and why it stays a hole
+
+The #18 sweep counted handlers whose body is a bare `pass`/`continue`. It missed
+this shape:
+
+```python
+except (OSError, ValueError):
+    interactions = []          # swallows into a visible default
+```
+
+There are **~124 of these**. I converted the two that mattered here (they were
+silently discarding a corrupt log) and **left the other 122 alone**, with the
+reason written into `tests/test_degrade.py`: `return None` / `return []` is a
+**typed contract every caller can see and handle**, while `pass` changes nothing a
+reader can point at. Converting 122 graceful fail-safe sites would add noise to
+122 call sites and buy nothing — the over-engineering this audit exists to remove.
+Scope recorded rather than silently expanded.
+
+## Proof
+
+| check | before | after |
+|---|---|---|
+| suite | 846 passed / 6 skipped | **847 passed / 6 skipped** |
+| bandit (CI-exact, no tree exclusions) | 0 | **0** |
+| flake8 (CI-exact `--select`) | 0 | **0** |
+| pip-audit (CI-exact, 11 ignores) | clean | **clean** |
+| `metrics.json` written per request | yes | **no** (verified by listing the log dir) |
+| 1 error, 0 successes | `0.0%`, `met: True` | **`100.0%`, `met: False`** |
+
+Live check with the admin dependency overridden: `/metrics/json` → 200
+`{"health": {...uptime only...}, "metrics": {"total_errors": 10}}`;
+`/monitoring/dashboard` → 200 with `business`/`sla`/`costs` blocks intact.
