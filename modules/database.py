@@ -75,11 +75,8 @@ class User(Base):
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
 
     def verify_password(self, password: str) -> bool:
-        """Verify password against hash"""
-        return _bcrypt.checkpw(
-            password.encode("utf-8"),
-            self.hashed_password.encode("utf-8"),
-        )
+        """Verify password against hash (False, never raises; see verify_password)."""
+        return verify_password(password, self.hashed_password)
 
     @staticmethod
     def hash_password(password: str) -> str:
@@ -288,18 +285,58 @@ def generate_api_key() -> str:
     return f"sk-{uuid.uuid4().hex}"
 
 
+# bcrypt hashes at most 72 BYTES and raises ValueError beyond that -- it does
+# not truncate silently. The old code passed the password straight in, so any
+# password over 72 bytes crashed: /auth/register returned a generic 500, and
+# login raised ValueError ("Invalid salt"-adjacent) instead of rejecting the
+# attempt. 73 ASCII characters, or 19 emoji, was enough.
+#
+# The fix is to reject at the edge with a usable message, not to truncate.
+# Truncating would make "correct horse battery staple..." and its first 72
+# bytes the same password, which is a silent weakening in exchange for
+# turning a crash into a wrong answer.
+BCRYPT_MAX_BYTES = 72
+
+
+def password_bytes(password: str) -> bytes:
+    """Encode a password to UTF-8, rejecting anything bcrypt cannot hash.
+
+    Raises ValueError with a message a caller can show a user.
+    """
+    raw = (password or "").encode("utf-8")
+    if len(raw) > BCRYPT_MAX_BYTES:
+        raise ValueError(
+            f"Password is too long: {len(raw)} bytes, maximum is "
+            f"{BCRYPT_MAX_BYTES}. Shorten it by "
+            f"{len(raw) - BCRYPT_MAX_BYTES} bytes (an accented or emoji "
+            "character can be several bytes)."
+        )
+    return raw
+
+
 def hash_password(password: str) -> str:
-    """Hash a password"""
-    salt = _bcrypt.gensalt()
-    return _bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+    """Hash a password. Raises ValueError if it exceeds bcrypt's limit."""
+    return _bcrypt.hashpw(
+        password_bytes(password), _bcrypt.gensalt()
+    ).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash"""
-    return _bcrypt.checkpw(
-        plain_password.encode("utf-8"),
-        hashed_password.encode("utf-8"),
-    )
+    """Verify a password against its hash.
+
+    Returns False -- never raises -- for a password that cannot be valid: too
+    long for bcrypt, or a stored hash that is not a bcrypt hash at all (a
+    corrupt row, a migrated column). An authentication check that raises is a
+    500 on the login path; an authentication check that returns False is a
+    rejected login.
+    """
+    try:
+        return _bcrypt.checkpw(
+            password_bytes(plain_password),
+            hashed_password.encode("utf-8"),
+        )
+    except (ValueError, TypeError):
+        return False
 
 
 # ============ SINGLETON INSTANCE ============

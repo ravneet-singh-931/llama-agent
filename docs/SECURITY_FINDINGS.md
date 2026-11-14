@@ -339,3 +339,85 @@ endpoint's own 422.
 The declared constant `MAX_FACT_VALUE_LENGTH = 1000` sat in the source next to a
 function that would have enforced it. Reading the file, the limit looks real. Running
 the code, nothing enforced it — on one of seven paths.
+
+---
+
+## S7. A refresh token authenticated requests — fixed 2026-11-13
+
+**Symptom.** None. Login worked, protected routes worked.
+
+**Cause.** Two auth paths existed and only one checked the token type.
+
+| path | checks `type == "access"`? |
+|---|---|
+| `get_current_user` (routes using `Depends(get_current_user)`) | **yes** |
+| `authenticate_user` (dual JWT-or-API-key) | **no** |
+
+`authenticate_user` verified the signature, read `sub`, and returned the user. A
+refresh token is a perfectly valid JWT — same secret, same algorithm, different
+`type` and a **7-day** life instead of 30 minutes. So the long-lived credential
+worked wherever the short-lived one was meant to be required.
+
+Measured before the fix: `authenticate_user(C(credentials=refresh_token))` →
+`vic` **accepted**. A stolen refresh token bought 7 days of access, and refresh
+tokens are the credential most likely to be stored in a place that leaks — they
+are the one you *have* to persist to stay logged in.
+
+**Fix.** Both paths require `payload["type"] == "access"`. Regression tests cover
+the header path, the cookie path, and that a real access token still works.
+
+> **When two functions answer the same question, the weaker one is the answer.**
+
+## S8. Three password-handling bugs, all of which crashed instead of refusing — fixed 2026-11-13
+
+`modules/auth.py` was at **53% coverage**, and the untested half was the half that
+touches credentials. Writing the tests found three defects; none was found by
+reading the file.
+
+**1. bcrypt's 72-byte limit crashed registration.** `hashpw` raises `ValueError`
+beyond 72 bytes — it does not truncate. `RegisterRequest` allows
+`max_length=128`, so a 73-character password was accepted by validation and then
+blew up in `hash()`. `/auth/register` caught the bare `Exception` and returned a
+**500 Internal Server Error**. Measured: 72 ASCII characters fine, 73 raises;
+8 emoji fine, 19 emoji (76 bytes) raises.
+
+Fixed by rejecting at the edge with a message that names the limit and the
+overflow, **not** by truncating to 72 bytes. Truncating would silently make a
+long password and its 72-byte prefix the same password — turning a crash into a
+wrong answer is the worse trade.
+
+**2. A corrupt stored hash crashed login.** `bcrypt.checkpw` raises
+`ValueError("Invalid salt")` when the stored value is not a bcrypt hash — a
+corrupt row, a half-migrated column. Login returned 500 instead of refusing.
+`verify_password` now returns `False` for an unusable hash or an over-long
+password: an auth check that raises is a 500, an auth check that returns `False`
+is a rejected login.
+
+**3. The length requirement could be skipped.** `check_strength` scored 5 checks
+and required `score >= 4`, so **any one check could fail — including length**.
+`"aA1!"` (4 characters) scored 4/5 and was accepted. Not exploitable through the
+HTTP API, because `RegisterRequest.min_length=8` also applies, but that made
+`check_strength` a second, weaker gate that a caller reaching `UserManager`
+directly would fall straight through. Length is now a hard requirement.
+
+All three lived in **four copies** of the bcrypt calls (`PasswordManager`, the
+`User` model, and the two module-level helpers). They are now one implementation
+in `modules/database.py`, because four copies is how they drifted.
+
+**Coverage: 53% → 93%** across 61 tests, covering register / login / refresh /
+profile lookup / API-key create-validate-expire / the four FastAPI dependencies /
+the cookie path. The remaining 7% is the production-import guard, which cannot be
+exercised inside an imported module.
+
+> **An error path that raises is indistinguishable from a bug at the call site.**
+> Three of these read as "500 Internal Server Error" to a user, and a 500 is what
+> the rest of this codebase returns when something is genuinely wrong.
+
+> **A score of 4 out of 5 is a rule about the wrong thing.** It says "most of the
+> checks passed", not "the password is long enough".
+
+### What this part did not do
+
+No change to token lifetimes, algorithms or the secret-loading path. The
+production guard (`ENVIRONMENT=production` with a default secret raises at import)
+was already correct and is unchanged.

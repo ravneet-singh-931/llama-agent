@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (maintenance audit, 2026-11-13)
+
+- **A 7-day refresh token authenticated requests as a 30-minute access token.**
+  `get_current_user` checked `payload["type"] == "access"`; `authenticate_user`
+  did not. Both verify the same signature with the same secret, so the long-lived
+  credential — the one you must persist to stay logged in, and therefore the one
+  most likely to leak — was accepted wherever the short-lived one was required.
+  Measured before the fix: `authenticate_user(refresh_token)` returned the user.
+  After: **401**. Both paths now require `type == "access"`.
+
+- **Any password over 72 bytes returned a 500 instead of being refused.** bcrypt
+  raises beyond 72 bytes rather than truncating, and `RegisterRequest` allows
+  `max_length=128`, so a 73-character password passed validation and then raised
+  inside `hash()`. Multibyte text hits it sooner: 19 emoji is 76 bytes. Rejected
+  now at the edge with a 400 naming the overflow — **not** truncated, because
+  truncating would silently make a long password and its 72-byte prefix the same
+  password.
+
+- **A corrupt stored hash crashed login.** `bcrypt.checkpw` raises
+  `ValueError("Invalid salt")` for a non-bcrypt value (corrupt row, half-migrated
+  column); login returned 500 instead of refusing. `verify_password` now returns
+  `False` for an unusable hash or an over-long password — an auth check that
+  raises is a 500, one that returns `False` is a rejected login.
+
+- **The password length requirement could be skipped.** `check_strength` required
+  `score >= 4` of five checks, so any single check could be the failing one —
+  including length. `"aA1!"` (4 characters) passed. Unreachable through HTTP
+  because `min_length=8` also applies, but it left a weaker second gate for any
+  caller using `UserManager` directly. Length is now a hard requirement.
+
+  Three of these lived in **four copies** of the bcrypt calls (`PasswordManager`,
+  `User.verify_password`, and two module-level helpers). They are now one
+  implementation in `modules/database.py`.
+
+  **`modules/auth.py` coverage 53% → 93%** across 61 new tests (register, login,
+  refresh, profile lookup, API-key create/validate/expire, the four FastAPI
+  dependencies, and the HttpOnly-cookie path). Suite 847 → **908 passed**.
+
 ### Fixed (maintenance audit, 2026-11-13)
 
 - **The log module was a second metrics system, and rewriting two files per

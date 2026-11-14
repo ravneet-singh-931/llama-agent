@@ -12,7 +12,7 @@
 in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/after.
 🔴 OPEN means still present in the repo, with the effort estimated.
 
-**Last updated:** #14 closed — the monitoring modules now have one owner per number.
+**Last updated:** #16 closed — the untested half of auth was hiding a token-confusion hole.
 
 | # | Problem | Where | Status | Proof / note |
 |---|---|---|---|---|
@@ -31,7 +31,7 @@ in this branch (`arena/8a7490b4-llama-agent`) with a test or a measured before/a
 | 13 | Two full UIs (Next.js + Streamlit "legacy") | `frontend/`, `app.py` | 🟢 **DONE** | **Streamlit deleted entirely** — see PART 20 |
 | 14 | Three monitoring modules, 1,353 lines | `monitoring.py`, `advanced_monitoring.py`, `prometheus_metrics.py` | 🟢 **DONE** | **Three findings came out of it, all in `OBSERVABILITY_FINDINGS.md` 7–9.** `AgentLogger` was a second metrics system that rewrote two files per request (two of its fields were never true: every caller passes `tools_used=[]`). Three placeholder notifiers were registered as real channels — a firing alert printed three times and was delivered nowhere. `SLAMonitor` scored a service whose first request failed as **0% errors, met** — divide-by-zero returning the *best* value for a badness metric. Metrics half deleted; log files kept. Suite 846 → **847** |
 | 15 | `api.py` — 3,412 lines, ~6 concerns, 51% coverage | `api.py` | 🔴 **OPEN** | days; do last |
-| 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🔴 **OPEN** | days |
+| 16 | `auth.py` 53% coverage — password + token paths | `modules/auth.py` | 🟢 **DONE** | **Coverage 53% → 93%** (61 tests). Writing them found **three security bugs**, all of which crashed instead of refusing: (1) a 7-day **refresh token authenticated as a 30-minute access token** — `authenticate_user` never checked `type`; (2) any password over **72 bytes crashed registration** with a 500 (bcrypt's limit, `max_length=128` let it through); (3) a **corrupt stored hash crashed login** (`Invalid salt`). Plus: the length rule was optional — `"aA1!"` passed strength validation. `SECURITY_FINDINGS.md` S7/S8 |
 | 17 | Two MCP clients | `mcp_client_helper.py`, `modules/mcp_client.py` | 🟢 **DONE** | stdio client (230 lines) deleted with the UI; only the SSE client ships |
 | 18 | `except Exception: pass` in live paths — **60 handlers, not 32** (my first count was of the audit, not the code) | 19 files, mostly `prometheus_metrics.py` | 🟢 **DONE** | **59 converted to `degrade(what, exc)`; 1 left (a queue timeout, which is control flow, not a fallback).** The message names what is lost and the failure is logged at DEBUG. `modules/silent.py` + 10 tests. Coverage 81.81% → **81.94%** |
 | 19 | 31 unused local variables (`F841`) — invisible to CI | repo-wide | 🟢 **DONE** | **31 → 0.** 24 were `except … as e` bindings; **7 were real dead assignments**, two of which changed what the rate limiter's hour window means. F401 unchanged at 29, none introduced |
@@ -1456,3 +1456,89 @@ Scope recorded rather than silently expanded.
 Live check with the admin dependency overridden: `/metrics/json` → 200
 `{"health": {...uptime only...}, "metrics": {"total_errors": 10}}`;
 `/monitoring/dashboard` → 200 with `business`/`sla`/`costs` blocks intact.
+
+---
+
+# PART 24 — #16: the untested half of auth was hiding a token-confusion hole
+
+## What the finding said
+
+*"`auth.py` 53% coverage — password + token paths — days."* The estimate was
+wrong by an order of magnitude. The work took **one session**, and the reason is
+that the missing coverage was not evenly spread: the untested 47% was almost
+exactly the part that touches credentials.
+
+## Do it or don't
+
+**Do it, and it should have been done before #14.** The audit's #20/#14 work was
+about numbers being wrong. This was about an authorization decision being wrong,
+in the one module where "measured by a test" and "true" are the same thing.
+
+## What the tests found — three bugs, none of them visible by reading
+
+**1. A refresh token authenticated a request.** `get_current_user` checked
+`payload["type"] == "access"`; `authenticate_user` did not. Both verify the same
+signature with the same secret, so the 7-day refresh credential was accepted
+wherever the 30-minute access credential was required. Proven before the fix:
+
+```
+refresh token type: refresh | lifetime: 7 days
+authenticate_user(refresh_token) -> vic  <-- ACCEPTED
+```
+
+After: `refresh token -> refused 401`, `access token -> ACCEPTED`.
+
+**2. A password over 72 bytes crashed registration.** bcrypt raises beyond 72
+bytes rather than truncating. `RegisterRequest` allows `max_length=128`, so
+73 characters passed validation and then raised inside `hash()`; the endpoint's
+bare `except Exception` turned it into a **500**. Also hit by multibyte text: 19
+emoji is 76 bytes. Fixed by rejecting at the edge with a message naming the
+overflow — **not** by truncating, which would silently make a long password and
+its 72-byte prefix the same password.
+
+**3. A corrupt stored hash crashed login.** `checkpw` raises
+`ValueError("Invalid salt")` for a non-bcrypt value. Login returned 500 where it
+should have refused the attempt.
+
+Plus one weakness found by a test that failed for the right reason: the strength
+rule was `score >= 4` out of 5 checks, so **any check could be the failing one —
+including length**. `"aA1!"` (4 characters) passed. Not reachable through HTTP
+(`min_length=8` also applies), so it was a latent second gate, not a live hole.
+Length is now mandatory.
+
+All three bugs lived in **four copies** of the bcrypt calls. They are now one
+implementation; four copies is how they drifted.
+
+## Four things my own tests got wrong first
+
+Recorded because each one *looked* like a code bug:
+
+1. **My fake DB returned the session factory instead of yielding from it.** The
+   real `DatabaseManager.session` is an `@asynccontextmanager`. A fake that
+   discards writes made "duplicate username accepted" look like a bug — my
+   harness, not the code.
+2. **I missed the `@asynccontextmanager` decorator** on the second attempt and
+   got `'async_generator' object does not support the async context manager
+   protocol`.
+3. **I guessed `get_current_user`'s signature** (`request` first, then
+   `credentials`). Guessing an API in a test is exactly the habit this audit
+   keeps naming.
+4. **`get_user` resolves the DB through the module singleton**, not
+   `user_manager.db`, so half my tests were hitting a real Postgres connection
+   attempt (`Errno 111`). Patching the singleton fixed them.
+
+A wrong test that fails is cheap. A wrong test that passes is the expensive kind.
+
+## Proof
+
+| check | before | after |
+|---|---|---|
+| `modules/auth.py` coverage | **53%** (102 stmts missed) | **93%** (16) |
+| tests | 847 passed | **908 passed**, 6 skipped |
+| bandit (CI-exact) | 0 | **0** |
+| flake8 (CI-exact) | 0 | **0** |
+| refresh token as bearer | accepted | **401** |
+
+The remaining 16 uncovered statements are the `ENVIRONMENT=production` import
+guard (unreachable inside an already-imported module) and defensive `return None`
+branches in the cookie helper.
