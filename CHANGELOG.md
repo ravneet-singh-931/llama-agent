@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-14) — database migrations, and a schema trap that would have bitten on a real deploy
+
+- **`create_all` was the only schema tool, and it cannot add a column.** It
+  creates missing *tables*; it never alters an existing one. Reproduced: add a
+  field to a model, run `create_all` against a database that already has the
+  table, and the field is silently not created. A release adding a column to
+  `users` would start cleanly, log `✅ Database initialized`, and then fail every
+  query reading that column — at request time, in production.
+- Alembic was **already a pinned dependency with no config and no import**:
+  installed on every build, used by nothing. It is now configured
+  (`alembic.ini`, `migrations/`) with a baseline generated from the real models.
+- The database URL has **one source of truth**: `alembic.ini` leaves
+  `sqlalchemy.url` empty and `migrations/env.py` calls
+  `modules.secrets.resolve_database_url()` — the same function the app uses.
+- `init_db()` now **adopts** a pre-existing `create_all` database (stamping it at
+  the baseline) instead of re-creating it, applies migrations, and falls back to
+  `create_all` with a loud warning if Alembic is unavailable. A test inserts a
+  row first and asserts it survives adoption.
+- Fixed while wiring it: Alembic's `fileConfig` **disabled every existing logger**
+  in the process, so booting the app and then initialising the database silently
+  killed all application logging. Now `disable_existing_loggers=False`, with a
+  test. Also fixed: `init_db()` leaked `ALEMBIC_DATABASE_URL` into the process.
+- 13 tests in `tests/test_migrations.py`. **Verified on SQLite only** — Postgres
+  is untested here, and that limit is stated in `docs/MIGRATIONS.md` rather than
+  glossed.
+
 ### Added (2026-11-14) — the first end-to-end test: does signing up and asking work?
 
 - `tests/test_e2e_journey.py` (7 tests): register → log in → `/auth/me` →
