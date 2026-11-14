@@ -64,19 +64,24 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 class PasswordManager:
-    """Secure password hashing and verification using bcrypt directly"""
+    """Password hashing, delegating to modules.database.
+
+    There used to be four copies of the bcrypt calls -- here, on the User
+    model, and the hash_password/verify_password helpers -- and all four
+    shared the same bug: a password over bcrypt's 72-byte limit raised
+    ValueError instead of being rejected with a message. One implementation
+    means one place to be right.
+    """
 
     def hash(self, password: str) -> str:
-        """Hash a password"""
-        salt = _bcrypt.gensalt()
-        return _bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+        """Hash a password. Raises ValueError if it exceeds bcrypt's limit."""
+        from modules.database import hash_password
+        return hash_password(password)
 
     def verify(self, plain_password: str, hashed_password: str) -> bool:
-        """Verify a password"""
-        return _bcrypt.checkpw(
-            plain_password.encode("utf-8"),
-            hashed_password.encode("utf-8"),
-        )
+        """Verify a password. False -- never raises -- on a bad hash."""
+        from modules.database import verify_password
+        return verify_password(plain_password, hashed_password)
 
     def check_strength(self, password: str) -> Dict[str, Any]:
         """Check password strength"""
@@ -88,11 +93,19 @@ class PasswordManager:
             "special": any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in password),
         }
         score = sum(checks.values())
+        # Length is a hard requirement, not one vote among five.
+        #
+        # The rule used to be `score >= 4`, so a password could fail the LENGTH
+        # check and still pass: "aA1!" (4 characters) scored 4/5 and was
+        # accepted. Nothing exploitable shipped because RegisterRequest also
+        # enforces min_length=8, but that made this a second, weaker gate that
+        # a caller reaching UserManager directly would fall through.
+        valid = checks["length"] and score >= 4
         return {
-            "valid": score >= 4,  # At least 4/5 checks
+            "valid": valid,
             "score": score,
             "checks": checks,
-            "message": "Strong" if score >= 4 else "Weak - add more character types"
+            "message": "Strong" if valid else "Weak - add more character types",
         }
 
 
@@ -211,6 +224,18 @@ class UserManager:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Password too weak: {strength['message']}"
             )
+
+        # bcrypt hashes at most 72 bytes and raises beyond that. Catch it here,
+        # where the message can reach the user, rather than letting it become
+        # the generic 500 the old code returned for any long password.
+        from modules.database import BCRYPT_MAX_BYTES, password_bytes
+        try:
+            password_bytes(password)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
 
         async with self.db.session() as session:
             # Check if username exists
@@ -513,10 +538,16 @@ async def authenticate_user(
     Try JWT first, then API key
     Allows clients to use either authentication method
     """
-    # Try JWT token
+    # Try JWT token.
+    #
+    # Only ACCESS tokens authenticate a request. A refresh token is a valid,
+    # differently-typed JWT with a 7-day life; without the type check it was
+    # accepted here as a bearer credential, so a stolen refresh token bought
+    # 7 days of access instead of 30 minutes. get_current_user() already
+    # checked this -- this path was the one that did not.
     if credentials:
         payload = jwt_manager.verify_token(credentials.credentials)
-        if payload:
+        if payload and payload.get("type") == "access":
             user_id = payload.get("sub")
             if user_id:
                 user = await user_manager.get_user(user_id)

@@ -152,7 +152,7 @@ def use_client(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
 
     def _use(client):
-        monkeypatch.setattr("api._get_groq_client", lambda key: client)
+        monkeypatch.setattr("modules.doc_answers._get_groq_client", lambda key: client)
     return _use
 
 
@@ -479,3 +479,92 @@ def test_routing_survives_a_failing_store():
         def list_documents(self):
             raise RuntimeError("chroma down")
     assert not is_document_question("what does the crm file say about pricing?", _Broken())
+
+
+# ------------------------------------- cache invalidation across the module --
+#
+# The generation counter moved from api.py to modules/doc_answers.py when the
+# document cluster was extracted. If the two ever became separate copies, every
+# check below would still pass *except* the last one: a stale answer would be
+# served after the owner's documents changed. That is the regression these
+# tests exist to catch, so they assert on the observable behaviour (miss after a
+# bump) rather than on where the dict lives.
+
+def test_a_bump_changes_the_cache_key_for_that_owner_only():
+    from modules import doc_answers as d
+
+    class _Rag:
+        def __init__(self, owner):
+            self.owner = owner
+
+    rag = _Rag("owner-bump-checks")
+    before = d._doc_cache_key(rag, "what is the rule of 40?")
+    d.bump_doc_generation("owner-bump-checks")
+    after = d._doc_cache_key(rag, "what is the rule of 40?")
+    other = d._doc_cache_key(_Rag("someone-else"), "what is the rule of 40?")
+
+    assert before != after, "bumping must change the key, or stale answers survive"
+    assert "0|" in before and "1|" in after
+    # another owner is untouched: bumping is per-owner, not global
+    assert "|0|" in other
+
+
+def test_api_bump_reaches_the_module_that_owns_the_counter():
+    """api._bump_doc_generation must move the same dict the cache key reads.
+
+    This is the whole point of the extraction: two names, one counter.
+    """
+    from modules import doc_answers as d
+    import api
+
+    class _Rag:
+        def __init__(self, owner):
+            self.owner = owner
+
+    rag = _Rag("owner-cross-module")
+    before = d._doc_cache_key(rag, "q")
+    api._bump_doc_generation("owner-cross-module")
+    after = d._doc_cache_key(rag, "q")
+    assert before != after, "api's bump did not reach the module's counter"
+
+
+def test_a_cached_answer_is_not_served_after_a_bump(use_client):
+    """End to end: answer, bump, ask again -> the model is consulted again."""
+    from modules import doc_answers as d
+    from api import answer_from_documents
+
+    class _Fresh(_Rag):
+        def get_cached_answer(self, query):
+            return None
+
+    rag = _Fresh()
+    client = _Client([_resp(GOOD), _resp(GOOD)])
+    use_client(client)
+
+    first = answer_from_documents("What is the Rule of 40?", rag)
+    calls_after_first = len(client.calls)  # a snapshot: client.calls is a list, aliasing it compares it to itself
+    # second identical question is served from the LRU, no model call
+    second = answer_from_documents("What is the Rule of 40?", rag)
+    assert second == first
+    assert len(client.calls) == calls_after_first, "repeat should hit the cache"
+
+    d.bump_doc_generation(rag.owner)
+    answer_from_documents("What is the Rule of 40?", rag)
+    assert len(client.calls) > calls_after_first, "after a bump the model must be asked again"
+
+
+def test_the_doc_module_has_no_import_of_api():
+    """A cycle here would be invisible at runtime but fatal on a cold import."""
+    import ast, pathlib
+    src = pathlib.Path(d(__file__)).parent.parent.joinpath("modules/doc_answers.py").read_text()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert not any(a.name == "api" for a in node.names)
+        if isinstance(node, ast.ImportFrom):
+            assert node.module != "api"
+
+
+def d(p):
+    import os
+    return os.path.join(os.path.dirname(p), "..")

@@ -27,7 +27,7 @@ Every one of the eleven is imported by live application code:
 | Module | Imported by |
 |---|---|
 | `database_improvements` | `api.py` (health check) |
-| `websocket` | `api.py`, `modules/services.py` |
+| `websocket` | `api.py` |
 | `cicd_improvements` | `api.py` (feature flags) |
 | `web_tools` | `modules/agent_tools.py` (the web search tool) |
 | `pg_store` | `api.py` (11 call sites) |
@@ -108,7 +108,13 @@ uses SQLAlchemy, managed Postgres, and a connection pool that already exists.
 
 Dead: `MessageType`, `WSMessage`, `ConnectionManager`, `broadcast_message`,
 `get_online_count`. Live: `get_ws_handler` and `WebSocketHandler`, both used by
-`modules/services.py`.
+`api.py` — and, when this was first written, by `modules/services.py`.
+
+**Correction (2026-11-13):** `broadcast_message` and `get_online_count` have now been
+deleted, and so has `modules/services.py` itself. That file was an 84-line service
+locator with zero importers and zero references anywhere in the repo; its only inbound
+reference was the module-level table row above, and its only caller was a test that
+imported it. `WebSocketHandler` is still live via `api.py`'s `get_ws_handler()`.
 
 The pattern is a **module written as a standalone WebSocket server** — own connection
 manager, own message types, own broadcast — of which the application uses only the
@@ -228,3 +234,267 @@ The narrower finding that survived is still worth having: **38% of the public su
 of those modules is unreachable, and thirteen of those functions and classes have no
 test either.** But it is a third of the surface, not all of it, and saying so is the
 difference between a document and a scare.
+
+---
+
+## Addendum 2026-11-13 — four more dead things, found by reading wiring rather than names
+
+This document was built by counting public names with no inbound reference. That method
+finds functions nothing calls. It does **not** find configuration nothing reads, so a
+second pass went looking for that instead. It found three things.
+
+### `modules/services.py` — 84 lines, deleted
+
+A service locator (`Services`, `get_services`, `reset_services`) exposing lazy singletons
+for database, RAG, memory, facts and websocket. **Zero importers.** Its only inbound
+reference in the whole repository was this document's own table, and its only caller was
+`tests/test_enterprise.py::test_services_singleton`, a test that existed to import it.
+
+That is the shape worth remembering: **the module was kept alive by a test whose only
+purpose was to touch it.** Deleting the test would have deleted the evidence; the module
+is deleted instead, and the test now asserts the file stays gone.
+
+### Seven of eight feature flags — deleted from `config/feature_flags.json`
+
+`FeatureFlagManager` (`modules/cicd_improvements.py`) loads
+`config/feature_flags.json`, which shipped eight flags. Counting
+`is_enabled("<flag>")` call sites across every non-test Python file:
+
+| Flag | Call sites |
+|---|---|
+| `enable_mcp_agents` | **2** (`api.py:3364`, `api.py:3387`) |
+| `enable_advanced_rag` | 0 |
+| `enable_phoenix_tracing` | 0 |
+| `enable_caching` | 0 |
+| `enable_rate_limiting` | 0 |
+| `enable_websockets` | 0 |
+| `enable_file_upload` | 0 |
+| `enable_beta_features` | 0 |
+
+There is no dynamic accessor — `set_flag`, `get_all_flags` and `get_enabled_flags` exist,
+but the only reads in the app are the two literal `"enable_mcp_agents"` strings. So
+setting `enable_rate_limiting: false` and restarting left rate limiting running:
+`api.py` calls `rate_limiter.is_rate_limited(client_ip)` unconditionally.
+
+Worse, `enable_caching`, `enable_rate_limiting` and `enable_websockets` **also** exist in
+a second, unrelated flag system (`modules/config.py::FeatureFlags`, read from
+`FEATURE_*` environment variables), which means there were two knobs for each of those
+three concepts and neither one gated the behaviour.
+
+The seven were removed. `enable_mcp_agents` stays because it is genuinely read.
+`tests/test_enterprise.py::TestEnterpriseModules::test_every_shipped_flag_is_actually_read`
+now fails if a flag is added to the JSON that no code asks about:
+
+```
+AssertionError: flags configured but never read by any code: ['enable_beta_features']
+```
+
+### `reload_config` — deleted
+
+`modules/config.py`, zero references. `get_config()` is the only accessor.
+
+### `validate_fact_key` / `validate_fact_value` — **not** dead, wired instead
+
+These were on the dead list in the first pass because nothing called them. Deleting them
+would have deleted the only statement of the fact-length limits. They are now called from
+`FactMemory.remember()`, which every writer goes through — see
+[`SECURITY_FINDINGS.md` S6](SECURITY_FINDINGS.md). A guard that nothing calls is a
+comment; a guard that something calls is a limit.
+
+### Revised count
+
+**23 dead public names** in the original pass, of which `broadcast_message`,
+`get_online_count`, `reload_config` and the whole `services` module are now deleted
+rather than documented. The 546 unreachable lines in `database_improvements` are
+unchanged — that deletion is still open.
+
+
+---
+
+## Addendum 2026-11-13 (second) — `database_improvements`: 678 lines → 103
+
+This document already recorded the 546 unreachable lines here. They are now deleted, and
+the reason is worth recording because a count is not the same as a defect.
+
+### What was unreachable
+
+| Symbol | External references |
+|---|---|
+| `MigrationManager` | **0** |
+| `BackupManager` | **0** |
+| `ConnectionPool` | **0** |
+| `QueryOptimizer` | **0** |
+| `create_initial_migrations` | **0** |
+| `DatabaseHealthCheck` | 1 (`api.py:457`, from `/health`) |
+
+Only `DatabaseHealthCheck` was wired. The other five existed, had tests, had docstrings
+listing features, and were called by nothing.
+
+### The part that was an actual defect, not just unused code
+
+Three of them had module-level singletons that ran `os.makedirs()` in `__init__`:
+
+```python
+migration_manager = MigrationManager()   # os.makedirs("migrations")
+backup_manager    = BackupManager()      # os.makedirs("backups")
+```
+
+So **importing the module had a side effect** — it created two directories in the working
+directory. Verified before the fix:
+
+```
+$ cd /tmp/empty && python -c "import modules.database_improvements"
+$ ls
+backups   migrations
+```
+
+Dead code that is never called is untidy. Dead code that runs at import is different: it
+executes on every process start, in every container, and nothing asked it to. After the
+deletion, importing creates nothing — and a test asserts that by importing the module in a
+fresh temporary directory and requiring the directory to stay empty.
+
+### What is left
+
+```
+$ wc -l modules/database_improvements.py
+103 modules/database_improvements.py
+```
+
+`DatabaseHealthCheck` and the `db_health_check` singleton. The module's own docstring now
+says what it is for and what was removed, so the next reader does not assume the other
+five are somewhere else.
+
+Coverage of the file went **29% → 74%**; repo total **68% → 70%** — the second number moved
+2 points for reasons that have nothing to do with new tests.
+
+---
+
+## Addendum 2026-11-14 (third) — a deep pass after #15: two new failures, two confirmed, one stale claim
+
+After the `api.py` split finished (#15, scope A), I re-derived the repo's weak spots
+from coverage rather than from this document, then checked each one against the code.
+Four findings; **two were already known here and two were not.** The two known ones are
+listed first, with what I confirmed, because a document that silently omits them would
+read as if they had just been discovered.
+
+### Already known, re-confirmed
+
+**1. Seven of eight feature flags are dead.** Found in the second addendum and fixed
+there; `config/feature_flags.json` now carries only `enable_mcp_agents`, and
+`test_enterprise.py::test_every_shipped_flag_is_actually_read` fails if a flag is added
+that nothing reads. I re-derived the count and it holds: exactly **2** `is_enabled()`
+call sites, both `"enable_mcp_agents"`.
+
+**2. Two feature-flag systems exist** (`modules/cicd_improvements.py::FeatureFlagManager`
+and `modules/config.py::FeatureFlags` from `FEATURE_*` env vars). `/health` reports
+`websocket: active` from the *second* one; nothing gates the WebSocket route on either.
+Unchanged, still true, and still deliberately not "fixed" — see the note at the end.
+
+### New 1 — a corrupt `config/feature_flags.json` stopped the app from starting
+
+This is the one that could take the service down. `api.py` does
+`from modules.cicd_improvements import feature_flags`, and `feature_flags` is built **at
+import time**; `_load_flags()` read the file bare:
+
+```python
+with open(self.config_file, "r") as f:
+    self.flags = json.load(f)
+```
+
+So any exception there is an exception during `import api`. Three reproduced against the
+real entry point, each of which made `import api` fail:
+
+| file content | failure |
+|---|---|
+| `{"enable_mcp_agents": {"enabled": tru` (truncated) | `JSONDecodeError` |
+| `{"enable_mcp_agents": true}` | `AttributeError: 'bool' object has no attribute 'get'` |
+| `"rollout_percent": "100"` | `TypeError: '<' not supported between 'str' and 'int'` |
+
+The first is the realistic one: a partial write (disk full, pod killed mid-save) leaves
+exactly that. The others need a hand edit, and hand-editing a flags file is the normal
+way to use one.
+
+A feature flag exists so you can change behaviour **without a deploy**. A file that can
+prevent the deploy from starting is the exact inverse. Fixed so the file can only ever
+cost flags, never availability:
+
+* load is wrapped; on any failure the built-in defaults are applied, the problem is
+  logged at ERROR with the path, and `load_error` records it
+* the loaded value must be a JSON **object of objects** — `["x"]` or `{"x": true}` is
+  rejected at load rather than blowing up at the first read
+* `is_enabled()` tolerates a non-dict entry and a non-numeric `rollout_percent` (a bad
+  rollout ignores the rollout, it does not disable the flag)
+* `_save_flags()` is best effort, so a read-only container filesystem can no longer break
+  `set_flag` or startup
+
+12 tests in `tests/test_feature_flag_robustness.py`. **Reverting the fix fails 6 of them.**
+
+**Not done, deliberately:** the import-time `_save_flags()` call still writes
+`config/feature_flags.json` into the *current working directory*, not next to the source.
+That is a real smell (it means the app writes a tracked file, and behaves differently
+depending on where uvicorn was started), but changing where configuration is found is a
+deployment decision, not a bug fix. Recorded, not changed.
+
+### New 2 — the MCP agent server is a deployed process with no tests at all
+
+`mcp_agents_server.py` was at **0% coverage**: nothing in the suite imported it. It is not
+dead code — `docker-compose.yml` runs it as its own service on port 8001 and
+`k8s/mcp-server.yaml` runs it as its own Deployment with its own image tag. The k8s
+manifests are reviewed separately and are out of scope here; the Python process they run
+is not.
+
+18 tests now cover the parts that fail silently rather than loudly: the module imports,
+all **seven** advertised tools are registered (a missing one is not a crash — the server
+starts, the docs promise the tool, and it is simply absent), DNS-rebinding protection is
+on with no `*` in the allowed hosts, and the service DNS name the manifest addresses is
+allowed. Also the timeout backstop: a hung upstream must return a message, not wedge the
+call, and an internal error must not leak its text to the MCP client.
+
+The tool-timeout test was **rewritten after it initially passed against sabotaged code** —
+it asserted only "returns a string", which is also what `fut.result()` with no timeout
+returns. It now shortens the timeout to milliseconds and asserts the timeout *branch*.
+
+### New 3 — the reranker fallback chain, untested at the only level that runs in a broken deployment
+
+`CrossEncoderReranker` documents three backends, first available wins: ONNX →
+sentence-transformers → keyword. The keyword level is taken whenever the ONNX model is
+missing, and it calls `advanced_rag.ReRanker`. Measured before: `advanced_rag.py` at
+**27% coverage**, the whole `ReRanker` class unreached, and both `_fallback_rerank` and
+its call site uncovered.
+
+The path taken *when things are already going wrong* was the untested one. 10 tests in
+`tests/test_reranker_fallback.py`.
+
+**The first version of these tests was worthless and the sabotage caught it.** The fixture
+listed the relevant chunk *first*, so "the reranked output has the relevant chunk first"
+was true whether or not the reranker ran. Deleting the entire rerank call left all 10
+tests green. Reordering the fixture (relevant chunk last, lowest vector score) made the
+sabotage fail, which is what the test was for.
+
+> A test whose data already satisfies the assertion is not testing the assertion.
+
+### One stale claim, corrected
+
+An earlier maintenance audit (a working-branch file, since deleted — see the lifecycle
+note in `CHANGELOG.md`) defended `advanced_rag` against being called unused by citing
+**`app.py:380` imports `AdvancedRAG`**. That was true when written. `app.py` was deleted
+in #13, and it has been false since.
+
+Re-derived, repo-wide: `AdvancedRAG`, `SubQuestionEngine` and `PhoenixTracer` — 540 lines
+— are constructed **only inside `modules/advanced_rag.py` itself**. Nothing outside the
+file instantiates `AdvancedRAG`. `ReRanker` and `RouterQueryEngine` are referenced from
+outside (the reranker fallback, and `tests/test_e2e.py`).
+
+The method, not the answer, is the point: the correction was right when made and went
+stale when a different change landed. A citation to a file that no longer exists is worse
+than no citation, because it reads as checked.
+
+### What this addendum did not fix
+
+`api.py` remains at **46% coverage** (648 of 1,202 statements unreached). That is the
+route layer plus `lifespan`, and the two `/mcp/*` endpoints are unreachable by design in
+the shipped configuration (`enable_mcp_agents` gates them, and it is the one flag that is
+on — but the endpoints call an MCP server that the default deployment does not run). It
+is a real gap and it is the honest headline number for the next pass.
+
+Repo total **83.51% → 84.06%**, tests **950 → 990**.

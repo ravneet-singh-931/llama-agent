@@ -259,33 +259,35 @@ class TestMonitoringFlow:
     """Test monitoring and metrics."""
 
     def test_performance_monitoring(self):
-        """Test: Performance metrics are tracked"""
+        """Test: process health is reported"""
         from modules.monitoring import PerformanceMonitor
 
         monitor = PerformanceMonitor()
 
-        # Track a request
-        monitor.track_request()
-
-        # Get health
         health = monitor.get_health()
         assert "status" in health, "Health check missing status"
         assert health["status"] in ["healthy", "degraded", "unhealthy"], "Invalid status"
+        assert health["uptime_human"], "Health check missing uptime"
 
         print("  ✅ Performance monitoring works")
 
     def test_error_tracking(self):
-        """Test: Errors are tracked"""
-        from modules.monitoring import PerformanceMonitor
+        """Test: errors are counted by the error logger, not the monitor
 
-        monitor = PerformanceMonitor()
+        Errors used to be incremented twice: once by PerformanceMonitor
+        (4 call sites) and once by the AgentLogger that actually writes the
+        record. The monitor's copy is gone; log_error is the one that counts.
+        """
+        import tempfile
 
-        # Track an error
-        monitor.track_error()
+        from modules.monitoring import AgentLogger
 
-        # Health should reflect the tracked error
-        health = monitor.get_health()
-        assert health.get("total_errors", 0) > 0, "Error not tracked"
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = AgentLogger(log_dir=tmp)
+            before = logger.get_error_count()
+            logger.log_error(ValueError("boom"), context="test")
+            after = logger.get_error_count()
+        assert after == before + 1, "Error not tracked"
 
         print("  ✅ Error tracking works")
 

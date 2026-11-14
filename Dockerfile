@@ -13,7 +13,6 @@
 # ------------------------------
 # Builds ONE image that can run 3 different services (via different commands):
 #   1. API (FastAPI) → `uvicorn api:app --host 0.0.0.0 --port 8000` (default CMD)
-#   2. Streamlit UI → `streamlit run app.py --server.port 8501 ...` (override in compose)
 #   3. MCP Server → `python mcp_agents_server.py --transport sse ...` (override)
 #
 # WHY ONE IMAGE FOR 3 SERVICES?
@@ -45,7 +44,6 @@
 # 2. Docker reads Dockerfile, executes each instruction, creates layers
 # 3. Final image contains Python + dependencies + code + model cache
 # 4. docker run my-image → Runs CMD (uvicorn api:app)
-# 5. docker run my-image streamlit run app.py → Overrides CMD
 # 6. Verify: docker images | grep llama-agent
 #            docker run --rm -it ravneet231/llama-agent:latest python -c "import groq; print('ok')"
 # ============================================================================
@@ -53,7 +51,7 @@
 # Base image: Python 3.11 slim (Debian-based, small, ~50MB)
 #   - `python:3.11-slim` = Python 3.11 + minimal Debian (no extra tools)
 #   - Alternative: `python:3.11` (full, larger), `python:3.11-alpine` (even smaller, but needs musl)
-# Python 3.11: 3.10 is EOL (Oct 2026) and pillow 13 / streamlit 1.66 need >= 3.11
+# Python 3.11: 3.10 is EOL (Oct 2026) and pillow 13 needs >= 3.11
 FROM python:3.11-slim
 
 # Install system dependencies (needed for Python packages that compile C extensions)
@@ -138,10 +136,9 @@ RUN mkdir -p logs data documents uploads memory backups migrations \
 
 # Expose ports (documentation, doesn't actually publish)
 #   - `EXPOSE 8000` = API (FastAPI)
-#   - `EXPOSE 8501` = Streamlit
 #   - `EXPOSE 8765` = WebSocket (though API uses 8000 for WS too)
 #   - To actually publish, use `docker run -p 8000:8000` or `ports:` in compose
-EXPOSE 8000 8501 8765
+EXPOSE 8000 8765
 
 # Default command when container starts (can be overridden)
 #   - `CMD ["uvicorn", "api:app", ...]` = Run FastAPI via Uvicorn
@@ -149,7 +146,6 @@ EXPOSE 8000 8501 8765
 #   - `--host 0.0.0.0` = Listen on all interfaces (needed for Docker networking)
 #   - `--port 8000` = Listen on port 8000
 #   - Override examples:
-#     - `docker run <image> streamlit run app.py --server.port 8501 ...` (for web)
 #     - `docker run <image> python mcp_agents_server.py --transport sse ...` (for mcp)
 # Run as the non-root user (k8s also enforces runAsNonRoot)
 # pip is only used at build time; upgrade it so the image ships no known pip advisories
@@ -163,4 +159,3 @@ CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-gra
 #   Check layers: docker history ravneet231/llama-agent:latest
 #   Build: docker build -t test .
 #   Run API: docker run -p 8000:8000 test
-#   Run Streamlit: docker run -p 8501:8501 test streamlit run app.py --server.port 8501 --server.address 0.0.0.0

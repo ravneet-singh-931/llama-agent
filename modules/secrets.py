@@ -11,6 +11,7 @@ Convention:
 
 import os
 
+from modules.silent import degrade
 
 def get_secret(env_var: str, fallback_var: str = None, default: str = None) -> str:
     """
@@ -34,8 +35,8 @@ def get_secret(env_var: str, fallback_var: str = None, default: str = None) -> s
         try:
             with open(file_path, "r") as f:
                 return f.read().strip()
-        except Exception:
-            pass
+        except Exception as _e:
+            degrade("docker secret file present but unreadable (falling back to env var)", _e)
 
     # 2. Check primary env var
     value = os.getenv(env_var)

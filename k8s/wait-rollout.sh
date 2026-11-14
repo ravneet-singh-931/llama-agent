@@ -18,7 +18,6 @@ NS="${1:-llama-agent}"
 TARGETS=(
   "llama-agent-api:1200"
   "llama-agent-mcp-server:600"
-  "llama-agent-web:600"
   "llama-agent-frontend:600"
 )
 

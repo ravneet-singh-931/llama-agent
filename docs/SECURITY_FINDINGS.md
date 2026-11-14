@@ -237,3 +237,187 @@ measured.
 > A limitation stated precisely can still teach a false belief. The README told the
 truth about a function and lied about the posture: containing an injection and
 noticing one are different guarantees, and it had only named the missing one.
+
+---
+
+## S5. CORS reflected any origin with credentials — fixed 2026-11-13
+
+Found while making `test_cors_headers_present` assert something, which it did not.
+Removing the CORS middleware entirely left that test green, so the configuration had
+never been checked by the suite at all.
+
+### What was wrong
+
+`api.py` registered, in every non-production environment:
+
+```python
+cors_origins = ["*"]
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins,
+                   allow_credentials=True, ...)
+```
+
+The assumption in the comment was *"allow all (safe for local testing only)"*. Starlette
+does not simply emit `Access-Control-Allow-Origin: *` here — it reflects the caller:
+
+```
+$ curl -H 'Origin: https://evil.example' localhost:8000/openapi.json -i
+access-control-allow-origin: https://evil.example
+access-control-allow-credentials: true
+```
+
+A browser refuses a literal `*` combined with credentials. It accepts a *reflected*
+origin. So any page the developer visited could issue authenticated cross-origin
+requests to their local API and read the response.
+
+### Why it was reachable
+
+The Next.js frontend does not need it. Everything the shipped UI does goes through a
+same-origin `/api` rewrite (`frontend/next.config.*`), and Nginx proxies `/api/*` as
+well. The wildcard bought nothing and was the only thing making the reflected-origin
+behaviour possible.
+
+### The fix
+
+`api.py` now lists the local development origins explicitly — `localhost:3000`,
+`3001`, `8501`, and the two `127.0.0.1` spellings — in development, and keeps the
+already-restricted list in production. Verified:
+
+```
+Origin: https://evil.example     -> (no access-control-allow-origin header)
+Origin: http://localhost:3000    -> access-control-allow-origin: http://localhost:3000
+```
+
+### The test now tests it
+
+`tests/test_security.py::TestCORS::test_cors_headers_present` asserts that
+`app.user_middleware` contains a `CORSMiddleware`, that `allow_origins` is non-empty,
+that `"*"` is never combined with `allow_credentials=True`, and that the expected
+methods and `Authorization` header are allowed.
+
+**Proof it can fail:** commenting out the `add_middleware(CORSMiddleware, ...)` call
+makes it fail with `assert []`. Before this change the same sabotage left it green —
+the check and the thing checked had been configured to agree.
+
+---
+
+## S6. Fact length limits were declared and enforced nowhere — fixed 2026-11-13
+
+`modules/security.py` declares `MAX_FACT_KEY_LENGTH = 100` and
+`MAX_FACT_VALUE_LENGTH = 1000`, and defines `validate_fact_key` /
+`validate_fact_value` directly beneath them. **Neither function was called from
+anywhere in the repository.**
+
+`POST /remember` was already capped by its Pydantic model
+(`RememberRequest: Field(..., max_length=100/1000)`), so that endpoint was fine — and an
+audit that stopped there would have concluded, wrongly, that the limits were live.
+They were not, because six other call sites build a fact out of free text:
+
+```python
+key, value = content.split("=", 1)
+facts.remember(key.strip(), value.strip(), user_id=user_id)
+```
+
+`content` there is a chat message, capped at `MAX_MESSAGE_LENGTH = 10_000`. So a
+10,000-character message could become a 10,000-character stored fact — ten times the
+declared limit, on the path a user actually reaches.
+
+Enforced now in `FactMemory.remember()`, the one function every caller goes through:
+
+```python
+ok, err = validate_fact_key(key);   if not ok: raise ValueError(err)
+ok, err = validate_fact_value(value); if not ok: raise ValueError(err)
+```
+
+Five tests in `tests/test_security.py::TestFactInputLimits` cover the oversized key,
+the oversized value (the chat path), an empty value, the unaffected happy path, and the
+endpoint's own 422.
+
+### The lesson, again
+
+> A validation function that exists and a validation that runs are different claims.
+
+The declared constant `MAX_FACT_VALUE_LENGTH = 1000` sat in the source next to a
+function that would have enforced it. Reading the file, the limit looks real. Running
+the code, nothing enforced it — on one of seven paths.
+
+---
+
+## S7. A refresh token authenticated requests — fixed 2026-11-13
+
+**Symptom.** None. Login worked, protected routes worked.
+
+**Cause.** Two auth paths existed and only one checked the token type.
+
+| path | checks `type == "access"`? |
+|---|---|
+| `get_current_user` (routes using `Depends(get_current_user)`) | **yes** |
+| `authenticate_user` (dual JWT-or-API-key) | **no** |
+
+`authenticate_user` verified the signature, read `sub`, and returned the user. A
+refresh token is a perfectly valid JWT — same secret, same algorithm, different
+`type` and a **7-day** life instead of 30 minutes. So the long-lived credential
+worked wherever the short-lived one was meant to be required.
+
+Measured before the fix: `authenticate_user(C(credentials=refresh_token))` →
+`vic` **accepted**. A stolen refresh token bought 7 days of access, and refresh
+tokens are the credential most likely to be stored in a place that leaks — they
+are the one you *have* to persist to stay logged in.
+
+**Fix.** Both paths require `payload["type"] == "access"`. Regression tests cover
+the header path, the cookie path, and that a real access token still works.
+
+> **When two functions answer the same question, the weaker one is the answer.**
+
+## S8. Three password-handling bugs, all of which crashed instead of refusing — fixed 2026-11-13
+
+`modules/auth.py` was at **53% coverage**, and the untested half was the half that
+touches credentials. Writing the tests found three defects; none was found by
+reading the file.
+
+**1. bcrypt's 72-byte limit crashed registration.** `hashpw` raises `ValueError`
+beyond 72 bytes — it does not truncate. `RegisterRequest` allows
+`max_length=128`, so a 73-character password was accepted by validation and then
+blew up in `hash()`. `/auth/register` caught the bare `Exception` and returned a
+**500 Internal Server Error**. Measured: 72 ASCII characters fine, 73 raises;
+8 emoji fine, 19 emoji (76 bytes) raises.
+
+Fixed by rejecting at the edge with a message that names the limit and the
+overflow, **not** by truncating to 72 bytes. Truncating would silently make a
+long password and its 72-byte prefix the same password — turning a crash into a
+wrong answer is the worse trade.
+
+**2. A corrupt stored hash crashed login.** `bcrypt.checkpw` raises
+`ValueError("Invalid salt")` when the stored value is not a bcrypt hash — a
+corrupt row, a half-migrated column. Login returned 500 instead of refusing.
+`verify_password` now returns `False` for an unusable hash or an over-long
+password: an auth check that raises is a 500, an auth check that returns `False`
+is a rejected login.
+
+**3. The length requirement could be skipped.** `check_strength` scored 5 checks
+and required `score >= 4`, so **any one check could fail — including length**.
+`"aA1!"` (4 characters) scored 4/5 and was accepted. Not exploitable through the
+HTTP API, because `RegisterRequest.min_length=8` also applies, but that made
+`check_strength` a second, weaker gate that a caller reaching `UserManager`
+directly would fall straight through. Length is now a hard requirement.
+
+All three lived in **four copies** of the bcrypt calls (`PasswordManager`, the
+`User` model, and the two module-level helpers). They are now one implementation
+in `modules/database.py`, because four copies is how they drifted.
+
+**Coverage: 53% → 93%** across 61 tests, covering register / login / refresh /
+profile lookup / API-key create-validate-expire / the four FastAPI dependencies /
+the cookie path. The remaining 7% is the production-import guard, which cannot be
+exercised inside an imported module.
+
+> **An error path that raises is indistinguishable from a bug at the call site.**
+> Three of these read as "500 Internal Server Error" to a user, and a 500 is what
+> the rest of this codebase returns when something is genuinely wrong.
+
+> **A score of 4 out of 5 is a rule about the wrong thing.** It says "most of the
+> checks passed", not "the password is long enough".
+
+### What this part did not do
+
+No change to token lifetimes, algorithms or the secret-loading path. The
+production guard (`ENVIRONMENT=production` with a default secret raises at import)
+was already correct and is unchanged.

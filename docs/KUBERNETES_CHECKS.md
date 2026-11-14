@@ -291,3 +291,75 @@ accurate. Saying so is the point: re-reading a YAML file is not re-running a clu
   only Chroma and Phoenix are digest-pinned. Worth knowing before claiming "pinned images."
 - cert-manager, External Secrets and OIDC are not installed in this cluster (the manifests
   exist, but their `deploy.sh` flags default to off).
+
+---
+
+## Check 9 — the integration job did not install what the image installs
+
+*(Added 2026-11-13. This one is about the CI pipeline rather than the cluster, but it is
+the same defect: a green tick that never touched the artifact.)*
+
+`.github/workflows/main.yml` had two jobs installing dependencies two different ways.
+
+| Job | Installed | Could it verify the shipped image? |
+|---|---|---|
+| `test` (L38) | `pip install -r requirements.txt` — pinned `mcp==1.30.0` | yes |
+| `integration` (L275) | five hand-written `pip install` lines, **unpinned** | **no** |
+
+The `test` job even carries the comment *"Pinned: install exactly what the Docker image
+ships (requirements.txt)"*. The `integration` job — whose entire purpose is "every module
+imports" — built its own dependency set:
+
+```yaml
+pip install groq llama-index-core llama-index-llms-groq
+pip install chromadb pydantic fastapi uvicorn PyJWT bcrypt
+pip install python-dotenv pypdf python-docx pandas
+pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+pip install pytest sqlalchemy psycopg2-binary asyncpg redis "mcp<2" prometheus-client "fastmcp<4"
+```
+
+`"mcp<2"` resolves to the newest `mcp` under 2 — not the 1.30.0 the image pins. The job
+could stay green while the image broke, and the one thing it was written to prove was
+that the image's imports work.
+
+### The second half: it installed a package the project explicitly excludes
+
+The last line installed `"fastmcp<4"`. Nothing imports `fastmcp`. The MCP server uses
+`from mcp.server.fastmcp import FastMCP` — a submodule of `mcp` itself, not the separate
+`fastmcp` distribution. `tests/test_version_and_deps.py`
+still asserts the package is absent from `requirements.txt`:
+
+```python
+def test_unused_fastmcp_is_not_in_requirements():
+    assert not re.search(r"(?im)^fastmcp\b", _read("requirements.txt"))
+```
+
+So the CI job and the test suite disagreed about the dependency set, and only the suite
+was right.
+
+### The fix
+
+```yaml
+- name: "📦 Install dependencies"
+  run: |
+    # Pinned: install exactly what the Docker image ships (requirements.txt).
+    # This job used to hand-list unpinned packages, so it could go green while
+    # testing a newer `mcp` than the image actually installs. It also installed
+    # the standalone `fastmcp` package, which nothing imports — the MCP server
+    # uses `mcp.server.fastmcp`, which ships inside `mcp` itself.
+    pip install -r requirements.txt
+```
+
+Verified that `mcp==1.30.0` alone provides `mcp.server.fastmcp`:
+
+```
+$ python -c "from mcp.server.fastmcp import FastMCP; print('ok')"
+ok
+```
+
+### Why this is check 9 and not a footnote
+
+Checks 1–8 are about a cluster that was configured correctly and described incorrectly.
+This one is the inverse: a CI job that described itself as verifying the artifact and
+verified a different one. **A green check that does not test the thing it is named after
+is worse than a missing check**, because a missing check is visible in the list.

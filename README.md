@@ -5,7 +5,6 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009639.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Next.js](https://img.shields.io/badge/Next.js-16+-000000.svg?logo=nextdotjs)](https://nextjs.org/)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.40+-FF4B4B.svg?logo=streamlit)](https://streamlit.io/)
 [![Groq](https://img.shields.io/badge/Groq-API-00F5A8.svg?logo=groq)](https://groq.com/)
 [![Phoenix](https://img.shields.io/badge/Phoenix-Observability-43B58B.svg)](https://arize.com/phoenix/)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-000000.svg?logo=opentelemetry)](https://opentelemetry.io/)
@@ -66,9 +65,9 @@ on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | 833 passed, 6 skipped, 17 deselected (LLM stubbed) | `pytest tests/ -q -m "not mcp"` |
+| **Tests** | 842 passed, 6 skipped, 17 deselected (LLM stubbed); **78.6% coverage** on CI's `--cov=.` scope, gated at 74% | `pytest tests/ -q -m "not mcp" --cov=.` |
 | **Cost** | $0.24 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (row 22) |
-| **Bugs found and fixed** | 39 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
+| **Bugs found and fixed** | 44 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
 
 ### The seven parts, and what backs each one
 
@@ -84,11 +83,11 @@ proof type, the row does not belong here.
 | 3 | **Observability** | [`OBSERVABILITY_FINDINGS.md`](docs/OBSERVABILITY_FINDINGS.md) | 4 | a 2.0 s stream recorded as 0.002 s → 2.008 s; tracing cost measured at ~5 µs/span across 5 points |
 | 4 | **RAG** | [`RAG_FINDINGS.md`](docs/RAG_FINDINGS.md) | 6 | a retrieval table with three *negative* results published; 0 cross-user leaks across every run |
 | 5 | **Security** | [`SECURITY_FINDINGS.md`](docs/SECURITY_FINDINGS.md) | 4 | four questions answered in both directions; containment verified on both chat paths |
-| 6 | **The dark modules** | [`DARK_MODULES.md`](docs/DARK_MODULES.md) | 23 dead names | 61 public names checked by reference, not by line count; 13 also untested |
-| 7 | **The cluster** | [`KUBERNETES_CHECKS.md`](docs/KUBERNETES_CHECKS.md) | 8 checks | live-cluster commands; re-audited against all 31 manifests, which caught one wrong claim; check 8 boots the app with no key |
+| 6 | **The dark modules** | [`DARK_MODULES.md`](docs/DARK_MODULES.md) | 23 dead names | 61 public names checked by reference, not by line count; 13 also untested. Since then `services.py` (84 lines), `database_improvements` (546 of 678 lines), 3 dead functions and 7 unread feature flags have been **deleted**, not just counted |
+| 7 | **The cluster** | [`KUBERNETES_CHECKS.md`](docs/KUBERNETES_CHECKS.md) | 9 checks | live-cluster commands; re-audited against all 31 manifests, which caught one wrong claim; check 8 boots the app with no key |
 
-**What that adds up to:** 39 fixed bugs, 23 dead public names, 7 findings documents, and
-**828 tests**. The number that matters is not any one of those — it is that each of them
+**What that adds up to:** 44 fixed bugs, 23 dead public names, 7 findings documents, and
+**839 tests**. The number that matters is not any one of those — it is that each of them
 was **checked twice**, once when it was found and once when the document was re-read
 against the artefacts. The cluster re-audit above exists because that second pass found a
 sentence that had been wrong for weeks.
@@ -178,7 +177,7 @@ prices for these Groq models; spend is tracked in Prometheus (panels above).
 | [docs/SECURITY_FINDINGS.md](docs/SECURITY_FINDINGS.md) | 4 security findings — the safety claim described the wrong path, and citations are filenames, not evidence |
 | [docs/DARK_MODULES.md](docs/DARK_MODULES.md) | 11 modules, 2,928 lines — 23 of 61 public names unreachable, 13 of those untested |
 | [docs/OBSERVABILITY_FINDINGS.md](docs/OBSERVABILITY_FINDINGS.md) | 4 findings — a 2.0 s stream measured as 0.002 s, and the one claim that had no number behind it |
-| [docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md) | 8 checks against a live cluster, with runnable commands, re-audited 2026-11-13 |
+| [docs/KUBERNETES_CHECKS.md](docs/KUBERNETES_CHECKS.md) | 9 checks against a live cluster, with runnable commands, re-audited 2026-11-13 |
 | [docs/SLO.md](docs/SLO.md) | Chat SLOs per route, and what "failed" means for a streamed answer |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Full system design, data flow, and decision records |
 | [API_DOCUMENTATION.md](API_DOCUMENTATION.md) | Every REST/WebSocket endpoint with payloads and examples |
@@ -468,6 +467,11 @@ with the corrected headline figures, is in
 | 37 | **`tool recall 0.0%`** on a run where the only relevant case never ran | Exactly one case declares `expected_tools` (`team-slack-bot`) and the provider refused it. An ungraded case has no calls, so `set(expected) <= set()` was `False` and **the case entered the recall denominator as a failure** — a case that never executed scored against the agent | Recall only scores cases that were actually graded, so one ungraded case reports *nothing* rather than *zero*. Silencing a measurement and disarming it are different things | `test_a_case_that_never_ran_is_not_scored_on_tool_recall`, and `test_a_graded_case_that_skipped_its_tools_still_counts_as_a_miss` so the fix cannot disarm the measurement it protects |
 | 38 | **The best run in the project's history was reported as a REGRESSION** | `regression = bool(regressed) or bool(worse) or any(v < 0 for v in cats.values())` — three ways to fire, and the third has no floor. On 2026-11-12 13:15 the run posted its best numbers ever: pass rate 60.0 → **76.7%**, judge 4.32 → 4.42, grounding 0.40 → **0.625**, fabrication 16.7 → **10.5%**, p95 119.8 → **85.8 s**, twelve of fifteen categories up. `safety` fell 12.5 (one case of eight) and `coding` 8.4, and that alone turned the verdict red. It stayed green only because it was dispatched by hand with `fail_on_regression=false`; the nightly would have failed on the most successful night the project has had. **My first fix was also wrong**: I assumed the axis was sample size (≥ 8 cases, ≥ 12.5 points) but `safety` has exactly 8 cases and fell exactly 12.5, so it still fired. Found by replaying the real numbers, not by re-reading the code | The axis is **agreement**, not size: a category going down counts only when the overall pass rate went down with it. `regression = bool(worse) or (_cats_confirm and _pass_rate_down)`. Headline metrics still fail the build alone — a rising fabrication rate is a fact about the answers — which is what stopped the fix from disarming the detector it protects | `test_the_best_run_the_suite_ever_had_is_not_called_a_regression` (real 13:15 numbers: False, was True), `test_a_genuine_regression_still_fails_the_build` (True), `test_one_category_slipping_on_a_flat_run_is_not_a_regression` (False), and `test_compare_treats_slower_and_fabricated_more_as_worse` caught the over-correction on the first run |
 | 39 | A fix for the lost tail **removed the cap it was meant to protect** | The case token budget (`EVAL_CASE_TOKEN_BUDGET`, 9,000) was fitted to `limit - spent` and returned early whenever it did not fit — so it silently **overrode** the per-request ceiling of 6,000. Eleven cases were refused with `Request too large` and **not one** with `route=budget`, because that branch never refuses: it compacts and returns. The guard looked like it was working while bypassing the thing it was protecting. **110 tests did not catch it**: every one asserted the *case* budget was respected, and none asserted the *request* ceiling still was | The smaller limit wins: `remaining = min(limit - spent, input_budget(model))`. **A fix that adds a limit must be tested against the limit it sits next to** | `test_a_call_near_the_case_limit_is_still_capped_by_the_request_budget`, `test_the_request_budget_wins_even_when_the_case_has_room_left` — both fail with the bug restored. Live: `Request too large` 11 cases → **2**, `guard_compacted` fired for the first time, grounding 0.40 → 0.625 |
+| 40 | The CORS test **could not fail** — and CORS was misconfigured | `test_cors_headers_present` built a list of middleware, discarded it, printed `✅ CORS middleware configured` and passed. Deleting `CORSMiddleware` from `api.py` entirely left it green. Underneath the non-test, development ran `allow_origins=["*"]` with `allow_credentials=True`; Starlette turns that into a reflected `Access-Control-Allow-Origin: <attacker origin>` **plus** `Allow-Credentials: true`, which browsers accept — so any site the developer visited could make authenticated cross-origin calls to their local API. The frontend never needed it: it reaches the API through a same-origin `/api` rewrite | Explicit origin lists in **both** environments; the test asserts the middleware is registered, that origins are non-empty, that `*` is never combined with credentials, and that the expected methods/headers are allowed. Sabotaging `add_middleware` now fails it with `assert []` | `test_cors_headers_present`; before/after `curl -H 'Origin: https://evil.example'`: header reflected → **absent** |
+| 41 | The CI job named "Test all modules import" **did not install what the image installs** | `integration` (L275) hand-listed five unpinned `pip install` lines while `test` (L38) used `requirements.txt`. It installed the newest `mcp<2` rather than the pinned `mcp==1.30.0`, so the job could stay green while the image broke. It also installed the standalone `fastmcp`, which nothing imports and which `test_version_and_deps.py` asserts must not be a dependency — the MCP server uses `mcp.server.fastmcp`, a submodule of `mcp` | `pip install -r requirements.txt`, one line, matching the `test` job. Verified `mcp==1.30.0` alone provides `mcp.server.fastmcp` | `.github/workflows/main.yml:273–281`; `test_version_and_deps.py::test_unused_fastmcp_is_not_in_requirements` still guards the dependency set |
+| 42 | **7 of the 8 shipped feature flags were never read by any code** | `config/feature_flags.json` shipped `enable_advanced_rag`, `enable_phoenix_tracing`, `enable_caching`, `enable_rate_limiting`, `enable_websockets`, `enable_file_upload`, `enable_beta_features` — each with **zero** `is_enabled(...)` call sites. Setting any of them to `false` changed nothing: `api.py` calls `rate_limiter.is_rate_limited()` unconditionally. Three of the names also exist in a *second* flag system (`modules/config.py::FeatureFlags`, from `FEATURE_*` env vars), so there were two knobs per concept and neither gated the behaviour | The seven deleted; `enable_mcp_agents` kept because it is genuinely read twice. A new test fails if a flag is ever added to the JSON that no code asks about | `test_every_shipped_flag_is_actually_read` — fails with `flags configured but never read by any code: ['enable_beta_features']` when one is added back |
+| 43 | A **validation function that nothing called** — declared limits were enforced nowhere | `modules/security.py` declares `MAX_FACT_KEY_LENGTH = 100` and `MAX_FACT_VALUE_LENGTH = 1000`, and defines `validate_fact_key` / `validate_fact_value` beneath them. Neither was called from anywhere. `POST /remember` was capped by its Pydantic model, so an audit stopping there would have concluded the limits were live — but six other call sites build a fact from free text (`key, value = content.split("=", 1)`), where `content` is a chat message capped at **10,000** characters. A 10,000-char message became a 10,000-char fact | Enforced in `FactMemory.remember()`, the one function every caller goes through, so the chat path is covered as well as the endpoint | `test_security.py::TestFactInputLimits` — 5 tests: oversized key, oversized value (the chat path), empty value, unaffected happy path, and the endpoint's own 422 |
+| 44 | `modules/services.py` — **84 lines kept alive by a test that existed to import it** | A service locator (`Services`, `get_services`, `reset_services`) exposing lazy singletons for database, RAG, memory, facts and websocket. **Zero importers, zero references** anywhere outside `tests/test_enterprise.py::test_services_singleton`, whose only assertion was `get_services() is get_services()`. Its only other inbound reference in the repo was a row in `docs/DARK_MODULES.md`'s own table. Deleting the test alone would have deleted the evidence that it was unused | Module deleted; `broadcast_message`, `get_online_count` and `reload_config` deleted with it. The test now asserts the file stays gone, and `DARK_MODULES.md` carries a dated correction | `test_dead_service_locator_stays_deleted`; `DARK_MODULES.md` addendum 2026-11-13 |
 
 **Operations runbook items** (no code change): a kubelet image pull that hung was fixed by
 pulling with `crictl pull` and deleting the stuck pods; Prometheus uses a ReadWriteOnce volume,
@@ -573,7 +577,6 @@ cd llama-agent
    |---------|-----|
    | **Main App (Next.js)** | https://llama-agent.local/ |
    | **API Docs (Swagger)** | https://llama-agent.local/api/docs |
-   | **Streamlit UI (legacy)** | https://llama-agent.local/streamlit/ |
 
 #### 🐳 Docker Compose (alternative — not running by default here)
 1. **Add your secrets** (never committed):
@@ -603,7 +606,6 @@ cd llama-agent
    |---------|-----|
    | **Main App (Next.js)** | http://localhost:3001 |
    | **API Docs (Swagger)** | http://localhost:8000/docs |
-   | **Streamlit UI (legacy)** | http://localhost:8501/streamlit/ |
    | **Nginx (SSL/LB)** | https://localhost (self-signed cert generated on first start; put real certs in `config/nginx/ssl/`) |
 
 ### 3️⃣ Create an account
@@ -616,14 +618,14 @@ cd llama-agent
 ## 🛡️ Secure-by-default
 
 The committed `docker-compose.yml` publishes the user-facing ports
-(`3001`, `8000`, `8501`, `80/443`). The monitoring UIs are bound to **localhost only**
+(`3001`, `8000`, `80/443`). The monitoring UIs are bound to **localhost only**
 (`127.0.0.1`), so you can open them on your own machine but nobody else can:
 Grafana http://localhost:3002, Prometheus http://localhost:9090,
 Phoenix http://localhost:6006. Postgres, Redis, Loki, node-exporter and the MCP server
 are **internal to the Docker network**.
 
 The Kubernetes deployment is locked down the same way: the ingress exposes only the
-app routes (`/`, `/api`, `/ws`, `/streamlit`). The MCP server is internal-only,
+app routes (`/`, `/api`, `/ws`). The MCP server is internal-only,
 `/metrics` refuses proxied requests, and the observability UIs sit behind basic-auth
 (or SSO with `OIDC_ENABLED=true`).
 
@@ -643,11 +645,11 @@ app routes (`/`, `/api`, `/ws`, `/streamlit`). The MCP server is internal-only,
         │              │              │
         ▼              ▼              ▼
 ┌──────────────┐ ┌─────────────┐ ┌───────────────────────┐
-│ Next.js UI   │ │ Streamlit   │ │ FastAPI (8000)        │
-│ :3001        │ │ UI :8501    │ │ /chat /chat/stream    │
-│              │ │ (legacy)    │ │ /ws /auth /documents  │
-└──────────────┘ └─────────────┘ │ /monitoring /metrics  │
-                                 └───────┬───────────────┘
+│ Next.js UI   │ │ FastAPI (8000)                        │
+│ :3001        │ │ /chat /chat/stream                    │
+│              │ │ /ws /auth /documents                  │
+└──────────────┘ │ /monitoring /metrics                  │
+                 └───────┬───────────────────────────────┘
         ┌───────────────────────────────┬┘───────────┬────────────┐
         ▼                               ▼            ▼            ▼
 ┌──────────────┐ ┌──────────────────┐ ┌─────────────┐ ┌─────────────┐
@@ -708,7 +710,7 @@ Both keep ChromaDB cluster-internal (no published host port).
 
 | Layer | Technology |
 |-------|-----------|
-| **Frontend** | Next.js 16 (main UI), Streamlit (legacy) |
+| **Frontend** | Next.js 16 |
 | **Backend** | FastAPI, Python 3.11, asyncpg |
 | **Database** | PostgreSQL 15, Redis 7, ChromaDB |
 | **AI/ML** | Groq (`qwen/qwen3.8-27b` strong, `openai/gpt-oss-20b` fast), LlamaIndex, onnxruntime (reranker) |
@@ -729,7 +731,6 @@ Both keep ChromaDB cluster-internal (no published host port).
 | `llama-agent-chromadb` | `chromadb` | Shared ChromaDB vector store (all API replicas) | internal |
 | `llama-agent-api` | `api` | FastAPI REST + WebSocket + SSE chat | **8000** |
 | `llama-agent-mcp` | `mcp-server` | MCP agent server (SSE, 5 agents) | internal |
-| `llama-agent-web` | `web` | Streamlit UI (legacy) | **8501** |
 | `llama-agent-frontend` | `frontend` | Next.js 16 UI | **3001** |
 | `llama-agent-nginx` | `nginx` | SSL + Load Balancer + security headers | **80, 443** |
 | `llama-agent-prometheus` | `prometheus` | Metrics collection + alert rules | 127.0.0.1:9090 |
@@ -754,7 +755,7 @@ Both keep ChromaDB cluster-internal (no published host port).
 | 🛡️ **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options | `test_enterprise.py::test_security_headers_present` |
 | 🧼 **Input Sanitization & Injection Defence** | **Containment is on both paths**: `PROMPT_INJECTION_GUARD` in the system prompt + `<<UNTRUSTED_DATA>>` delimiters around the message, history, facts, tool results and every `@team`/`@research` task — `/chat` via `run_agent`, `/chat/stream` via `run_agent_stream`, and `agent_tools` wraps web/tool output on both. The browser-boundary scrubber and the injection **detector** run on `/chat` only, so `/chat/stream` — the only path the UI uses — loses **audit coverage, not containment** (see below) | `test_security.py::TestXSS`, `::TestSQLInjection`; agent eval `safety-injection` passed (system prompt not printed) |
 | 🛡️ **CSRF Protection** | `SameSite=Lax` HttpOnly auth cookies + same-origin API | design (no dedicated test) |
-| 🌐 **CORS** | Fixed origin list when `ENVIRONMENT=production` (set in k8s and Compose) | `test_security.py::TestCORS` |
+| 🌐 **CORS** | Explicit origin allow-list in **every** environment. It used to be `["*"]` in development with `allow_credentials=True`, which Starlette turns into a reflected `Access-Control-Allow-Origin` for any caller — fixed 2026-11-13 (see [`SECURITY_FINDINGS.md` S5](docs/SECURITY_FINDINGS.md)) | `test_security.py::TestCORS::test_cors_headers_present` (asserts the middleware is registered **and** that `*` is never combined with credentials; fails if `CORSMiddleware` is removed) |
 | 📊 **Internal `/metrics`** | Refuses requests that came through a proxy (404) | `test_multitenancy.py::test_prometheus_metrics_hidden_behind_proxy` |
 | 📝 **Audit Logging** | Login, registration, uploads, rate-limit events | `test_enterprise.py::test_audit_logger_writes_events` |
 | 🔒 **Secure-by-default** | Infra ports never published to the host in committed config | `docker-compose.yml` (monitoring bound to `127.0.0.1`), k8s ingress exposes only app routes |
@@ -946,7 +947,6 @@ llama-agent/
 ├── llama_agent1.py           # GroqLLM llama-index wrapper + streaming agent
 ├── multi_agent.py            # Multi-agent orchestrator (5 agents) + Phoenix-aware client
 ├── mcp_agents_server.py      # MCP agent server (SSE, 5 specialized agents)
-├── app.py                    # Streamlit application (legacy UI)
 ├── frontend/                 # Next.js 16 main UI
 ├── modules/
 │   ├── auth.py               # JWT authentication
@@ -987,7 +987,7 @@ pytest tests/ -q
 #   python -m evals.run --tags smoke        # see evals/README.md
 ```
 
-**Current status:** 833 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
+**Current status:** 842 passing tests, 6 skipped, 17 deselected (`-m "not mcp"`), across
 39 test modules. The 4 skipped tests need the reranker model file, which CI downloads
 (`RERANKER_TEST_MODEL_DIR`); the 17 deselected are the MCP server tests. The suite covers security hardening, rate limiting, monitoring, RAG (including the
 reranker and document answers), multi-agent routing/streaming, the LLM guard, grounding,
@@ -1014,7 +1014,7 @@ app → ingress → monitoring → backups/HPA/PDB → NetworkPolicies.
 
 > **Note:** add `llama-agent.local` → ingress IP to your `hosts` file. Ingress routes
 > `/` → Next.js, `/api/*` → API (prefix stripped), `/ws/*` → API WebSocket,
-> `/streamlit/*` → Streamlit. MCP stays internal.
+> MCP stays internal.
 > Images come from Docker Hub (`ravneet231/llama-agent*`). CI pushes `:latest`, `:v7` and an
 > immutable `:<git sha>`; the CD job renders `:<sha>` into the manifests (`k8s/apply-app.sh`)
 > so every deploy is one rollout (and `kubectl rollout undo` works).
@@ -1121,7 +1121,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 833 passed, 6 skipped, 17 deselected
+pytest tests/ -q -m "not mcp"            # 842 passed, 6 skipped, 17 deselected
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89

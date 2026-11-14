@@ -50,31 +50,27 @@ class AlertManager:
         self.dedup_window = 300  # 5 minutes
         
         # Alert rules
+        #
+        # Every condition below must key off a field that the metrics dict fed
+        # to check_alerts() actually contains -- otherwise the rule is dead
+        # code that reads as a working control. Four of these used to:
+        # ``error_rate`` (the feed publishes ``failure_rate``), ``daily_cost``
+        # (spend lives in cost_summary()/Prometheus, not business metrics),
+        # ``uptime_percent`` (the feed has ``uptime_hours``) and
+        # ``memory_usage_percent`` (nothing measured memory; psutil is not a
+        # dependency). The alert manager swallowed the empty result as "no
+        # alerts", so a permanently-green alert list was indistinguishable
+        # from a healthy service.
         self.rules: Dict[str, Dict] = {
             "high_error_rate": {
-                "condition": lambda metrics: metrics.get("error_rate", 0) > 5,
+                "condition": lambda metrics: metrics.get("failure_rate", 0) > 5,
                 "severity": AlertSeverity.ERROR,
-                "message": "High error rate detected: {error_rate}%",
+                "message": "High error rate detected: {failure_rate}%",
             },
             "slow_response": {
                 "condition": lambda metrics: metrics.get("avg_response_time", 0) > 2,
                 "severity": AlertSeverity.WARNING,
                 "message": "Slow response times: {avg_response_time}s average",
-            },
-            "high_cost": {
-                "condition": lambda metrics: metrics.get("daily_cost", 0) > 10,
-                "severity": AlertSeverity.WARNING,
-                "message": "High API cost: ${daily_cost:.2f} today",
-            },
-            "low_uptime": {
-                "condition": lambda metrics: metrics.get("uptime_percent", 100) < 99.9,
-                "severity": AlertSeverity.CRITICAL,
-                "message": "Low uptime: {uptime_percent}%",
-            },
-            "memory_high": {
-                "condition": lambda metrics: metrics.get("memory_usage_percent", 0) > 80,
-                "severity": AlertSeverity.WARNING,
-                "message": "High memory usage: {memory_usage_percent}%",
             },
         }
     
@@ -321,8 +317,16 @@ class SLAMonitor:
             avg_response = 0
             p95_response = 0
         
-        # Calculate error rate
-        total_requests = len(self.response_times)
+        # Calculate error rate.
+        #
+        # The denominator used to be len(response_times) -- successful requests
+        # only -- and 0 when nothing had succeeded yet, so a service whose
+        # FIRST request failed reported "error rate 0%, met: True". Measured:
+        # one error and no successes gave current=0.0 met=True.
+        #
+        # Requests here are attempts: one recorded response time or one error.
+        # A non-zero error count against zero successes is 100%, not 0%.
+        total_requests = len(self.response_times) + len(self.errors)
         error_count = len(self.errors)
         error_rate = (error_count / total_requests * 100) if total_requests > 0 else 0
         
@@ -373,28 +377,20 @@ sla_monitor = SLAMonitor()
 # ============ NOTIFICATION CHANNELS ============
 
 
-def slack_notification(alert: Dict) -> None:
-    """Send alert to Slack (placeholder)."""
-    # In production, use Slack API
-    print(f"[SLACK] {alert['severity'].value.upper()}: {alert['message']}")
-
-
-def email_notification(alert: Dict) -> None:
-    """Send alert via email (placeholder)."""
-    # In production, use SMTP
-    print(f"[EMAIL] {alert['severity'].value.upper()}: {alert['message']}")
-
-
-def webhook_notification(alert: Dict) -> None:
-    """Send alert via webhook (placeholder)."""
-    # In production, use HTTP POST
-    print(f"[WEBHOOK] {alert['severity'].value.upper()}: {alert['message']}")
-
-
-# Register default notification channels
-alert_manager.add_notification_channel(slack_notification)
-alert_manager.add_notification_channel(email_notification)
-alert_manager.add_notification_channel(webhook_notification)
+# Notification channels.
+#
+# There used to be three functions here -- slack_notification,
+# email_notification, webhook_notification -- all of which only printed, and
+# all three were registered on alert_manager at import time. So a firing alert
+# printed the same line three times with a different prefix and was delivered
+# nowhere. That is worse than having no channel: the dashboard showed "alerts
+# are configured", and the only thing configured was stdout, which is already
+# the alert's own destination via the print in check_alerts().
+#
+# Deleted rather than implemented. Real delivery needs a webhook URL, retries,
+# a failure mode of its own, and somewhere for its own failures to go; that is
+# a feature with an env var and a test, not a placeholder. The channel list
+# stays, and add_notification_channel() is the hook for whoever adds one.
 
 
 # ============ MONITORING DASHBOARD ============

@@ -33,6 +33,7 @@ from prometheus_client import (
 from starlette.requests import Request
 from starlette.responses import Response
 
+from modules.silent import degrade
 # ============ METRICS DEFINITION ============
 
 REQUEST_COUNT = Counter(
@@ -146,8 +147,8 @@ def record_agent_run(agent: str, seconds: float, outcome: str) -> None:
             agent=_component(agent),
             outcome=outcome if outcome in AGENT_RUN_OUTCOMES else "error",
         ).observe(max(0.0, float(seconds)))
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("agent run duration metric dropped for this call", _e)
 
 
 # ============ CHAT ANSWER TIME (SLO metrics) ============
@@ -213,8 +214,8 @@ def record_chat(route: str, outcome: str, seconds: float,
         if first_token_seconds is not None:
             CHAT_FIRST_TOKEN_SECONDS.labels(route=route).observe(
                 max(0.0, float(first_token_seconds)))
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("chat latency metric dropped for this response", _e)
 
 
 def is_answer_chunk(chunk) -> bool:
@@ -309,8 +310,8 @@ def record_tool_seconds(tool: str, seconds: float) -> None:
         _TOOL_SECONDS.labels(
             tool=tool if tool in _TOOL_NAMES else "other"
         ).observe(max(0.0, float(seconds)))
-    except Exception:  # nosec B110 - telemetry must never fail a tool call
-        pass
+    except Exception as _e:  # nosec B110 - telemetry must never fail a tool call
+        degrade("tool duration not observed (histogram undercounts)", _e)
 
 
 def tool_span(name: str, seconds: float, ok: bool = True, detail: str = ""):
@@ -349,8 +350,8 @@ def tool_span(name: str, seconds: float, ok: bool = True, detail: str = ""):
                     span.set_attribute("tool.ok", bool(ok))
                     if detail:
                         span.set_attribute("tool.detail", detail[:200])
-                except Exception:
-                    pass
+                except Exception as _e:
+                    degrade("tool span attributes not set (span still ends)", _e)
                 return span
             except Exception:
                 self._cm = None
@@ -360,8 +361,8 @@ def tool_span(name: str, seconds: float, ok: bool = True, detail: str = ""):
             try:
                 if getattr(self, "_cm", None) is not None:
                     return self._cm.__exit__(*exc)
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("tool span context-manager exit failed", _e)
             return False
 
     return _Span()
@@ -383,8 +384,8 @@ def record_citation_failure(kind: str) -> None:
     try:
         _CITATION_FAILURES.labels(
             kind=kind if kind in _CITATION_KINDS else "unsourced").inc()
-    except Exception:  # nosec B110 - telemetry must never fail an answer
-        pass
+    except Exception as _e:  # nosec B110 - telemetry must never fail an answer
+        degrade("citation failure not counted (dashboard undercounts)", _e)
 
 
 RAG_CRAG_VERDICTS = Counter(
@@ -430,8 +431,8 @@ def record_llm_call_seconds(model: str, seconds: float, component: str = "other"
         LLM_CALL_SECONDS.labels(model=model or "unknown",
                                 component=_component(component),
                                 stream="true" if stream else "false").observe(max(0.0, seconds))
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("llm latency metric dropped for this call", _e)
 
 
 def _pricing_table() -> dict:
@@ -440,8 +441,8 @@ def _pricing_table() -> dict:
     try:
         for model, price in (json.loads(os.getenv("GROQ_PRICING", "") or "{}")).items():
             table[model] = {"input": float(price["input"]), "output": float(price["output"])}
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("GROQ_PRICING override ignored (unparseable), using built-in price table", _e)
     return table
 
 
@@ -608,8 +609,8 @@ class _TimedBody:
             self._finished = True
             try:
                 self._done()
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("latency timer finish hook failed", _e)
 
     def __del__(self):
         self._finish()

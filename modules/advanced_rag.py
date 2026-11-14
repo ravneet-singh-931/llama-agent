@@ -26,6 +26,7 @@ This module adds 4 advanced features on top of ChromaDB:
 import time
 from typing import List, Dict, Any
 
+from modules.silent import degrade
 
 # ============ 1. RE-RANKING (Rearranging) ============
 
@@ -562,8 +563,8 @@ class PhoenixTracer:
                     "rag_query",
                     attributes={"query": query},
                 )
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("rag span attribute not set (query preview only)", _e)
         
         return trace_id
     
@@ -601,8 +602,8 @@ class PhoenixTracer:
                     },
                 )
                 child.end()
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("rag child span not ended cleanly", _e)
     
     def end_trace(self, answer: str = None, success: bool = True):
         """End the current trace."""
@@ -629,8 +630,8 @@ class PhoenixTracer:
                 if answer:
                     self.current_span.set_attribute("answer_preview", str(answer)[:200])
                 self.current_span.end()
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("rag span answer preview not set", _e)
         
         self.current_trace = None
         self.current_span = None

@@ -14,6 +14,7 @@ from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, List, Optional, Sequence
 
+from modules.silent import degrade
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -301,8 +302,8 @@ class GroqLLM(LLM):
             # /chat/stream can refuse the next request when it is spent.
             from modules import llm_guard
             llm_guard.record_spend(tin + tout)
-        except Exception:
-            pass
+        except Exception as _e:
+            degrade("token spend not recorded for this streamed reply", _e)
 
     def _record_call_seconds(self, start: float, stream: bool = False) -> None:
         """Time ONE model call. The agent/chat histograms mix model time with
@@ -313,8 +314,8 @@ class GroqLLM(LLM):
             record_llm_call_seconds(self.model, time.monotonic() - start,
                                     component=getattr(self, "component", "other"),
                                     stream=stream)
-        except Exception:
-            pass
+        except Exception as _e:
+            degrade("llm latency metric dropped for this reply", _e)
 
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
         start = time.monotonic()
@@ -524,15 +525,17 @@ def clear_memory() -> str:
 
 
 def get_agent_health() -> str:
-    """Get agent health and performance stats."""
+    """Get agent health and performance stats.
+
+    Query counts and latency live in Prometheus (`/metrics`), not in a
+    per-process counter: two replicas reported two different totals, and a
+    restart erased both.
+    """
     health = monitor.get_health()
-    log_metrics = logger.get_metrics()
     return (
         f"🏥 Health: {health['status']}\n"
         f"⏱️ Uptime: {health['uptime_human']}\n"
-        f"📊 Total queries: {log_metrics['total_queries']}\n"
-        f"❌ Total errors: {log_metrics['total_errors']}\n"
-        f"📈 Avg response time: {log_metrics['avg_response_time']:.2f}s"
+        f"❌ Errors logged: {logger.get_error_count()}"
     )
 
 
@@ -641,7 +644,6 @@ async def run_agent(user_input: str, memory: Optional[Any] = None,
     fact_context = fact_store.get_context_string(user_id=user_id)
 
     # Log the interaction
-    monitor.track_request()
     start_time = time.time()
 
     # Build the prompt: user message + recent conversation + known facts.
@@ -700,8 +702,6 @@ async def _run_agent_compute(prompt: str, cache_key: str,
             if not fut.cancelled():
                 fut.set_result(result)
         except Exception as e:
-            elapsed = time.time() - start_time
-            monitor.track_error()
             logger.log_error(e, context=f"User input: {user_input}")
             # Never leak internal error details to the caller.
             result = "Error: something went wrong. Please try again."
@@ -732,7 +732,7 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
                      user_id: str = "guest", conversation_id: str = "default"):
     """
     Stream agent response token by token.
-    Yields text chunks for st.write_stream() in Streamlit.
+    Yields text chunks for the streaming client.
     """
     mem = memory if memory is not None else globals().get("memory")
     fact_store = facts if facts is not None else globals().get("facts")
@@ -819,7 +819,6 @@ def run_agent_stream(user_input: str, memory: Optional[Any] = None,
     # Save to memory after streaming is done
     mem.add_message("user", user_input, user_id=user_id, conversation_id=conversation_id)
     mem.add_message("assistant", full_response, user_id=user_id, conversation_id=conversation_id)
-    monitor.track_request()
 
 
 def main():
@@ -849,8 +848,8 @@ def main():
             print("\n🤖 Agent: Thinking...")
             result = asyncio.run(run_agent(user_input))
             # Persist the exchange (run_agent no longer saves to memory itself).
+            # fact_store was constructed here and never written to or read from.
             mem = globals().get("memory") or ConversationMemory()
-            fact_store = globals().get("facts") or FactMemory()
             mem.add_message("user", user_input, user_id="guest", conversation_id="default_cli")
             mem.add_message("assistant", result, user_id="guest", conversation_id="default_cli")
             print(f"\n🤖 Agent: {result}")

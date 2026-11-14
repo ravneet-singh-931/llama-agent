@@ -19,6 +19,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import List, Dict, Optional, Iterator, Tuple
 from datetime import datetime
 
+from modules.silent import degrade
 sys.path.insert(0, os.path.dirname(__file__))
 
 try:
@@ -86,8 +87,8 @@ try:
     # AFTER startup bound app.state.rag.
     if get_document_store() is None:
         set_document_store(SimpleRAG())
-except Exception:
-    pass
+except Exception as _e:
+    degrade("standalone document store not bound (API store wins if already set)", _e)
 
 
 # ============ LOCAL EMBEDDING (dependency-free) ============
@@ -295,8 +296,8 @@ class InstrumentedGroqClient:
                     llm = self._GroqLLM(**llm_kwargs)
                     try:  # metrics label: which agent / component made the call
                         llm.component = self._client._component
-                    except Exception:  # nosec B110 - a label must never break a call
-                        pass
+                    except Exception as _e:  # nosec B110 - a label must never break a call
+                        degrade("llm component label not set (per-component metrics merged into unknown)", _e)
                     self._client._llms[model] = llm
                 return llm
 
@@ -1002,7 +1003,8 @@ class BaseAgent:
                         got = yield from _tokens(stream)
                         if got:
                             return
-                    except Exception:  # nosec B112
+                    except Exception as _e:  # nosec B112 - try the next provider
+                        degrade("one provider attempt failed (trying the next one)", _e)
                         continue
                 yield {"type": "token", "content":
                     "I couldn't complete that task right now. Please try again."}
@@ -1348,8 +1350,8 @@ def _record_grounding(report) -> None:
             GROUNDING_CLAIMS.labels(result="supported").inc(report.supported)
         if report.unsupported:
             GROUNDING_CLAIMS.labels(result="unsupported").inc(len(report.unsupported))
-    except Exception:  # nosec B110 - metrics must never break an answer
-        pass
+    except Exception as _e:  # nosec B110 - metrics must never break an answer
+        degrade("grounding metric dropped for this answer", _e)
 
 
 def _fence_closer(text: str) -> str:

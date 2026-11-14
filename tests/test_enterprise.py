@@ -223,14 +223,18 @@ class TestIntegration:
         
         assert config1 is config2
 
-    def test_services_singleton(self):
-        """Services should be a singleton"""
-        from modules.services import get_services
-        
-        services1 = get_services()
-        services2 = get_services()
-        
-        assert services1 is services2
+    def test_dead_service_locator_stays_deleted(self):
+        """`modules/services.py` was a service locator nothing imported.
+
+        84 lines, zero importers, zero references outside this test — which
+        only existed to import it. Deleting the test alone would have deleted
+        the reason it looked used, so the module is gone too and this asserts
+        it does not come back as a second path to the same singletons.
+        """
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        assert not (root / "modules/services.py").exists()
 
 
 # ============ ENVIRONMENT TESTS ============
@@ -342,8 +346,51 @@ class TestEnterpriseModules:
         from modules.advanced_monitoring import AlertManager
 
         manager = AlertManager()
-        triggered = manager.check_alerts({"error_rate": 99, "avg_response_time": 0.1})
+        triggered = manager.check_alerts({"failure_rate": 99, "avg_response_time": 0.1})
         assert any(a["type"] == "high_error_rate" for a in triggered)
+
+    def test_every_alert_rule_reads_a_key_that_is_actually_published(self):
+        """A rule whose key never arrives is a control that cannot fire.
+
+        Four of the five rules used to be dead this way: error_rate (the feed
+        publishes failure_rate), daily_cost (spend lives in Prometheus'
+        cost_summary), uptime_percent (the feed has uptime_hours) and
+        memory_usage_percent (nothing measured memory). check_alerts swallowed
+        the empty result as "no alerts", so a permanently-green alert list was
+        indistinguishable from a healthy service.
+
+        This test reads the *real* keys out of the feed builder rather than
+        restating them, so adding a rule for a field nobody publishes fails
+        here instead of silently never firing in production.
+        """
+        import inspect
+        import re
+
+        from modules.advanced_monitoring import AlertManager, business_metrics
+
+        # Keys the business-metrics feed really returns.
+        src = inspect.getsource(business_metrics.__class__.get_metrics)
+        published = set(re.findall(r'"([a-z_0-9]+)":', src))
+        # Keys _alert_metrics() adds from the Prometheus cost summary.
+        import api
+
+        alert_src = inspect.getsource(api._alert_metrics)
+        assert "cost_summary" in alert_src
+        published |= {"total_cost"}
+
+        manager = AlertManager()
+        for name, rule in manager.rules.items():
+            # The condition is a live lambda, not a parseable string, so read
+            # the key out of its source text.
+            cond_src = inspect.getsource(rule["condition"])
+            read = set(re.findall(r'metrics\.get\("([a-z_0-9]+)"', cond_src))
+            assert read, f"rule {name} reads no metrics key"
+            missing = read - published
+            assert not missing, (
+                f"alert rule {name!r} reads {sorted(missing)}, which the "
+                f"metrics feed never publishes (it has {sorted(published)}), "
+                "so the rule can never fire"
+            )
 
     def test_default_models_have_explicit_prices(self, monkeypatch):
         """Both tier defaults are priced explicitly (no silent default-price guess).
@@ -380,7 +427,36 @@ class TestEnterpriseModules:
         # Unknown flags are always disabled
         assert feature_flags.is_enabled("does_not_exist") is False
         # Known, enabled flags evaluate as booleans
-        assert isinstance(feature_flags.is_enabled("enable_rate_limiting"), bool)
+        assert isinstance(feature_flags.is_enabled("enable_mcp_agents"), bool)
+
+    def test_every_shipped_flag_is_actually_read(self):
+        """No flag may be configured that no code ever asks about.
+
+        `config/feature_flags.json` used to carry eight flags. Seven of them —
+        enable_advanced_rag, enable_phoenix_tracing, enable_caching,
+        enable_rate_limiting, enable_websockets, enable_file_upload,
+        enable_beta_features — had zero `is_enabled(...)` call sites anywhere in
+        the codebase. Setting them to false changed nothing, while reading them
+        as if they were live controls. They were deleted; this test stops the
+        same thing from quietly coming back.
+        """
+        import json
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        shipped = set(json.loads((root / "config/feature_flags.json").read_text()).keys())
+        assert shipped, "feature_flags.json must not be empty"
+
+        sources = "".join(
+            p.read_text(encoding="utf-8", errors="ignore")
+            for p in root.rglob("*.py")
+            if "tests" not in p.parts and ".git" not in p.parts
+        )
+        unread = sorted(f for f in shipped
+                        if not re.search(rf'is_enabled\(\s*["\']{re.escape(f)}["\']', sources))
+        assert not unread, f"flags configured but never read by any code: {unread}"
+
 
     def test_feature_flags_file_based(self, tmp_path):
         from modules.cicd_improvements import FeatureFlagManager
@@ -405,13 +481,43 @@ class TestEnterpriseModules:
         assert result["status"] == "unhealthy"
         assert result["checks"]["connection"]["status"] == "unhealthy"
 
-    def test_migration_manager_status(self, tmp_path):
-        from modules.database_improvements import MigrationManager
+    def test_dead_database_managers_stay_deleted(self):
+        """`database_improvements` was 678 lines; 546 of them were unreachable.
 
-        manager = MigrationManager(migrations_dir=str(tmp_path / "migrations"))
-        status = manager.get_status()
-        assert "applied" in status
-        assert "pending" in status
+        MigrationManager, BackupManager, ConnectionPool, QueryOptimizer and
+        create_initial_migrations had zero references in any non-test file. Three
+        of them had module-level singletons that called os.makedirs() at import,
+        so importing the module silently created `backups/` and `migrations/`.
+        Only DatabaseHealthCheck is wired (api.py:457, from /health). This pins
+        that the dead four do not come back as a second way to do migrations or
+        pooling, and that importing the module still has no side effects.
+        """
+        import importlib
+        import os
+        import sys
+
+        import modules.database_improvements as db
+
+        for gone in ("MigrationManager", "BackupManager",
+                     "ConnectionPool", "QueryOptimizer",
+                     "create_initial_migrations"):
+            assert not hasattr(db, gone), f"{gone} was dead code and must stay deleted"
+        assert hasattr(db, "db_health_check")
+
+        # Re-import in a fresh working directory: the module used to run
+        # os.makedirs() from module-level singletons, so importing it created
+        # `backups/` and `migrations/` wherever the process happened to be.
+        original = os.getcwd()
+        with __import__("tempfile").TemporaryDirectory() as tmpdir:
+            try:
+                os.chdir(tmpdir)
+                sys.modules.pop("modules.database_improvements", None)
+                fresh = importlib.import_module("modules.database_improvements")
+                assert fresh.db_health_check is not None
+                created = sorted(os.listdir(tmpdir))
+            finally:
+                os.chdir(original)
+        assert created == [], f"importing the module must create nothing, got {created}"
 
 
 if __name__ == "__main__":

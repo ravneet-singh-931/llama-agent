@@ -17,22 +17,14 @@ Integration tests (require MCP server subprocess):
 Run:
   pytest tests/test_mcp.py -v              # all tests
   pytest tests/test_mcp.py -v -m unit      # unit tests only
-  pytest tests/test_mcp.py -v -m mcp       # integration tests only
-"""
+  """
 
-import asyncio
 import os
 import sys
 import pytest
-import pytest_asyncio
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# mcp requires Python 3.10+ — skip tests that import it on 3.9
-requires_mcp = pytest.mark.skipif(
-    sys.version_info < (3, 10),
-    reason="mcp package requires Python 3.10+",
-)
 
 
 # ============================================================
@@ -40,64 +32,8 @@ requires_mcp = pytest.mark.skipif(
 # ============================================================
 
 
-class TestClientToolMapping:
-    """Verify the MCPAgentClient maps friendly names to MCP tool names."""
-
-    def _get_mapping(self):
-        """Import the tool mapping from the client source."""
-        # The mapping is inside call_agent; we replicate it here for testing
-        return {
-            "research": "research_agent",
-            "coder": "coder_agent",
-            "writer": "writer_agent",
-            "analyzer": "analyzer_agent",
-            "planner": "planner_agent",
-            "collaborate": "collaborate",
-            "team_status": "team_status",
-        }
-
-    def test_all_agent_types_mapped(self):
-        mapping = self._get_mapping()
-        expected = {"research", "coder", "writer", "analyzer", "planner", "collaborate", "team_status"}
-        assert set(mapping.keys()) == expected
-
-    def test_tool_names_match_server(self):
-        """Tool names must match what mcp_agents_server.py registers."""
-        mapping = self._get_mapping()
-        server_tool_names = {
-            "research_agent", "coder_agent", "writer_agent",
-            "analyzer_agent", "planner_agent", "collaborate", "team_status",
-        }
-        assert set(mapping.values()) == server_tool_names
-
-    def test_unknown_agent_passes_through(self):
-        """Unknown agent types should pass through as-is."""
-        mapping = self._get_mapping()
-        unknown = "some_custom_agent"
-        result = mapping.get(unknown, unknown)
-        assert result == unknown
 
 
-@requires_mcp
-class TestClientInitialState:
-    """Verify MCPAgentClient starts in a clean state."""
-
-    def test_session_is_none(self):
-        from mcp_client_helper import MCPAgentClient
-        client = MCPAgentClient()
-        assert client.session is None
-
-    def test_tools_cache_is_none(self):
-        from mcp_client_helper import MCPAgentClient
-        client = MCPAgentClient()
-        assert client._tools_cache is None
-
-    def test_call_agent_raises_without_connect(self):
-        """Calling an agent before connect() should raise RuntimeError."""
-        from mcp_client_helper import MCPAgentClient
-        client = MCPAgentClient()
-        with pytest.raises(RuntimeError, match="Not connected"):
-            asyncio.run(client.call_agent("coder", "hello"))
 
 
 class TestRoutingKeywords:
@@ -189,7 +125,6 @@ class TestServerToolDefinitions:
             os.path.join(os.path.dirname(__file__), "..", "mcp_agents_server.py")
         )
 
-    @requires_mcp
     def test_mcp_package_imports(self):
         """The mcp package should be importable (supports both mcp 1.x and 2.x)."""
         # mcp 1.x: from mcp.server.fastmcp import FastMCP
@@ -198,9 +133,10 @@ class TestServerToolDefinitions:
             from mcp.server.fastmcp import FastMCP
         except ModuleNotFoundError:
             from mcp.server.mcpserver import MCPServer as FastMCP
-        from mcp import ClientSession, StdioServerParameters
-        from mcp.client.stdio import stdio_client
-        # If we get here, imports work
+        from mcp import ClientSession
+        # If we get here, imports work. StdioServerParameters/stdio_client were
+        # imported here only to exercise the old stdio client, which is gone with
+        # the Streamlit UI; the SSE client in modules/mcp_client.py is what ships.
         assert FastMCP is not None
         assert ClientSession is not None
 
@@ -283,49 +219,6 @@ class TestWebSocketModule:
 # ============================================================
 
 
-@pytest.mark.mcp
-@requires_mcp
-class TestMCPClientLifecycle:
-    """Test full client connect -> use -> disconnect lifecycle."""
-
-    @pytest.fixture
-    def client(self):
-        from mcp_client_helper import MCPAgentClient
-        return MCPAgentClient()
-
-    @pytest.mark.asyncio
-    async def test_connect_discovers_tools(self, client):
-        """Connect should discover 7 tools from the server."""
-        tools = await client.connect()
-        assert isinstance(tools, list)
-        assert len(tools) == 7
-        expected = {
-            "research_agent", "coder_agent", "writer_agent",
-            "analyzer_agent", "planner_agent", "collaborate", "team_status",
-        }
-        assert set(tools) == expected
-        await client.disconnect()
-
-    @pytest.mark.asyncio
-    async def test_get_tools_info(self, client):
-        """get_tools_info should return detailed info for each tool."""
-        await client.connect()
-        info = await client.get_tools_info()
-        assert len(info) == 7
-        for tool in info:
-            assert "name" in tool
-            assert "description" in tool
-            assert "input_schema" in tool
-            assert len(tool["description"]) > 10
-        await client.disconnect()
-
-    @pytest.mark.asyncio
-    async def test_disconnect_cleans_up(self, client):
-        """After disconnect, session should be None."""
-        await client.connect()
-        await client.disconnect()
-        assert client.session is None
-        assert client._tools_cache is None
 
 
 def _check_rate_limited(result: str):
@@ -339,169 +232,7 @@ def _check_rate_limited(result: str):
         pytest.skip("LLM provider rate-limited (429)")
 
 
-@pytest.mark.mcp
-@requires_mcp
-class TestMCPCallAgents:
-    """Test calling individual agent tools via MCP."""
-
-    @pytest_asyncio.fixture
-    async def connected_client(self):
-        from mcp_client_helper import MCPAgentClient
-        client = MCPAgentClient()
-        await client.connect()
-        yield client
-        try:
-            await client.disconnect()
-        except Exception:
-            # Best-effort cleanup: mcp stdio_client teardown can raise
-            # RuntimeError under pytest-asyncio's loop management.
-            pass
-
-    @pytest.mark.asyncio
-    async def test_team_status(self, connected_client):
-        result = await connected_client.call_agent("team_status", "")
-        assert isinstance(result, str)
-        assert len(result) > 0
-        # Team status should mention agents
-        result_lower = result.lower()
-        assert any(name in result_lower for name in ["research", "coder", "writer", "analyzer", "planner"])
-
-    @pytest.mark.asyncio
-    async def test_coder_agent(self, connected_client):
-        result = await connected_client.call_agent("coder", "Write a Python hello world function")
-        assert isinstance(result, str)
-        _check_rate_limited(result)
-        assert "Coder Agent" in result
-        assert len(result) > 50
-
-    @pytest.mark.asyncio
-    async def test_research_agent(self, connected_client):
-        result = await connected_client.call_agent("research", "What is machine learning?")
-        assert isinstance(result, str)
-        _check_rate_limited(result)
-        assert "Research Agent" in result
-
-    @pytest.mark.asyncio
-    async def test_writer_agent(self, connected_client):
-        result = await connected_client.call_agent("writer", "Write a short paragraph about AI")
-        assert isinstance(result, str)
-        _check_rate_limited(result)
-        assert "Writer Agent" in result
-
-    @pytest.mark.asyncio
-    async def test_analyzer_agent(self, connected_client):
-        result = await connected_client.call_agent("analyzer", "Analyze the benefits of cloud computing")
-        assert isinstance(result, str)
-        _check_rate_limited(result)
-        assert "Analyzer Agent" in result
-
-    @pytest.mark.asyncio
-    async def test_planner_agent(self, connected_client):
-        result = await connected_client.call_agent("planner", "Create a plan to learn Python")
-        assert isinstance(result, str)
-        _check_rate_limited(result)
-        assert "Planner Agent" in result
-
-    @pytest.mark.asyncio
-    async def test_collaborate(self, connected_client):
-        result = await connected_client.call_agent("collaborate", "Build a simple todo app")
-        assert isinstance(result, str)
-        assert len(result) > 100  # Should have contributions from multiple agents
 
 
-@pytest.mark.mcp
-@requires_mcp
-class TestMCPRouting:
-    """Test auto-routing of tasks to appropriate agents."""
-
-    @staticmethod
-    def _check_rate_limited(result: str):
-        """Skip if the LLM provider is rate-limited (external quota).
-
-        These integration tests execute real agent calls via the Groq API.
-        Free-tier rate limits (HTTP 429 / rate_limit_exceeded) are an
-        external constraint, not a routing-logic failure.
-        """
-        if "429" in result or "rate_limit_exceeded" in result:
-            pytest.skip("LLM provider rate-limited (429)")
-
-    @pytest_asyncio.fixture
-    async def connected_client(self):
-        from mcp_client_helper import MCPAgentClient
-        client = MCPAgentClient()
-        await client.connect()
-        yield client
-        try:
-            await client.disconnect()
-        except Exception:
-            # Best-effort cleanup: mcp stdio_client teardown can raise
-            # RuntimeError under pytest-asyncio's loop management.
-            pass
-
-    @pytest.mark.asyncio
-    async def test_route_coder_task(self, connected_client):
-        result = await connected_client.route_and_call("Write a Python function to sort a list")
-        assert isinstance(result, str)
-        self._check_rate_limited(result)
-        assert "Coder Agent" in result
-
-    @pytest.mark.asyncio
-    async def test_route_writer_task(self, connected_client):
-        result = await connected_client.route_and_call("Write an article about AI trends")
-        assert isinstance(result, str)
-        self._check_rate_limited(result)
-        assert "Writer Agent" in result
-
-    @pytest.mark.asyncio
-    async def test_route_planner_task(self, connected_client):
-        result = await connected_client.route_and_call("Create a step-by-step plan for the project roadmap")
-        assert isinstance(result, str)
-        self._check_rate_limited(result)
-        assert "Planner Agent" in result
-
-    @pytest.mark.asyncio
-    async def test_route_research_default(self, connected_client):
-        """Unmatched queries should default to research."""
-        result = await connected_client.route_and_call("Tell me about something random")
-        assert isinstance(result, str)
-        self._check_rate_limited(result)
-        assert "Research Agent" in result
 
 
-@pytest.mark.mcp
-@requires_mcp
-class TestMCPEdgeCases:
-    """Test error handling and edge cases."""
-
-    @pytest_asyncio.fixture
-    async def connected_client(self):
-        from mcp_client_helper import MCPAgentClient
-        client = MCPAgentClient()
-        await client.connect()
-        yield client
-        try:
-            await client.disconnect()
-        except Exception:
-            # Best-effort cleanup: mcp stdio_client teardown can raise
-            # RuntimeError under pytest-asyncio's loop management.
-            pass
-
-    @pytest.mark.asyncio
-    async def test_empty_task(self, connected_client):
-        """Empty task should still return a response."""
-        result = await connected_client.call_agent("coder", "")
-        assert isinstance(result, str)
-
-    @pytest.mark.asyncio
-    async def test_very_long_task(self, connected_client):
-        """Very long task should be handled."""
-        long_task = "Explain this in detail: " + "word " * 200
-        result = await connected_client.call_agent("research", long_task)
-        assert isinstance(result, str)
-        assert len(result) > 0
-
-    @pytest.mark.asyncio
-    async def test_special_characters_in_task(self, connected_client):
-        """Special characters should not crash the agent."""
-        result = await connected_client.call_agent("coder", "What is 2+2? Also: @#$%^&*()")
-        assert isinstance(result, str)

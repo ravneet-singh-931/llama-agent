@@ -394,12 +394,11 @@ class ApiClient {
         last_used: string | null;
       }[];
       health: {
+        // Process health only -- request/error counts are Prometheus-owned
+        // (see modules/monitoring.py PerformanceMonitor).
         status: string;
         uptime_seconds: number;
         uptime_human: string;
-        total_requests: number;
-        total_errors: number;
-        error_rate: string;
       };
       metrics: {
         total_agents: number;

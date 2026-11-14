@@ -39,6 +39,7 @@ import uuid
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional
 
+from modules.silent import degrade
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rag")
@@ -93,8 +94,8 @@ class Index:
         for name in ("documents", "query_cache"):
             try:
                 client.delete_collection(name)  # ephemeral clients share state per process
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("one eval row could not be scored (skipped)", _e)
         self.store = VectorStore(client=client)
         if embedding_function is not None:
             client.delete_collection("documents")

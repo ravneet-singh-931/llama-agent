@@ -115,7 +115,6 @@ spec:
               app.kubernetes.io/name: ingress-nginx
       ports:
         - { protocol: TCP, port: 8000 }   # api
-        - { protocol: TCP, port: 8501 }   # web
         - { protocol: TCP, port: 3000 }   # frontend / grafana
         - { protocol: TCP, port: 8001 }   # mcp-server
         - { protocol: TCP, port: 9090 }   # prometheus

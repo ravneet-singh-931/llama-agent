@@ -36,6 +36,7 @@ import uuid
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional
 
+from modules.silent import degrade
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evals import checks  # noqa: E402
@@ -125,8 +126,8 @@ def _snapshot_dispatch_tool() -> None:
     try:
         from modules import agent_tools
         _ORIGINAL_DISPATCH = agent_tools.dispatch_tool
-    except Exception:                      # noqa: BLE001 - best effort
-        pass
+    except Exception as _e:
+        degrade("could not wrap dispatch_tool (eval cannot record tool calls)", _e)
 
 
 class ToolRecorder:
@@ -405,8 +406,8 @@ def _case_span(case: Dict):
                     span.set_attribute("eval.case", case.get("id", ""))
                     span.set_attribute("eval.category", case.get("category", ""))
                     span.set_attribute("eval.route", case.get("route", ""))
-                except Exception:
-                    pass
+                except Exception as _e:
+                    degrade("span attributes not set for this eval case", _e)
                 return span
             except Exception:
                 self._cm = None
@@ -416,8 +417,8 @@ def _case_span(case: Dict):
             try:
                 if getattr(self, "_cm", None) is not None:
                     return self._cm.__exit__(*exc)
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("eval span did not close cleanly", _e)
             return False
 
     return _Span()
@@ -464,20 +465,20 @@ def prompt_fingerprint() -> str:
     try:
         from modules.security_hardening import PROMPT_INJECTION_GUARD
         parts.append(PROMPT_INJECTION_GUARD)
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("prompt-injection guard text missing from the eval system prompt", _e)
     try:
         from modules.prompt_rules import agent_common_rules
         parts.append(agent_common_rules())
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("shared agent rules missing from the eval system prompt", _e)
     try:
         from multi_agent import MultiAgentOrchestrator
         orch = MultiAgentOrchestrator()
         for name in sorted(orch.agents):
             parts.append(f"{name}:{getattr(orch.agents[name], '_system', '')}")
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("could not read agent system prompts (eval prompt incomplete)", _e)
     blob = "\n\x00\n".join(parts)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
@@ -516,8 +517,8 @@ def run_case(case: Dict, executor: Callable[..., Dict] = execute, use_judge: boo
                     # actually cost, not just what the whole run cost.
                     try:
                         _CASE_SPEND[case["id"]] = spent
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        degrade("per-case spend not recorded (only the run total)", _e)
 
     # One span per case. A failing nightly case used to leave only its answer
     # text and the judge's verdict in the report; the reasoning chain was
