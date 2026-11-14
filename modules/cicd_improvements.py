@@ -11,6 +11,7 @@ Features:
 import os
 import json
 import hashlib
+import logging
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -37,53 +38,114 @@ class FeatureFlagManager:
         self._load_flags()
     
     def _load_flags(self) -> None:
-        """Load feature flags from file."""
-        if os.path.exists(self.config_file):
+        """Load feature flags from file, never letting a bad file stop startup.
+
+        This runs inside the module-level `FeatureFlagManager()` that `api.py`
+        imports, so an exception here is an exception at *import time* — the app
+        does not start. That is a bad trade for a feature-flag file: a corrupted
+        or half-written JSON file (interrupted write, disk full, a pod killed
+        mid-save) or a hand-edited field of the wrong type would take the whole
+        service down, which is exactly the opposite of what a feature flag is
+        for. A flag's job is to let you turn something off without a deploy.
+
+        Three failure modes are handled, all seen in practice:
+
+        * unreadable / invalid JSON      -> JSONDecodeError
+        * `{"flag": true}` instead of a dict -> AttributeError in is_enabled
+        * `"rollout_percent": "100"`     -> TypeError in is_enabled
+
+        The file is not silently ignored: the problem is logged at ERROR with the
+        path, and the defaults are used. `load_error` records it so /health and
+        the dashboard can report that this process is running on defaults rather
+        than on the flags somebody intended.
+        """
+        self.load_error: Optional[str] = None
+        if not os.path.exists(self.config_file):
+            self._apply_defaults()
+            return
+        try:
             with open(self.config_file, "r") as f:
-                self.flags = json.load(f)
-        else:
-            # Default flags
-            self.flags = {
-                "enable_advanced_rag": {
-                    "enabled": True,
-                    "description": "Enable advanced RAG features (re-ranking, sub-questions)",
-                },
-                "enable_phoenix_tracing": {
-                    "enabled": True,
-                    "description": "Enable Phoenix observability tracing",
-                },
-                "enable_caching": {
-                    "enabled": True,
-                    "description": "Enable response caching",
-                },
-                "enable_rate_limiting": {
-                    "enabled": True,
-                    "description": "Enable rate limiting",
-                },
-                "enable_websockets": {
-                    "enabled": True,
-                    "description": "Enable WebSocket support",
-                },
-                "enable_file_upload": {
-                    "enabled": True,
-                    "description": "Enable file upload feature",
-                },
-                "enable_mcp_agents": {
-                    "enabled": False,
-                    "description": "Enable MCP multi-agent team",
-                },
-                "enable_beta_features": {
-                    "enabled": False,
-                    "description": "Enable experimental features",
-                },
-            }
-            self._save_flags()
-    
+                loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                raise ValueError(
+                    f"expected a JSON object of flags, got {type(loaded).__name__}"
+                )
+            for name, flag in loaded.items():
+                if not isinstance(flag, dict):
+                    raise ValueError(
+                        f"flag {name!r} must be an object with an 'enabled' key, "
+                        f"got {type(flag).__name__}"
+                    )
+            self.flags = loaded
+        except Exception as e:
+            # Deliberately broad: ANY problem with this file must cost flags,
+            # never availability. See the docstring.
+            self.load_error = f"{type(e).__name__}: {e}"
+            logging.getLogger(__name__).error(
+                "feature flags: could not load %s (%s) - using defaults, so every "
+                "flag not in the defaults below reads as disabled",
+                self.config_file, self.load_error,
+            )
+            self._apply_defaults()
+
+    def _apply_defaults(self) -> None:
+        """Built-in defaults, used when there is no file or it cannot be read."""
+        # Default flags
+        self.flags = {
+            "enable_advanced_rag": {
+                "enabled": True,
+                "description": "Enable advanced RAG features (re-ranking, sub-questions)",
+            },
+            "enable_phoenix_tracing": {
+                "enabled": True,
+                "description": "Enable Phoenix observability tracing",
+            },
+            "enable_caching": {
+                "enabled": True,
+                "description": "Enable response caching",
+            },
+            "enable_rate_limiting": {
+                "enabled": True,
+                "description": "Enable rate limiting",
+            },
+            "enable_websockets": {
+                "enabled": True,
+                "description": "Enable WebSocket support",
+            },
+            "enable_file_upload": {
+                "enabled": True,
+                "description": "Enable file upload feature",
+            },
+            "enable_mcp_agents": {
+                "enabled": False,
+                "description": "Enable MCP multi-agent team",
+            },
+            "enable_beta_features": {
+                "enabled": False,
+                "description": "Enable experimental features",
+            },
+        }
+        self._save_flags()
+
     def _save_flags(self) -> None:
-        """Save feature flags to file."""
-        os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
-        with open(self.config_file, "w") as f:
-            json.dump(self.flags, f, indent=2)
+        """Save feature flags to file, best effort.
+
+        A container can run with a read-only filesystem, or the directory may
+        not be writable by the runtime user. Persisting the flags is a
+        convenience; failing to do so must not stop a flag from taking effect
+        in this process, so the write is logged and swallowed.
+        """
+        try:
+            parent = os.path.dirname(self.config_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(self.config_file, "w") as f:
+                json.dump(self.flags, f, indent=2)
+        except OSError as e:
+            logging.getLogger(__name__).warning(
+                "feature flags: could not persist to %s (%s) - flags apply to "
+                "this process only", self.config_file, e,
+            )
     
     def is_enabled(self, flag_name: str, user_id: Optional[str] = None) -> bool:
         """
@@ -95,15 +157,30 @@ class FeatureFlagManager:
         """
         if flag_name not in self.flags:
             return False
-        
+
         flag = self.flags[flag_name]
-        
+        # A hand-edited file can put a bool or a string here. Reading a flag
+        # must never raise inside a request handler (see _load_flags), so an
+        # unusable entry is treated as "disabled" and logged, not raised.
+        if not isinstance(flag, dict):
+            logging.getLogger(__name__).warning(
+                "feature flag %r is a %s, not an object - treating as disabled",
+                flag_name, type(flag).__name__,
+            )
+            return False
+
         # Check if globally enabled
         if not flag.get("enabled", False):
             return False
-        
+
         # Check percentage rollout
         rollout_percent = flag.get("rollout_percent", 100)
+        if not isinstance(rollout_percent, (int, float)):
+            logging.getLogger(__name__).warning(
+                "feature flag %r has non-numeric rollout_percent %r - ignoring the "
+                "rollout and using it as fully on", flag_name, rollout_percent,
+            )
+            rollout_percent = 100
         if rollout_percent < 100 and user_id:
             # Deterministic rollout based on user_id
             user_hash = int(hashlib.md5(user_id.encode(), usedforsecurity=False).hexdigest(), 16) % 100

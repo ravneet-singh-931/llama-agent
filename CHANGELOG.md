@@ -38,6 +38,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lose their documents and history. Guarded by an identity (`is`) test.
 - `_user_rag` did **not** move — it reads `app.state.rag`.
 
+### Fixed (deep pass, 2026-11-14) — a corrupt flags file could stop the app from starting
+
+- **`config/feature_flags.json` was read without a guard, at import time.**
+  `feature_flags` is constructed when `api.py` is imported, so any exception
+  while loading that file was an exception during `import api` — the service
+  simply did not start. Three ways to trigger it were reproduced against the
+  real entry point: truncated JSON (a partial write, disk full, or a pod killed
+  mid-save), `{"flag": true}` instead of an object, and a string
+  `"rollout_percent"`. The first needs no hand editing at all.
+- Loading is now guarded: a bad file logs the reason, applies the built-in
+  defaults, and records `load_error`. The loaded value is validated as an object
+  of objects. `is_enabled()` tolerates a malformed entry instead of raising
+  inside a request handler, and `_save_flags()` is best effort so a read-only
+  container filesystem cannot break `set_flag` or startup. A feature flag exists
+  to let you change behaviour **without** a deploy; it should never be able to
+  prevent one.
+- Known but unchanged: the import-time save still writes into the current
+  working directory rather than next to the source. That is a deployment
+  decision, not a bug fix; recorded in `docs/DARK_MODULES.md`.
+
+### Added (deep pass, 2026-11-14) — tests for two surfaces that had none
+
+- **`mcp_agents_server.py` was at 0% coverage** while `docker-compose.yml` and
+  `k8s/mcp-server.yaml` both run it as a separate service. 18 tests: the module
+  imports, all seven advertised tools are registered, DNS-rebinding protection is
+  on with no wildcard host, the timeout backstop returns a message instead of
+  wedging, and an internal error does not leak its text to the MCP client.
+- **The reranker's keyword fallback** — the path taken whenever the ONNX model
+  is missing — was untested (`advanced_rag.py` at 27% coverage, `_fallback_rerank`
+  unreached). 10 tests.
+
 ### Changed (maintenance audit #15, step 4) — streaming helpers, and the untested PII boundary
 
 - `_redacted_stream`, `_reasoning_sse` and `_mirror_message` moved to
