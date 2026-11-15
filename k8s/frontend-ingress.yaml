@@ -14,7 +14,7 @@
 # → Browser gets HTML instead of JS/CSS → Black screen!
 #
 # Solution: This Ingress has NO rewrite-target, so static assets pass through untouched.
-# More specific paths (/api, /ws, /mcp, /streamlit) in main ingress take precedence
+# More specific paths (/api, /ws, /mcp) in main ingress take precedence
 # (Ingress controller matches longest path first).
 #
 # KUBERNETES CONCEPTS:

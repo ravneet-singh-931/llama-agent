@@ -27,6 +27,7 @@ import re
 import time
 from typing import Dict, List, Optional, Tuple
 
+from modules.silent import degrade
 from modules import recording
 from modules.web_tools import web_search, WEB_SEARCH_TOOL
 
@@ -76,7 +77,7 @@ def _current_store():
 
     if _document_store is not None:
         return scoped(_document_store, get_owner())
-    # No store bound (e.g. tests / streamlit): use an empty one.
+    # No store bound (e.g. in tests): use an empty one.
     from modules.rag import SimpleRAG
     return SimpleRAG()
 
@@ -250,8 +251,8 @@ def dispatch_tool(name: str, arguments: dict) -> str:
             # do, and which call was the slow one".
             with tool_span(name, elapsed, ok=ok, detail=detail or ""):
                 pass
-        except Exception:  # nosec B110 - telemetry must never fail a tool call
-            pass
+        except Exception as _e:  # nosec B110 - telemetry must never fail a tool call
+            degrade("tool latency span not recorded (trace shows the call, no duration)", _e)
         # Audit trail. Tool calls are the only outbound surface (web_search
         # leaves the process, the document tools read user files) and were the
         # one security-relevant event with no record. Logged AFTER the call so
@@ -261,8 +262,8 @@ def dispatch_tool(name: str, arguments: dict) -> str:
             AuditLogger().log_tool_call(
                 tool=name, user_id=_audit_user(), success=ok,
                 duration_ms=elapsed * 1000, detail=detail)
-        except Exception:  # nosec B110 - auditing must never fail a tool call
-            pass
+        except Exception as _e:  # nosec B110 - auditing must never fail a tool call
+            degrade("tool call not written to the audit log", _e)
 
 
 def _cap(result: str) -> str:
@@ -383,7 +384,8 @@ def _parse_transcript_tool_calls(content: str) -> List[Tuple[str, dict]]:
     for m in _FUNC_MARKER_RE.finditer(content):
         try:
             args = json.loads(m.group("args"))
-        except Exception:  # nosec B112
+        except Exception as _e:  # nosec B112
+            degrade("one function-call block had invalid JSON args (skipped)", _e)
             continue
         if isinstance(args, dict):
             calls.append((m.group("name"), args))
@@ -392,7 +394,8 @@ def _parse_transcript_tool_calls(content: str) -> List[Tuple[str, dict]]:
     for m in _LEGACY_MARKER_RE.finditer(content):
         try:
             args = json.loads(m.group("args"))
-        except Exception:  # nosec B112
+        except Exception as _e:  # nosec B112
+            degrade("one legacy function-call block had invalid JSON args (skipped)", _e)
             continue
         if isinstance(args, dict):
             calls.append((m.group("name"), args))

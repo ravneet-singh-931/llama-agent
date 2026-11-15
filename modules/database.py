@@ -11,6 +11,7 @@ Tables:
 """
 
 import os
+import asyncio
 import uuid
 from datetime import datetime
 from typing import Optional, Dict
@@ -75,11 +76,8 @@ class User(Base):
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
 
     def verify_password(self, password: str) -> bool:
-        """Verify password against hash"""
-        return _bcrypt.checkpw(
-            password.encode("utf-8"),
-            self.hashed_password.encode("utf-8"),
-        )
+        """Verify password against hash (False, never raises; see verify_password)."""
+        return verify_password(password, self.hashed_password)
 
     @staticmethod
     def hash_password(password: str) -> str:
@@ -270,10 +268,97 @@ class DatabaseManager:
                 await session.close()
 
     async def init_db(self):
-        """Create all tables (for development)"""
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        print("✅ Database tables created!")
+        """Ensure the schema is present — dev-friendly, upgrade-aware.
+
+        This used to be `Base.metadata.create_all` and nothing else, which has a
+        trap that is invisible until it costs you a deployment: **create_all
+        creates missing tables and never alters an existing one**. Verified — add
+        a column to a model, run create_all against a database that already has
+        the table, and the column is silently not created:
+
+            v1 columns: ['id', 'name']
+            v2 columns: ['id', 'name']        <- the new field never arrived
+
+        A release that adds a field to `users` would start cleanly, print
+        "✅ Database initialized", and then fail every query that reads that
+        field — at request time, in production.
+
+        So the order is now:
+
+        1. If the database has no `alembic_version` table but DOES have our
+           tables, it predates migrations. **Stamp it at the baseline** rather
+           than re-creating it, so an existing deployment is adopted, not
+           clobbered.
+        2. Apply migrations to `head`.
+        3. If Alembic is unavailable for any reason, fall back to `create_all`
+           and say so loudly. Starting is more important than being tidy, and a
+           dev box without the migration tooling should still run.
+
+        Returns a short string describing what happened, for the startup log and
+        for tests to assert on.
+        """
+        try:
+            from alembic import command
+            from alembic.config import Config
+            from sqlalchemy import inspect
+            import pathlib
+
+            root = pathlib.Path(__file__).resolve().parent.parent
+            cfg = Config(str(root / "alembic.ini"))
+
+            def _has_table(conn, name: str) -> bool:
+                return inspect(conn).has_table(name)
+
+            async with self.engine.begin() as conn:
+                already_has_schema = await conn.run_sync(_has_table, "users")
+                has_version = await conn.run_sync(_has_table, "alembic_version")
+
+            def _run(sync_conn_url: str) -> str:
+                # env.py resolves the URL itself (one source of truth), so the
+                # target has to be handed over the way env.py reads it — setting
+                # `sqlalchemy.url` in the Config is ignored and would silently
+                # point migrations at whatever the environment says instead.
+                #
+                # This is a process-global mutation, so it is always undone: a
+                # leaked ALEMBIC_DATABASE_URL makes a LATER test migrate the
+                # wrong database, which shows up as an unrelated failure in
+                # another file. (It did exactly that the first time.)
+                previous = os.environ.get("ALEMBIC_DATABASE_URL")
+                os.environ["ALEMBIC_DATABASE_URL"] = sync_conn_url
+                try:
+                    if already_has_schema and not has_version:
+                        # Adopt a pre-migrations database; do not re-create it.
+                        command.stamp(cfg, "head")
+                        adopted = True
+                    else:
+                        command.upgrade(cfg, "head")
+                        adopted = False
+                finally:
+                    if previous is None:
+                        os.environ.pop("ALEMBIC_DATABASE_URL", None)
+                    else:
+                        os.environ["ALEMBIC_DATABASE_URL"] = previous
+                return "adopted" if adopted else "migrated"
+
+            def _sync(url: str) -> str:
+                for a, b in (("postgresql+asyncpg://", "postgresql+psycopg2://"),
+                             ("postgresql+psycopg://", "postgresql+psycopg2://"),
+                             ("sqlite+aiosqlite://", "sqlite://")):
+                    if url.startswith(a):
+                        return b + url[len(a):]
+                return url
+
+            result = await asyncio.to_thread(_run, _sync(self.database_url))
+            print(f"✅ Database schema ready ({result})")
+            return result
+        except Exception as e:
+            # Do not refuse to start because migrations could not run: a dev
+            # box without alembic, or a read-only database, should still boot.
+            async with self.engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            print(f"⚠️  Migrations unavailable ({e}); used create_all instead. "
+                  f"New COLUMNS will NOT be added to an existing database.")
+            return "create_all"
 
     async def close(self):
         """Close database connections"""
@@ -288,18 +373,58 @@ def generate_api_key() -> str:
     return f"sk-{uuid.uuid4().hex}"
 
 
+# bcrypt hashes at most 72 BYTES and raises ValueError beyond that -- it does
+# not truncate silently. The old code passed the password straight in, so any
+# password over 72 bytes crashed: /auth/register returned a generic 500, and
+# login raised ValueError ("Invalid salt"-adjacent) instead of rejecting the
+# attempt. 73 ASCII characters, or 19 emoji, was enough.
+#
+# The fix is to reject at the edge with a usable message, not to truncate.
+# Truncating would make "correct horse battery staple..." and its first 72
+# bytes the same password, which is a silent weakening in exchange for
+# turning a crash into a wrong answer.
+BCRYPT_MAX_BYTES = 72
+
+
+def password_bytes(password: str) -> bytes:
+    """Encode a password to UTF-8, rejecting anything bcrypt cannot hash.
+
+    Raises ValueError with a message a caller can show a user.
+    """
+    raw = (password or "").encode("utf-8")
+    if len(raw) > BCRYPT_MAX_BYTES:
+        raise ValueError(
+            f"Password is too long: {len(raw)} bytes, maximum is "
+            f"{BCRYPT_MAX_BYTES}. Shorten it by "
+            f"{len(raw) - BCRYPT_MAX_BYTES} bytes (an accented or emoji "
+            "character can be several bytes)."
+        )
+    return raw
+
+
 def hash_password(password: str) -> str:
-    """Hash a password"""
-    salt = _bcrypt.gensalt()
-    return _bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+    """Hash a password. Raises ValueError if it exceeds bcrypt's limit."""
+    return _bcrypt.hashpw(
+        password_bytes(password), _bcrypt.gensalt()
+    ).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash"""
-    return _bcrypt.checkpw(
-        plain_password.encode("utf-8"),
-        hashed_password.encode("utf-8"),
-    )
+    """Verify a password against its hash.
+
+    Returns False -- never raises -- for a password that cannot be valid: too
+    long for bcrypt, or a stored hash that is not a bcrypt hash at all (a
+    corrupt row, a migrated column). An authentication check that raises is a
+    500 on the login path; an authentication check that returns False is a
+    rejected login.
+    """
+    try:
+        return _bcrypt.checkpw(
+            password_bytes(plain_password),
+            hashed_password.encode("utf-8"),
+        )
+    except (ValueError, TypeError):
+        return False
 
 
 # ============ SINGLETON INSTANCE ============

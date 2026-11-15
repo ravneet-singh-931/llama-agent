@@ -35,8 +35,10 @@ tests/_tmp_memory_test.json
 # Runtime data (ChromaDB, embeddings, etc.)
 data/
 
-# Runtime DB tooling state (created by modules/database_improvements.py)
-migrations/
+# Runtime DB tooling state (was created by modules/database_improvements.py,
+# deleted in #10). NOTE: `migrations/` is NOT ignored any more — that name now
+# belongs to Alembic, whose revision files MUST be committed. Ignoring it would
+# mean every developer and every deploy generates its own history.
 backups/
 
 # IDE

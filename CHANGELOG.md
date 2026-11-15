@@ -7,6 +7,1014 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Scope (2026-11-15) — frontend tests are out of scope, not deferred
+
+The owner's decision: this repository is presented for its **backend and LLMOps**
+work, so frontend behaviour tests leave the roadmap. Six documents called them
+"deferred", which reads as work someone forgot to pick up. They now say what they
+are: **out of scope by decision**, with the 0-of-34 number left in place — the
+number is still true, and hiding it would be the same failure this audit spent
+three days documenting.
+
+`ROADMAP.md` also gains a **"Where this stands"** section: scoped work finished,
+six items open *on purpose* with the reason next to each, and one warning worth
+having in writing — the nightlies run against `main`, where **none of this
+branch's 42 commits exist yet**, so a green nightly describes the pre-audit code.
+
+Also corrected: `AGENT_FINDINGS.md` said "5 fixed, 4 open" without saying the four
+are reasoned rather than pending. Latency (#6) is real engineering; #7 and #8 are
+prompt rules whose checks are already right; #9 is latent.
+
+### Security (2026-11-15) — refresh-token rotation, and the bypass it exposed
+
+The last open item this audit had recorded as a **product decision**. The owner
+asked for it, so it is implemented — a refresh token is now single-use.
+
+**Design: a generation counter, not a denylist.** A JWT cannot be revoked, so
+"still valid?" must come from server-side state. A denylist grows with every
+refresh forever; a per-user generation is one integer. Each refresh token carries
+`gen`; the store holds the user's current generation; rotation increments it, so
+every token below it is dead. One read per check, no write on the login path, and
+the state is bounded by the number of users. Redis-backed when configured (pod A's
+rotation retires the token on pod B), in-process otherwise — with the limit stated
+in the docstring: a restart forgets generations, so pre-restart tokens become
+valid again until their own `exp`.
+
+Legacy tokens carry no `gen` and are generation 0, so the first rotation retires
+them and **nobody is signed out by deploying this**.
+
+**Finding: rotating at `/auth/refresh` alone would have been theatre.** The
+identity middleware (`api.py` 775) also mints access tokens from the refresh
+cookie. Measured before the fix: a request carrying only a refresh cookie got
+`200` from `/auth/me` **and a fresh access cookie**. A rotation check placed only
+in the route would have left that second path alive — the same shape this audit
+kept finding, a control that is present but not connected. One shared predicate
+(`JWTManager.is_stale_refresh`) now guards both. Sabotage R3 restores the bypass
+and a test catches it.
+
+**Still open, and now the only part of the finding left: logout does not revoke.**
+Rotation retires a token when it is *used*; logout would retire one that has not
+been used, which signs out every other tab. One `token_generations.bump(...)` in
+the logout handler — a behavioural decision, documented rather than taken.
+
+**The `xfail(strict=True)` did exactly its job.** It failed the suite with XPASS
+the moment rotation landed, which is how this changelog got written rather than
+the gap quietly rotting. `test_replaying_a_refresh_token_is_currently_accepted`
+was inverted to `..._is_refused`, and a third test asserts the replay is refused
+on **generation**, not on signature or expiry — a 401 from the wrong cause would
+look identical from outside.
+
+`modules/auth.py` **95%**. Suite **1267 passed, 6 skipped, 0 xfailed**. 3/3
+sabotages caught. `MY_ERRORS.md` #25: my "two users rotate independently" test
+logged in twice with one `TestClient`, so it tested one user twice.
+
+### Fixed (2026-11-15) — seven numbers that had gone stale, and a CI gate that was 11 points low
+
+The findings documents were edited across five parts. Every number in them was
+then re-checked against a fresh measurement, and seven that a reader would take
+as **current state** were wrong. Historical counts inside part narratives were
+left alone: they were correct when measured, and rewriting history would be a
+different lie.
+
+**Stale as current state (all corrected):**
+
+| where | claimed | measured |
+|---|---|---|
+| `README.md` at-a-glance | 842 passed, 78.6% coverage | **1251 passed, 89%** |
+| `README.md` body | "1020 tests" | **1251** |
+| `README.md` quick start | "842 passed, 6 skipped, 17 deselected" | **1251 passed, 6 skipped, 1 xfailed** |
+| `AUDIT_OVERVIEW.md` status | 1070 passed, api.py 64.4%, 85%, 51 test files | **1251, 74%, 89%, 67** |
+| `README.md` (×3) | "14 services" | **13** — the table below the heading lists 13 rows |
+| `ROADMAP.md` row 7 | "31 manifests, 14 services" | **30 YAML files / 87 objects, 13 services** |
+| `KUBERNETES_CHECKS.md` | "All 31 manifests were parsed" | **30 files, 87 objects** ("31" matched neither) |
+
+**A comment that cited a README it did not have.** `.github/workflows/main.yml`
+said the narrower `--cov=modules --cov=api` scope "reads 70%; both are in the
+README" — the README documented neither. The workflow comment and the README row
+now both state **89% (wide) and 81% (narrow)**, with the warning that they measure
+different sets of files.
+
+**One percentage corrected on re-measurement.** `AUDIT_OVERVIEW.md` said the
+remaining `api.py` gap is "not mostly error branches (only 18% is)". Re-measured
+by parsing `api.py` with `ast` and counting missing lines inside `ExceptHandler`
+nodes: **64 of 328 (19%)**. The original 18% (106 of 588) was right when it was
+written; both are now stated with their denominators.
+
+**The CI coverage gate was 11 points behind reality: raised 74 -> 85.**
+The workflow's own rule is "the floor is set 4 points below the measured value";
+measured was 89%, the floor was 74% — set when the repo was at 78.6%. Verified
+the new gate both ways: `--cov-fail-under=85` passes (89% actual), and
+`--cov-fail-under=95` **fails** with exit 1, so the ratchet is not decoration.
+`README.md`, `AUDIT_OVERVIEW.md` and `CI_FINDINGS.md` were updated to say 85.
+
+Coverage moved 88% -> 89% across this audit and never down.
+
+### Security (2026-11-15) — the WebSocket manager and the MCP feature flag
+
+**A corrupt feature-flags file is silently overwritten with the defaults.** The
+fallback itself is right and well documented (a bad config must cost flags, not
+availability) — but `_apply_defaults()` ends with `_save_flags()`, so the
+half-written file that caused the failure is replaced. Because the built-in
+defaults ship `enable_mcp_agents: false` while `config/feature_flags.json` ships
+`true`, **a corrupt file switches MCP off for everyone** — `/mcp/status` and
+`/mcp/tools` return `404 "MCP agents disabled (feature flag)"` — and because the
+defaults are now persisted, a restart does not recover. The evidence of what went
+wrong is gone too. Recorded, not fixed: never writing on the failure path is a
+one-line change somebody should make deliberately.
+
+**A user override cannot rescue a user excluded by rollout.** `is_enabled`
+applies the rollout gate *before* the per-user overrides, so
+`rollout_percent: 0` with `user_overrides: {"vip": true}` returns `False` for
+`vip`. The override — whose entire purpose is "give this one customer the feature
+early" — does nothing during a rollout, which is the only time anyone would use
+it. Invisible with the shipped config (100%).
+
+Also pinned: `rollout_percent: 0` means "on for anonymous callers" (the check is
+skipped when no `user_id` is passed).
+
+**A malformed WebSocket frame closes the whole connection.** `from_json` runs
+inside the `try`, so one non-JSON frame produces an "Internal error" and a
+disconnect — measured: the heartbeat sent afterwards is never answered. A chat
+socket should reject the frame, not the session. Same for an unknown `type`.
+Latent: the frontend never opens a socket (`getWsUrl` at `api.ts:423` has no
+caller), so the server is live but unreached.
+
+Two latent bookkeeping leaks pinned: `connection_users` never shrinks while any
+connection remains (the comment claims the opposite), and `get_online_users()`
+reports a stale `connection_count`. Neither is used; `/ws/status` reads
+`connection_count`/`user_count`, which are computed and correct — verified.
+
+`websocket.py` 62% -> **96%** (24 tests). `cicd_improvements.py` stays at 56%:
+`ABTestManager` and `DeploymentManager` are instantiated nowhere in the
+repository, so covering them would prove nothing. `mcp_agents_server.py` stays at
+52% — it is a separate container and needs a live server and model; its client
+side is at 96%.
+
+**11/11 sabotages caught, each verified to change behaviour first** — the lesson
+from part D's five no-op sabotages. `MY_ERRORS.md` #23–24: I invented an enum
+member that does not exist, and built a "dead socket" that died during `connect`
+instead of during the broadcast.
+
+Full suite **1251 passed, 6 skipped, 1 xfailed**; TOTAL **89%**.
+
+### Changed (2026-11-15) — retrieval and the MCP client: a reachability map
+
+Three modules, and the most useful output is not coverage — it is knowing which
+code the application can actually reach.
+
+| | reachable from `api.py`? |
+|---|---|
+| `rag.py::SimpleRAG` | **yes** — built at startup, used by every document route |
+| `advanced_rag.py::ReRanker` | **yes** — via `rag_optimizations.py` 557 |
+| `advanced_rag.py::AdvancedRAG`, `SubQuestionEngine` | **no** — constructed nowhere |
+| `rag_optimizations.py::QueryDecomposer` | **no** — only used by `OptimizedRAG.query()`, which has no caller |
+
+**Finding: the query decomposer produces garbled sub-questions.** Measured:
+`"Compare the pricing and refund policy"` -> `"What is the the pricing?"` (double
+article) and `"Is it better to call the API and then wait?"` -> `"What is the
+then wait?"`. Three defects in ~15 lines: the trigger (`better`, `vs`, `best`…)
+is unrelated to the split (on `" and "`); the `f"What is the {x}?"` template
+double-counts an article; and `.rstrip("?")` is applied to a fragment rather than
+a sentence. It costs one model call per sub-question and `_combine_answers`
+renders them into the reply, so a user would read `**2. What is the then wait?**`.
+**Latent, not fixed** — `OptimizedRAG.query()` has no caller. Four tests pin the
+current output so wiring it up is a deliberate act.
+
+**Finding: `add_text` appends, `add_document` replaces.** Only `add_document` is
+used by the app, so this is not a defect today; pinned because routing uploads
+through `add_text` would silently double every re-upload.
+
+**Finding: `delete_document(owner=None)` removes every owner's copy** — measured
+and *deliberate* (`doc_scope.py`: "admin / maintenance use only"), and
+unreachable because `scoped()` always binds an owner. Pinned.
+
+**The MCP client had never been executed.** `test_mcp_tool_call.py` (16 tests)
+tests the route and patches `api.call_mcp_tool` wholesale, so 18 of the 28
+statements in `mcp_client.py` — the entire body of both functions — had never
+run. Now 36% -> **96%** (`test_mcp_client_protocol.py`, 12 tests), including every
+`getattr` default that turns an optional MCP field into a working response
+instead of a 500.
+
+`advanced_rag.py` stays at **31%**: its 200 uncovered statements are exactly the
+four classes nothing constructs. Raising it further would be effort spent proving
+that nothing calls nothing.
+
+**10/10 sabotages caught — but five of my first attempts were no-ops**, which is
+the more useful result (`MY_ERRORS.md` #21): two spaces added to a `getattr`, a
+mutated comment, a condition patched at the wrong line, and an owner-key change
+that preserved the behaviour. A "10/10" is only worth reporting if each mutation
+was checked for actually changing behaviour.
+
+Full suite **1212 passed, 6 skipped, 1 xfailed**; TOTAL **88%**.
+
+### Security (2026-11-15) — the Postgres layer: no query had ever been executed
+
+`tests/test_pg_store.py` is 242 lines and 22 tests, and **every one of them ends
+with the database down**: the pool raises, the function returns `None`, and the
+test passes. That is why chat survives an outage — but it meant not one SQL
+statement in `modules/pg_store.py` had ever run under test. A broken owner check
+would still return `None` for an unreachable database and every test would stay
+green. Coverage 66% → **92%** (`tests/test_pg_store_sql.py`, 13 tests driving the
+real functions against a recording pool).
+
+**Finding: a user can write into another user's conversation.** `add_message`
+runs `ON CONFLICT (id) DO UPDATE SET updated_at = NOW()` with **no owner
+predicate**. Supplying another user's conversation id makes the conflict fire on
+their row, and the following INSERT writes your content into their conversation.
+Their conversation id is not secret — the default is
+`uuid5(DNS, f"llama-agent-default:{user_id}")`, computable from a user id that
+appears in their JWT and in frontend URLs.
+
+Checked before calling it a defect: **reading** another user's history is
+correctly blocked (`WHERE c.user_id = $2`), so this is a **write-only integrity
+defect** — content injection into a conversation you cannot read, plus bumping
+its `updated_at` so it jumps to the top of the owner's sidebar. Recorded, not
+fixed: the fix is an owner predicate on the conflict clause and belongs with the
+product decision.
+
+Also recorded: the auto-title is a separate non-atomic statement, and the message
+ordering's tie-break is a random UUID (redundant — removing it changes nothing).
+
+**5 of 6 sabotages caught.** The one that first survived is `MY_ERRORS.md` #20:
+I asserted the *conversation* argument of a four-argument INSERT while the
+sabotage broke the *message id* — a test that pinned one quarter of the contract
+and looked like it pinned all of it.
+
+Full suite **1179 passed, 6 skipped, 1 xfailed**; TOTAL **88%**.
+
+### Security (2026-11-15) — the module that decides, not just the routes
+
+`api.py` reached 74% and was called done, which left `modules/security_hardening.py`
+at **67%** — a worse place to stop, because what remained there was defences
+rather than print statements. It is now **88%** (`tests/test_security_hardening.py`,
+29 tests).
+
+- **`CSRFProtection` is dead code.** Not imported by `api.py`, not called
+  anywhere, not tested. The app is still protected — by `samesite="lax"` on every
+  auth cookie (`api.py` 823, 967–984), which is the right defence for a
+  same-origin frontend and is explained in a comment there. Documented, not
+  changed; a guard test fails if someone later wires the class in, so it cannot
+  become "covered" without being exercised.
+- **Upload filenames have no length bound — measured.** A 300-character name
+  uploads successfully (200, file written); 5000 characters fail at 400, but from
+  Starlette's multipart parser, not from our validation. Most filesystems cap a
+  name at 255 **bytes**, so a multibyte name can overflow and surface as a 500
+  mid-upload. Recorded with the measurement; the test asserts current behaviour
+  and says to invert it when a limit is added.
+- **The traversal defence is over-determined.** Sabotage proved six of
+  `sanitize_filename`'s seven defensive lines can be removed without breaking
+  anything, and one is load-bearing: `lstrip(".")`, without which `.htaccess`
+  survives. Both facts are now tested.
+- Redis degradation is asserted rather than assumed: a lockout from one replica is
+  seen by another; a failed Redis read/write falls back to the local mirror and
+  never raises into a login request; `REDIS_URL` set with nothing listening still
+  locks out.
+
+**8 of 9 sabotages caught; the ninth survived correctly** (a redundant line).
+Full suite **1166 passed, 6 skipped, 1 xfailed**; TOTAL coverage **88%**.
+
+Three of my own errors recorded in `MY_ERRORS.md` #17–19: asserting a PII policy
+the code deliberately does not have, stubbing away the code under test, and
+building a sabotage that could not happen and briefly reporting it as a defect.
+
+### Added (2026-11-15) — the documents that explain the project, not just its bugs
+
+The findings docs described **what was broken**. Nothing described **what the
+code is**, so a newcomer had no way in. Four documents now do:
+
+- **`GLOSSARY.md`** — every term the code and docs use, defined, each naming
+  where it lives: RAG, chunk, embedding, grounding, citation, orchestrator, tool
+  round, MCP, ticket, brute-force store, shared state, lifespan, `journey`,
+  `xfail`. Several were used throughout without ever being defined.
+- **`FILE_MAP.md`** — all 39 modules, all 6 frontend routes, 62 test modules,
+  each in a line taken from the module's own docstring.
+- **`REQUEST_FLOW.md`** — one `POST /chat`, step by step through real line
+  numbers: who is asking, input screening, retrieval, the three routing paths,
+  post-checks.
+- **`RUNNING_TESTS.md`** — the CI command with the reason for every flag, plus
+  the traps that actually cost time here (global brute-force store, the Phoenix
+  tracer, a blocking read that hangs instead of failing).
+
+**Three inaccurate claims found and fixed while writing them:**
+
+1. `README.md` said `tests/` holds **23 modules**; it holds **62**.
+2. The README tree listed **10 of 39** modules, silently omitting `rag.py`,
+   `pg_store.py`, `redis_store.py`, `pii.py`, `grounding.py` and 24 others. It now
+   points at `FILE_MAP.md`.
+3. `docs/README.md` said "my own **thirteen** mistakes"; there are 16.
+
+**One real behaviour documented, not changed:** `/chat/stream` reports a mid-stream
+failure as an ordinary `data:` line carrying an apology, **not** as
+`event: error` (`api.py` 2136, 2197, 2221). A client waiting for an error event
+type would wait forever. Verified by reading all three handlers.
+
+All four documents were checked against the code rather than written from
+memory: file counts, 12 line-number citations, 44 module references and every
+relative link were verified.
+
+### Added (2026-11-14) — the WebSocket ticket's Redis branch and token fallback
+
+- `tests/test_ws_ticket.py` (9 tests) proved that a socket takes its identity from
+  the ticket and never from the URL path. It could not reach the two branches a
+  deployment actually uses: **the Redis ticket store** (which is what lets a
+  ticket issued by one replica be redeemed by another) and **the `?token=`
+  fallback**. Both are now covered; the ticket block in `api.py` is at **0
+  missing lines** (was 10).
+- Verified rather than assumed: with Redis configured the ticket is written to
+  Redis and *not* kept in memory; a ticket redeems **exactly once** (three
+  attempts: record, `None`, `None` — `pop_json` is `GETDEL`, so the replay
+  protection is real); an invalid token closes the socket with `1008`; and
+  connecting to `/ws/somebody-elses-id` with your own token still gives *your*
+  identity.
+- **A test of mine hung instead of failing**, and fixing it took three attempts:
+  `ws.receive_text()` blocks forever when the server never closes, and
+  `asyncio.wait_for` does not interrupt it because starlette's receive is not a
+  cancellable await. It is now a worker thread with a 5s ceiling plus a
+  main-thread close in `finally`, so the sabotage fails in ~2s. Recorded in
+  `MY_ERRORS.md` #16, including the caveat that teardown still stalls in the
+  sabotaged state.
+- 4 of 4 sabotages caught. `api.py` coverage 73% → **74%**; full suite
+  **1137 passed, 6 skipped, 1 xfailed**.
+
+### Added (2026-11-14) — the auth routes, and a refresh token that never dies
+
+- **`/auth/refresh` had never executed in any test.** `tests/test_auth.py` covers
+  `modules/auth.py` thoroughly (53 tests) but never calls the routes. The whole
+  auth block in `api.py` was 26 uncovered lines; it is now **0**.
+  `tests/test_auth_routes.py` (14 tests + 1 `xfail`) covers register/login failure
+  branches and audits, the brute-force counter and lockout, every refresh path,
+  logout, and the internal-failure mapping (503 for an outage, 500 for a bug).
+- **FINDING (pinned, not changed): the refresh token is never rotated and cannot
+  be revoked.** Measured: the same refresh token refreshes successfully three
+  times in a row, and a token copied before `POST /auth/logout` still refreshes
+  after it. Nothing records issued tokens, so there is no revocation list. A
+  leaked refresh token is usable for its full 7 days, and killing it means
+  rotating the JWT secret, which signs everyone out. Recorded three ways:
+  `xfail(strict=True)` for what we want (it fails the suite the day rotation is
+  added), an assertion of the current behaviour, and a test naming the logout
+  limitation. Changing it is a product decision - rotation signs out every second
+  client sharing a token and needs a store the app does not have.
+- **FINDING (pinned): two refreshes in the same second return a byte-identical
+  access token.** JWT `iat`/`exp` are second-granularity. Harmless, but it makes
+  "the token changed" a flaky assertion, so it is recorded rather than
+  rediscovered by a future failing test.
+- Sabotage caught a weak test of mine: asserting the session still worked after a
+  refresh passed even with `_set_auth_cookies(...)` replaced by `pass`, because
+  the *old* access token was still in the cookie jar. The test now asserts on the
+  response's `set-cookie` header. (`MY_ERRORS.md` #15.)
+- 8 of 8 sabotages caught. `api.py` coverage 71% → **73%**; full suite
+  **1131 passed, 6 skipped, 1 xfailed**.
+
+### Fixed (2026-11-14) — the Agent Team dashboard reported zero tasks, and there was no fallback at all
+
+- **`/agents/stats` showed `tasks_handled: 0`** after three successful
+  `coder_agent` calls, and the in-memory counter capped at `1`. Root cause was
+  not the counter arithmetic: `_load_shared_dict` gated Redis *and* the local
+  copy on one call, returning the caller's **newly built empty dict** whenever
+  Redis had no value. Every caller passed a fresh one, so with Redis down there
+  was no fallback at all — while the comment at `api.py:102` claimed the
+  in-process copy was used and "behaviour is unchanged when Redis is down".
+  The comment described an intention the code never implemented.
+- **Fix:** one helper, `_shared_state(name, key)`, returns Redis' dict when it
+  answers and otherwise this process's own copy on `app.state`. Both the writer
+  (`_record_agent_usage`) and the reader (`/agents/stats`) go through it.
+  Measured: the counter now accumulates 1 → 2 → 3, the dashboard reports 3, and
+  with Redis present the store holds the total and the local copy is untouched.
+- On a **cold Redis** the first call seeds the store from the local copy, so a
+  replica that has just started joins the running total instead of restarting at
+  zero. Pinned by a test, with a note that my first version of it asserted the
+  wrong number and had to be corrected.
+- 6 of 6 sabotages caught, including one for the `if key not in AGENT_KEYS`
+  guard, which had never executed in any test.
+- 3 new tests; `api.py` coverage 70% → **71%**; full suite **1116 passed, 6 skipped**.
+
+### Added (2026-11-14) — the MCP tool-call path, and a dashboard that reports zero
+
+- **`/mcp/tools` had two tests and both asserted `401`.** The successful call,
+  the `504` timeout, the `502` mapping, the `HTTPException` passthrough and the
+  whole circuit breaker had never executed. `tests/test_mcp_tool_call.py` (13
+  tests) covers all of them against a fake MCP client: no network, no LLM.
+- **The route needed no changes.** It was correct and unproven. Measured and now
+  pinned: the breaker opens after 3 consecutive failures and then fails fast
+  without calling the client, a success resets the count, a timeout is a `504`
+  (not `502`), a deliberate `HTTPException` is not rewritten, and the feature
+  flag returns `404`.
+- **Ordering worth knowing:** authentication runs *before* the feature flag, so an
+  anonymous caller on a disabled `/mcp/tools` gets `401`, not `404`. Both cases
+  are pinned because the handler reads as if the flag came first.
+- **`_MCP_TOOL_TO_AGENT` is not an allowlist.** It only decides which dashboard
+  counter to bump; an unknown tool name is forwarded verbatim. Pinned as the
+  current contract rather than endorsed.
+- **Real defect found and recorded:** the Agent Team dashboard shows
+  `tasks_handled: 0` after real dispatches. `_record_agent_usage` writes
+  `app.state.agent_stats` *from* an empty shared dict instead of merging into it,
+  so the in-memory count caps at 1 and `/agents/stats` (which reads the shared
+  dict) reports 0. Pinned by a test asserting the current wrong behaviour, so
+  fixing it fails loudly. Not fixed here — it changes a number a user reads and
+  wants its own sabotage pass.
+- Also settled the second coverage artifact of this audit: `api.py:2846` is
+  reported unexecuted but demonstrably runs (proven by substitution).
+- 13 new tests; 8 of 8 sabotages caught. `api.py` coverage 67% → **70%**; full
+  suite **1114 passed, 6 skipped**.
+
+### Fixed (2026-11-14) — `/chat` and `/chat/stream` disagreed, and "hello" was eating real questions
+
+- **Four divergences between the two chat routes**, each measured before it was
+  fixed. The chat box calls `/chat/stream`; `/chat` is the other implementation of
+  the same interface. `remember` accepted three forms on one route and only `=`
+  on the other, so the route users were on **refused two of the three forms its
+  own usage text advertises**. `recall my name` resolved to `user's name` on
+  `/chat` only. A failed `recall` was prefixed with a checkmark
+  (`"✅ nothing-here: I don't remember..."`) because `FactMemory.recall()` returns
+  a *truthy message string* on a miss, not `None`. And `/chat/stream` had no
+  greeting branch at all. Each behaviour now has one shared helper
+  (`_parse_remember`, `_parse_recall_key`, `_recall_reply`, `_is_greeting`) and
+  `tests/test_chat_route_parity.py` posts the same message to both routes.
+- **The greeting check was a raw substring test**, so any message containing the
+  letters `hi`, `yo` or `sup` was answered with "Hello! How can I help you
+  today?" instead of being answered: `can you help me write a function`,
+  `do you know python`, `explain this code to me` and `summarise this week` all
+  hit it, and the model was never called. Matching is now whole-word and
+  whole-message, so `hi there` still greets and `hi, write me a function` does not.
+- **The streaming greeting yields to an explicit agent choice.** The first version
+  of the branch ran before the UI override, so picking "Coder Agent" and typing
+  `hello` returned the canned greeting and the agent never executed. Caught by an
+  existing `test_multitenancy` test.
+- **`tests/conftest.py` faked `run_agent_stream` with `async def`**, but the real
+  function is a sync generator consumed on a worker thread. Iterating an async
+  generator there is a `TypeError`, so every journey test that reached the general
+  streaming path failed — and that path was therefore untested by the fixture.
+- 31 new tests; 8 of 8 sabotages caught by a named test. `api.py` coverage
+  64.4% → **67%**; full suite **1101 passed, 6 skipped**.
+
+### Added (2026-11-14) — the agent and @team streaming bodies, and the startup re-index
+
+- `test_chat_slo_metrics.py` posted to `/chat/stream` with `agent=` and `@team`, but
+  only asserted that the **counters** moved. The whole streaming body ran
+  unexecuted. 16 tests now cover it (`tests/test_agent_stream_branch.py`,
+  `tests/test_team_stream_branch.py`): tool events routed to the reasoning view
+  instead of into the answer, the `### Name` team headers, which text is actually
+  persisted, that only agents which ran are recorded as used, the `@team` prefix
+  stripped from the task, the empty-answer guard on both routes, the failure paths,
+  and the critic note being reasoning rather than reply text.
+- The startup **uploads re-index loop** had never executed. 6 tests
+  (`tests/test_uploads_reindex.py`): files re-added when missing, already-indexed
+  files skipped (otherwise every restart re-embeds the whole library at cost), an
+  unowned legacy file reported and never indexed, one unreadable file not aborting
+  the walk, a missing directory tolerated, and a subdirectory not passed to
+  `add_document()`.
+- `api.py` **61.9% → 64.4%** (46% when the audit started).
+- **Dead code measured, not assumed:** the agent branch's second
+  `_redactor.flush()` looks like an `UnboundLocalError` (`streamed` is a team-branch
+  local) but is unreachable — `flush()` empties the buffer, verified by flushing
+  twice. Recorded by a test rather than deleted.
+- **Two of my own test errors, caught by the sabotage step:** `@coder x` is not the
+  routing syntax (`@Coder Agent x` is), and patching `api.SimpleRAG` patches a name
+  that does not exist because the lifespan imports it *inside* the function — the
+  patch must target `modules.rag.SimpleRAG`. The first version of all six re-index
+  tests silently tested the real class.
+- Sabotage-verified: 13 separate sabotage runs, each caught by a named test.
+
+### Added (2026-11-14) — WebSocket tickets and startup degradation, both untested at the security boundary
+
+- **The WebSocket ticket had no tests.** A browser cannot send an `Authorization`
+  header on a handshake, so the credential travels in the query string — where it
+  lands in proxy logs and `Referer` headers. The mitigation is a short-lived,
+  single-use ticket. Neither property was tested: changing `pop` to `get` makes
+  the ticket replayable, and trusting the `/ws/{user_id}` path segment would let
+  **any user connect as any other** — both silently, with every existing test
+  green. 9 tests in `tests/test_ws_ticket.py`; the identity test asserts **which
+  user id was bound**, not merely that a connection opened.
+- **Startup degradation had no tests.** The design promise is that a dead database
+  produces memory-only mode, not a boot loop. Verified for `init_db()` raising,
+  `get_db_manager()` raising, and a broken `OptimizedRAG` falling back to
+  `SimpleRAG` — including that startup does **not** print
+  `✅ Database initialized` after a failed init, since an operator trusts that line.
+- `api.py` **58.7% → 61.9%** (46% when the audit started).
+- **A test-isolation bug found this way:** `test_a_fresh_boot_serves_the_endpoints
+  _the_frontend_calls` passed alone and failed in the full suite with **429**. The
+  rate limiter is a process-wide singleton keyed on client IP and every request
+  shares the TestClient's address; it now resets the counters, as
+  `test_conversation_isolation.py` already had to. A test that passes alone and
+  fails together is not flaky — it is sharing state it did not declare.
+- Sabotage-verified: path-wins-over-ticket → 1 fail, replayable ticket → 1,
+  expiry ignored → 1, `/ws/ticket` unauthenticated → 1, uncaught `init_db` → all 5
+  startup tests, false success message → 1, no `SimpleRAG` fallback → 1.
+
+### Fixed (2026-11-14) — the general chat route had no empty-answer guard, and /chat/stream had no tests
+
+- `/chat/stream` had **133 unexecuted lines** — the largest untested block in the
+  codebase, on the path every user touches. 14 new tests in
+  `tests/test_chat_stream_branches.py` drive the real app with only
+  `run_agent_stream` faked. `api.py` **55.5% → 58.7%**.
+- **Fixed:** the team route and the agent route both guard against an empty model
+  answer; the **general** route — the one a plain "hello" takes — did not. A model
+  that streamed nothing produced a stream with no answer text and a `[DONE]`, which
+  the browser renders as an empty bubble with no explanation, and mirrored an empty
+  assistant message into the history. Same guard and message as the other two routes
+  so `chat_outcome()` classifies it identically. The test fails on the old code.
+- **Recorded, not fixed:** when `run_agent_stream` raises, the client gets the two
+  preamble frames and then nothing — no error event, no `[DONE]`. The agent route has
+  an `except` that emits a readable message; the general route has none. The test
+  asserts the current behaviour and **fails when the gap is fixed**, so the record
+  cannot go stale.
+- Sabotage-verified: removing `[DONE]` fails 2 tests, removing the new guard fails 1,
+  bypassing the budget refusal fails 1, disabling the duration cap fails 1, and
+  skipping the PII redactor fails 1.
+- One measurement mistake corrected: I reported lines 2144–2145 as never executing
+  because the coverage JSON said so, then found that replacing 2145 with a `raise`
+  **broke the test** — they do run. Coverage output is not evidence; a failing test
+  is. Recorded in `docs/COVERAGE_API.md`.
+
+### Docs (2026-11-14) — the audit had no entry point, and four of its thirteen parts had no document
+
+- **`docs/README.md`** — an index for all 15 findings documents. There were 13 documents
+  and nothing that said which to read, in what order, or why.
+- **`docs/AUDIT_OVERVIEW.md`** — the whole 13-part audit on one page, in order, with a
+  verdict per part and the numbers attached. The original working record
+  (`AUDIT.local.md`, 630 lines, 13 parts) was **deleted and never replaced in `docs/`**,
+  so the audit trail for parts 1–13 existed nowhere in the repository.
+- **`docs/CODE_QUALITY.md`** — parts 3, 4, 5 and 8 had no document at all: over-engineering,
+  wiring, silent exception handlers, and the two feature-flag systems.
+- **`docs/CI_FINDINGS.md`** — eight pipeline findings. The job that installed a different
+  dependency set than the image, the test that asserted nothing, the smoke test calling a
+  deleted method, and the deploy gate that was **deliberately** left skipped.
+- **`docs/MY_ERRORS.md`** — my own nine mistakes, kept on purpose. Calling a working Docker
+  job decorative; repeating "mostly error branches" when it was 18%; sabotaging the first
+  of five identical lines and reading the pass as a weak test.
+- `docs/ROADMAP.md` gained rows 9–15 and no longer claims every part is done.
+- Three claims in the new documents were **wrong on first write and corrected by checking
+  them**: a deleted test cited as if it existed, `api.py:457` (actual: `:476`), and
+  103 lines (actual: 104). Test names cited are now verified against the files, and
+  `docs/` has 0 broken links.
+- README: the test count said **839**; the measured number is **1020**.
+
+### Added (2026-11-14) — conversation CRUD was untested, and that is where a silent data leak would live
+
+- `create_conversation`, `get_conversation`, `delete_conversation`,
+  `list_conversations`, `get_memory`, `clear_memory`, `get_facts` and
+  `delete_fact` had **no tests at all**. 10 new tests in
+  `tests/test_conversation_isolation.py` boot the real app and check that one
+  user cannot read, delete or list another user's conversations, memory or facts
+  — and that an unknown id is a 404, not a 500.
+- **Corrected a claim I had been repeating:** the remaining `api.py` gap is
+  *not* "mostly error branches". Measured, only **18% (106/588)** of the missing
+  lines are inside `except` blocks; the other 482 were untested features. Both
+  numbers are in `docs/COVERAGE_API.md`.
+- `api.py` **51.1% → 55.5%**.
+- The `journey` fixture moved from `tests/test_e2e_journey.py` into
+  `tests/conftest.py`, so other files can boot the same real application instead
+  of hand-building a fake one.
+- Verified by sabotage, not by assertion: dropping the owner scope in
+  `get_conversation` fails 4 tests, removing the inner ownership check in
+  `memory.delete_conversation` fails 1, removing `except HTTPException: raise`
+  fails 2, and un-scoping `/facts` fails 1.
+- Two sabotages initially "passed" and both were instructive. `delete_conversation`
+  re-checks ownership internally, so there are **two** layers and the inner one
+  is the load-bearing one. And `replace(old, new, 1)` patched the **first** of
+  five identical `get_all_facts` lines — a different handler — so the code was
+  never changed. A sabotage that does not change the code proves nothing.
+
+### Added (2026-11-14) — database migrations, and a schema trap that would have bitten on a real deploy
+
+- **`create_all` was the only schema tool, and it cannot add a column.** It
+  creates missing *tables*; it never alters an existing one. Reproduced: add a
+  field to a model, run `create_all` against a database that already has the
+  table, and the field is silently not created. A release adding a column to
+  `users` would start cleanly, log `✅ Database initialized`, and then fail every
+  query reading that column — at request time, in production.
+- Alembic was **already a pinned dependency with no config and no import**:
+  installed on every build, used by nothing. It is now configured
+  (`alembic.ini`, `migrations/`) with a baseline generated from the real models.
+- The database URL has **one source of truth**: `alembic.ini` leaves
+  `sqlalchemy.url` empty and `migrations/env.py` calls
+  `modules.secrets.resolve_database_url()` — the same function the app uses.
+- `init_db()` now **adopts** a pre-existing `create_all` database (stamping it at
+  the baseline) instead of re-creating it, applies migrations, and falls back to
+  `create_all` with a loud warning if Alembic is unavailable. A test inserts a
+  row first and asserts it survives adoption.
+- Fixed while wiring it: Alembic's `fileConfig` **disabled every existing logger**
+  in the process, so booting the app and then initialising the database silently
+  killed all application logging. Now `disable_existing_loggers=False`, with a
+  test. Also fixed: `init_db()` leaked `ALEMBIC_DATABASE_URL` into the process.
+- 13 tests in `tests/test_migrations.py`. **Verified on SQLite only** — Postgres
+  is untested here, and that limit is stated in `docs/MIGRATIONS.md` rather than
+  glossed.
+
+### Added (2026-11-14) — the first end-to-end test: does signing up and asking work?
+
+- `tests/test_e2e_journey.py` (7 tests): register → log in → `/auth/me` →
+  upload a real file → list it → ask about it → chat → log out, against the real
+  FastAPI app with its real lifespan, middleware, cookies, auth and per-owner
+  document scoping. Only the LLM is faked, at its narrowest point.
+- **Nothing tested this before.** Every part was individually proven; the
+  assembly never was. `api.py` route coverage **46% → 51%**.
+- The test found four wrong assumptions while being written (register needs
+  `email`; `/auth/me` nests the user; three separate `get_db_manager` bindings;
+  and **`register` also sets cookies, so a register-then-login test was passing
+  on registration's cookies** — login could have been entirely broken). The
+  guard test now clears cookies between the steps and fails if login stops
+  setting them.
+- It also caused a **test-pollution bug that was fixed**: booting the lifespan
+  installs a global OTel TracerProvider, which silently broke
+  `test_provider_client`'s span assertion in the full suite while passing in
+  isolation. `phoenix.otel.register` is now stubbed in the fixture. Details in
+  `docs/E2E_JOURNEY.md`.
+
+### Changed (maintenance audit #15, step 2) — `api.py` split, document cluster
+
+- **658 lines left `api.py`**: 23 functions and 19 constants covering document
+  routing, retrieval, answers and citation checks moved to
+  `modules/doc_answers.py`. All 23 are AST-identical to the originals.
+  `api.py` 3,373 → **2,776 lines**; all 39 routes unchanged. Names are
+  re-exported from `api`, so `from api import answer_from_documents` and
+  `api.is_document_question` keep working for the 11 files that use them.
+- **Deleted write-only dead state.** `app.state.doc_followup` was assigned in
+  three places and read in none (all reads go through Redis). Removed with the
+  extraction; the comment claiming it was "kept in app.state for speed" was
+  untrue.
+- **Fixed a regression introduced by the move itself:** `_bump_doc_generation`
+  kept writing to a `_doc_generation` dict that had moved, leaving two copies.
+  Uploads would have bumped the dead copy, so a re-uploaded document could still
+  be answered from the 10-minute answer cache. Now one counter, one home, and a
+  guard test that fails if they are ever split again.
+- `BoundedLRUCache` moved to `modules/api_utils.py` (it was declared in `api.py`).
+
+### Changed (maintenance audit #15, step 3) — request identity
+
+- `_guest_uid`, `_request_uid` and the guest-cookie names
+  (`GUEST_COOKIE`, `_GUEST_ID_RE`, `_guest_id_ctx`) moved to
+  `modules/doc_identity.py`. `api.py` 2,776 → **2,772 lines**; 39 routes
+  unchanged; 929 tests pass (+17).
+- `_guest_id_ctx` is **imported, not copied**: `identity_middleware` writes it
+  in `api.py` and `_request_uid` reads it in the new module, so a second copy
+  would reset every anonymous visitor's identity on each request and silently
+  lose their documents and history. Guarded by an identity (`is`) test.
+- `_user_rag` did **not** move — it reads `app.state.rag`.
+
+### Fixed (deep pass, 2026-11-14) — a corrupt flags file could stop the app from starting
+
+- **`config/feature_flags.json` was read without a guard, at import time.**
+  `feature_flags` is constructed when `api.py` is imported, so any exception
+  while loading that file was an exception during `import api` — the service
+  simply did not start. Three ways to trigger it were reproduced against the
+  real entry point: truncated JSON (a partial write, disk full, or a pod killed
+  mid-save), `{"flag": true}` instead of an object, and a string
+  `"rollout_percent"`. The first needs no hand editing at all.
+- Loading is now guarded: a bad file logs the reason, applies the built-in
+  defaults, and records `load_error`. The loaded value is validated as an object
+  of objects. `is_enabled()` tolerates a malformed entry instead of raising
+  inside a request handler, and `_save_flags()` is best effort so a read-only
+  container filesystem cannot break `set_flag` or startup. A feature flag exists
+  to let you change behaviour **without** a deploy; it should never be able to
+  prevent one.
+- Known but unchanged: the import-time save still writes into the current
+  working directory rather than next to the source. That is a deployment
+  decision, not a bug fix; recorded in `docs/DARK_MODULES.md`.
+
+### Added (deep pass, 2026-11-14) — tests for two surfaces that had none
+
+- **`mcp_agents_server.py` was at 0% coverage** while `docker-compose.yml` and
+  `k8s/mcp-server.yaml` both run it as a separate service. 18 tests: the module
+  imports, all seven advertised tools are registered, DNS-rebinding protection is
+  on with no wildcard host, the timeout backstop returns a message instead of
+  wedging, and an internal error does not leak its text to the MCP client.
+- **The reranker's keyword fallback** — the path taken whenever the ONNX model
+  is missing — was untested (`advanced_rag.py` at 27% coverage, `_fallback_rerank`
+  unreached). 10 tests.
+
+### Changed (maintenance audit #15, step 4) — streaming helpers, and the untested PII boundary
+
+- `_redacted_stream`, `_reasoning_sse` and `_mirror_message` moved to
+  `modules/api_utils.py`. `api.py` 2,772 → **2,735 lines**; 39 routes unchanged;
+  **950 tests pass** (+21).
+- **These three had no tests at all** — 0 direct references, 0% coverage of the
+  moved block. `_redacted_stream` is the *output* half of the PII boundary: it
+  stops a model from echoing an SSN or card number from an uploaded document to
+  the browser. That path was completely unverified. It now has 21 tests,
+  including the case the function exists for — a card number split across two
+  streamed chunks must still be redacted whole.
+- Verified by sabotage: removing redaction fails 4 tests, dropping the final
+  flush fails 2, and replacing the holdback with per-chunk redaction (which
+  leaks a split number) fails 2.
+
+### Security (maintenance audit, 2026-11-13)
+
+- **A 7-day refresh token authenticated requests as a 30-minute access token.**
+  `get_current_user` checked `payload["type"] == "access"`; `authenticate_user`
+  did not. Both verify the same signature with the same secret, so the long-lived
+  credential — the one you must persist to stay logged in, and therefore the one
+  most likely to leak — was accepted wherever the short-lived one was required.
+  Measured before the fix: `authenticate_user(refresh_token)` returned the user.
+  After: **401**. Both paths now require `type == "access"`.
+
+- **Any password over 72 bytes returned a 500 instead of being refused.** bcrypt
+  raises beyond 72 bytes rather than truncating, and `RegisterRequest` allows
+  `max_length=128`, so a 73-character password passed validation and then raised
+  inside `hash()`. Multibyte text hits it sooner: 19 emoji is 76 bytes. Rejected
+  now at the edge with a 400 naming the overflow — **not** truncated, because
+  truncating would silently make a long password and its 72-byte prefix the same
+  password.
+
+- **A corrupt stored hash crashed login.** `bcrypt.checkpw` raises
+  `ValueError("Invalid salt")` for a non-bcrypt value (corrupt row, half-migrated
+  column); login returned 500 instead of refusing. `verify_password` now returns
+  `False` for an unusable hash or an over-long password — an auth check that
+  raises is a 500, one that returns `False` is a rejected login.
+
+- **The password length requirement could be skipped.** `check_strength` required
+  `score >= 4` of five checks, so any single check could be the failing one —
+  including length. `"aA1!"` (4 characters) passed. Unreachable through HTTP
+  because `min_length=8` also applies, but it left a weaker second gate for any
+  caller using `UserManager` directly. Length is now a hard requirement.
+
+  Three of these lived in **four copies** of the bcrypt calls (`PasswordManager`,
+  `User.verify_password`, and two module-level helpers). They are now one
+  implementation in `modules/database.py`.
+
+  **`modules/auth.py` coverage 53% → 93%** across 61 new tests (register, login,
+  refresh, profile lookup, API-key create/validate/expire, the four FastAPI
+  dependencies, and the HttpOnly-cookie path). Suite 847 → **908 passed**.
+
+### Fixed (maintenance audit, 2026-11-13)
+
+- **The log module was a second metrics system, and rewriting two files per
+  request.** `AgentLogger` kept a running `metrics.json` — `total_queries`,
+  `total_tool_calls`, `avg_response_time`, `popular_tools` — rewritten on every
+  request, after re-reading the whole `interactions.json` to append one line. Two
+  of those fields could never be true: `total_tool_calls` and `popular_tools`
+  were incremented by looping over `tools_used`, and every caller passes `[]`. The
+  rest were per-process copies of events Prometheus already counts (the same
+  defect as the `PerformanceMonitor` counters, one layer down).
+
+  The log files stay — Prometheus counts events, it cannot tell you what a user
+  said in the request that broke. `metrics.json`, `_load_metrics`,
+  `_save_metrics`, `get_metrics`, `get_popular_tools` and both per-request metrics
+  rewrites are deleted. The one number worth keeping is now **derived from the
+  error log itself** (`get_error_count()`), so the count and the list can never
+  disagree. `/metrics/json` returns process health plus that count;
+  `get_agent_health()` prints uptime and the error count.
+
+- **A firing alert printed three times and was delivered nowhere.** Three
+  "notification channels" (`slack_`/`email_`/`webhook_notification`) only printed,
+  and all three were registered on `alert_manager` at import. A missing channel is
+  visible; a printing channel looks like delivery in a config review, while stdout
+  is already where `check_alerts` prints. Deleted rather than implemented: real
+  delivery needs a webhook URL, retries, and somewhere for its own failures to go.
+  `add_notification_channel()` stays as the hook.
+
+- **The SLA monitor reported "met" for a service that had just errored.** The
+  error rate divided by successful requests only and returned `0` when there were
+  none — so a service whose *first* request failed read `0% errors, met: true`.
+  Measured before the fix: one error and no successes gave `current=0.0,
+  met=True`. The denominator is now attempts (responses **+** errors); the same
+  case reads **100%, not met**.
+
+  > A divide-by-zero guard that returns zero chooses "perfect" as its fallback.
+  > For a badness metric the neutral element is the worst value, not the best.
+
+  Suite 846 → **847 passed**. Bandit, flake8 and pip-audit (all CI-exact) clean.
+
+### Changed (maintenance audit, 2026-11-13)
+
+- **Two sets of books for the same request, and a health check whose verdict improved
+  the more it was polled.** `PerformanceMonitor` kept its own `request_count` /
+  `error_count` beside the Prometheus counters that `prometheus_middleware` already
+  increments for every request. They could never agree: the hand-written ones had 2
+  and 4 call sites (chat + MCP only), so every validation error, rate limit and
+  unhandled 500 elsewhere reached Prometheus and nothing else.
+
+  Worse, `/health` derived `status` from that ratio, and `/health` is the k8s
+  **liveness, readiness and startup probe** (`k8s/api.yaml`). Probe traffic therefore
+  dominated the denominator on a quiet system, so the error rate *fell* the more the
+  probe ran — **the health endpoint reported better the more often it was checked,
+  including while failing.** The counters were also per-process while the API runs 2–10
+  replicas, so each pod reported its fraction as if it were the total. The repo had
+  already settled this argument for per-user spend (`prometheus_metrics.py`: *"two
+  replicas reported two different totals and a restart erased both"*).
+
+  Request and error counting now has one owner: Prometheus, scraped from `/metrics`.
+  `PerformanceMonitor` keeps only `start_time` and reports `status`, `uptime_seconds`
+  and `uptime_human`. `total_requests`, `total_errors` and `error_rate` are gone from
+  `/health` and `/agents/stats`; the dashboard cards that displayed them now show
+  replica-shared data. Seven call sites removed; one test rewritten to assert the
+  fields are **absent**, not merely uncounted.
+
+  Considered and rejected: reading `REQUEST_COUNT._value.get()` into `/health` — a
+  Prometheus registry is per-process, so that replaces a per-pod number with a
+  differently per-pod number.
+
+- **Four of five in-app alert rules could never fire.** `AlertManager.rules` read
+  `error_rate` (the feed publishes `failure_rate`), `daily_cost` (spend lives in
+  Prometheus' `cost_summary()`), `uptime_percent` (the feed has `uptime_hours`) and
+  `memory_usage_percent` (nothing measured memory — `psutil` is not a dependency).
+  `.get(key, 0)` turned each absence into a benign default, so `check_alerts()` returned
+  `[]` and **a dead rule was indistinguishable from a healthy system.** The one rule
+  that worked was pinned by a test that hand-fed it the key production never sends.
+
+  `high_error_rate` now reads `failure_rate`; the cost and memory rules are deleted
+  rather than re-pointed (spend is already covered by `llama_agent_llm_cost_usd_total`;
+  re-pointing `high_cost` at `total_cost` would alert on cumulative lifetime spend
+  against a daily threshold). Both call sites now build their input through one
+  `_alert_metrics()` helper merging the business feed with the cost summary.
+
+  New test `test_every_alert_rule_reads_a_key_that_is_actually_published` reads the
+  published keys out of the real feed builder via `inspect.getsource`, so the drift
+  cannot recur silently.
+
+  Also deleted: `MetricsData` and `HealthStatus` in `frontend/src/types/index.ts`, which
+  described fields the API has never returned (`requests_last_hour` exists in no
+  backend file) and had zero importers.
+
+  Suite 844 → **846 passed**, coverage 81.94% → **82.01%**.
+
+- **CI's own inline Python was untested, and it broke.** Removing
+  `PerformanceMonitor.track_request()` turned the **Integration** job red while the full
+  local suite stayed green, because the method's only caller was an inline `python -c`
+  block inside `.github/workflows/main.yml` — code no pytest test executes. The first fix
+  was also wrong (escaped double quotes inside a double-quoted `python -c` are stripped
+  by the shell: `NameError: name 'status' is not defined`).
+
+  New `tests/test_deploy_routing.py::test_inline_ci_python_snippets_actually_run` extracts
+  that step from the YAML with PyYAML and runs it through `bash -e -c`, the way CI does.
+  Verified by reintroducing the quoting bug and watching it fail identically.
+
+  A third CI failure followed from the same root cause, this time in the guard itself:
+  `B607` because it called `bash` rather than `/bin/bash`. It was invisible locally
+  because the local bandit invocation excluded `./tests` while CI runs `bandit -r .`
+  with no exclusions. Verification now reproduces the CI commands exactly — same bandit
+  tree, same 11 `pip-audit` ignores, same `flake8 --select`.
+
+### Changed (maintenance audit, 2026-11-13)
+
+- **Every silent exception handler now names what it loses. 59 handlers across 19 files.**
+
+  The audit had recorded 32 `except Exception: pass` handlers. Scanning the AST found
+  **60** whose body is a single `pass` or `continue` (100 matched a looser "swallows the
+  exception" heuristic; the other 40 `return`, append to a failure list, or re-raise, and
+  are not silent). 41 of the 60 had no comment at all.
+
+  All 60 turned out to be deliberate fallbacks — telemetry must not fail a tool call, a
+  dead WebSocket must not stop a broadcast, a corrupt metrics file must fall through to
+  empty defaults. **The behaviour was right; the code did not say so.** `except: pass` is
+  textually identical to a handler written to make a red test go green, so no reviewer and
+  no `git blame` could tell the two apart.
+
+  New `modules/silent.py` provides `degrade(what, exc)`, which logs at DEBUG and — the
+  point — takes `what` as a **required argument**, so the explanation cannot be dropped by
+  a formatter or an edit. `STRICT = True` raises `DegradedError` so tests can assert a
+  fallback was taken. Control flow is unchanged everywhere.
+
+  59 converted; the one left is `evals/run.py`'s `queue.Empty` timeout, which is normal
+  control flow rather than a lost capability.
+
+  `tests/test_degrade.py` (10 tests) covers the helper's contract, fires two real degraded
+  paths through the real classes, and adds an **AST census test** that fails on any new
+  undocumented `except: pass` — so this cannot regress. Suite 834 → **844 passed**;
+  coverage 81.81% → **81.94%**.
+
+### Removed (maintenance audit, 2026-11-13)
+
+- **The Streamlit legacy UI, and everything that existed only for it. ~1,900 lines.**
+  `app.py` (1,202), `mcp_client_helper.py` (230 — the stdio MCP client, whose only
+  consumer was `app.py`), `k8s/web.yaml` (Deployment + Service on 8501), the compose `web:`
+  service, the `streamlit==1.66.1` requirement, `AppConfig.streamlit_port`, nginx's
+  `web_backend` upstream and `/streamlit/` location, the k8s ingress `/streamlit` path, the
+  networkpolicy rule for 8501, and the tests that covered the deleted client.
+
+  Next.js is the only UI. The two MCP clients were never duplicates — one is SSE over the
+  network (`modules/mcp_client.py`, used by `api.py`, kept) and the other is stdio spawning
+  a subprocess (`mcp_client_helper.py`, used only by `app.py`, deleted) — so removing the UI
+  settled that question too.
+
+  **Coverage 78.63% → 81.81%**: deleting untested code raises the ratio.
+
+  Three tests failed correctly on the deletion (`test_deploy_routing.py` pinned images for
+  the `web` workload, `test_rollout_strategy_fits_single_node[web-1-0]`,
+  `test_nonroot.py` read `web.yaml`) and were updated to the three remaining workloads. The
+  env-var test added earlier the same day caught `APP_CHAT_MAX`, `MCP_CALL_TIMEOUT` and
+  `POSTGRES_HOST` becoming unread — three `.env.example` entries that were live an hour
+  earlier.
+
+  Also deleted: `TestClientToolMapping`, which hardcoded the agent-name mapping and
+  asserted against its own copy — changing the real mapping would not have failed it.
+
+### Fixed (maintenance audit, 2026-11-13)
+
+- **31 unused local variables, 7 of them real dead assignments.** CI lints with
+  `--select=E9,F63,F7,F82`, so `F841` had never been checked. Twenty-four were
+  `except Exception as e:` bindings where `e` is never read (dropped). Seven were worth
+  reading rather than deleting:
+  - `modules/security.py` computed `cutoff_minute` in `_cleanup()` and `cutoff_hour` in
+    `_is_rate_limited_memory()`, and used neither. `_cleanup()` prunes to one hour, which
+    is why `_is_rate_limited_memory()` can count the hour window with a bare `len()` —
+    both facts are now comments, because the next reader would suspect an off-by-a-window
+    bug. Verified after the edit: 3/min blocks on the 4th request, 3/hr blocks on the 4th.
+  - `modules/rag_optimizations.py` assigned `answer` on both branches of the CRAG block
+    and never read it. Removing it exposed that the fallback to `results[0]` had been
+    deliberately removed earlier and explained in a comment; the assignment was a leftover.
+  - `websocket.py` bound `connection_id` from `connect()`, but `disconnect()` takes the
+    socket and user id, so the id was never used.
+  - `app.py` (twice) and `llama_agent1.py` constructed a memory/fact store in functions
+    that never touched it.
+
+- **111 environment variables the code reads, 37 documented — now 120 and 120.**
+  Extracted every `os.getenv` / `os.environ` read from the source rather than from a
+  hand-kept list: `.env.example` named 37 of the 111, so 74 live knobs —
+  `AGENT_PARALLEL`, `AGENT_REFLECT`, `AGENT_LATENCY_BUDGET`, `MCP_TIMEOUT`,
+  `STREAM_MAX_DURATION`, `RATE_LIMIT_RPM`, `LLM_PROVIDER_CHAIN` among them — changed
+  runtime behaviour and appeared in no file a user would look at. Every one is now in
+  `.env.example` with its call-site default, and grouped by subsystem.
+  Nine more are read through a variable-name indirection that a `getenv` grep cannot
+  see (`model_tiers.py` maps a provider to its env-var *names*; `multi_agent.py` builds
+  the name in a local variable), and `SSL_CN` is read by
+  `config/nginx/ensure-cert.sh` rather than Python — all documented.
+  `tests/test_env_documented.py` fails in **both** directions now: a variable added to
+  the code without a `.env.example` line, and a `.env.example` line nothing reads.
+
+- **`database_improvements` 678 lines → 103, and an import-time side effect with it.**
+  `MigrationManager`, `BackupManager`, `ConnectionPool`, `QueryOptimizer` and
+  `create_initial_migrations` had **zero** references in any non-test file; only
+  `DatabaseHealthCheck` is wired (`api.py:457`, from `/health`). Three of them had
+  module-level singletons that ran `os.makedirs()` in `__init__`, so merely importing the
+  module created `backups/` and `migrations/` in the working directory — on every process
+  start, in every container. Verified before and after in a fresh temp directory. A test
+  now imports the module with a temporary cwd and requires it to create nothing.
+  File coverage 29% → 74%, repo total 68% → 70%.
+
+- **CVE-2026-126360 in `opentelemetry-api` 1.45.1.** The Security Scan went red on a
+  dependency `requirements.txt` never named — `opentelemetry-api` arrived transitively
+  through `opentelemetry-instrumentation-fastapi`, which is how it drifted to a
+  vulnerable version without anyone choosing it. Not a one-line bump: `opentelemetry-sdk`
+  1.45.1 pins `opentelemetry-api==1.45.1` exactly, and the instrumentation package
+  0.66b1 pins `opentelemetry-semantic-conventions==0.66b1`, which sdk 1.45.2 requires at
+  0.66b2. All three move together — instrumentation-fastapi 0.66b2, api 1.45.2, sdk
+  1.45.2 — and `opentelemetry-api` is now pinned explicitly so the next advisory has a
+  line to bump. `pip-audit`: no known vulnerabilities, 14 ignored (unchanged).
+
+
+Five defects found by reading wiring rather than names — each one a control that
+looked functional and was not. Every fix carries a test that fails when the fix
+is reverted.
+
+- **CORS reflected any origin while sending credentials.** Development ran
+  `allow_origins=["*"]` with `allow_credentials=True`. Starlette does not emit a
+  literal `*` there — it reflects the caller, so
+  `Origin: https://evil.example` came back as
+  `access-control-allow-origin: https://evil.example` **with**
+  `access-control-allow-credentials: true`, which browsers accept. Any page a
+  developer visited could make authenticated cross-origin calls to their local
+  API. Both environments now list origins explicitly; the frontend never needed
+  the wildcard, since it reaches the API through a same-origin `/api` rewrite.
+  Found while making the test below stop being vacuous.
+
+- **`test_cors_headers_present` could not fail.** It built a list of middleware,
+  discarded it, printed `✅ CORS middleware configured`, and passed. Removing
+  `CORSMiddleware` from `api.py` left it green, and the README cited it as the
+  CORS proof. It now asserts the middleware is registered, that origins are
+  non-empty, that `*` is never combined with credentials, and that the expected
+  methods and headers are allowed — and it fails with `assert []` when the
+  middleware is removed.
+
+- **The `integration` CI job did not install what the image installs.** It
+  hand-listed five unpinned `pip install` lines while the `test` job used
+  `requirements.txt`, so it tested the newest `mcp<2` instead of the pinned
+  `mcp==1.30.0` — the job named "Test all modules import" could stay green while
+  the image broke. It also installed the standalone `fastmcp`, which nothing
+  imports and which `test_version_and_deps.py` asserts is not a dependency. One
+  line now: `pip install -r requirements.txt`.
+
+- **Seven of the eight shipped feature flags were read by nothing.**
+  `config/feature_flags.json` carried `enable_advanced_rag`,
+  `enable_phoenix_tracing`, `enable_caching`, `enable_rate_limiting`,
+  `enable_websockets`, `enable_file_upload` and `enable_beta_features`, each with
+  zero `is_enabled(...)` call sites anywhere. Setting them to `false` changed
+  nothing. Three of those names also exist in a second flag system
+  (`modules/config.py::FeatureFlags`, from `FEATURE_*` env vars), so there were
+  two knobs per concept and neither gated the behaviour. The seven are deleted;
+  `enable_mcp_agents` stays because it is genuinely read. A new test fails if a
+  flag is ever configured that no code asks about.
+
+- **Declared fact limits were enforced nowhere.** `validate_fact_key` and
+  `validate_fact_value` sat under `MAX_FACT_KEY_LENGTH = 100` /
+  `MAX_FACT_VALUE_LENGTH = 1000` and were called from no code at all.
+  `POST /remember` was capped by its Pydantic model, so the limit looked live —
+  but six other call sites build a fact from a free-text chat message
+  (`key, value = content.split("=", 1)`), where the message cap is **10,000**
+  characters. The limits are now enforced in `FactMemory.remember()`.
+
+- **`modules/services.py` deleted** — 84 lines, zero importers, zero references.
+  Its only caller was `tests/test_enterprise.py::test_services_singleton`, a test
+  whose entire purpose was to import it. `broadcast_message`, `get_online_count`
+  and `reload_config` were dead in the same way and are gone too.
+
+- **`upload_document` wrote to disk on the event loop.** A synchronous
+  `open(...).write(...)` inside `async def` stalls every other in-flight request.
+  The cap is 10 MB so the stall is short, but the very next line already
+  offloaded its work. Now `await asyncio.to_thread(...)`.
+
+Tests: **833 → 839 passing**, 6 skipped, 17 deselected.
+
 ### Changed
 
 - **The scheduled nightly records, and asks whether it can finish first.** The

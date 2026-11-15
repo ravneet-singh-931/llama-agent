@@ -20,22 +20,78 @@ proves the fix.
 
 ---
 
+## Where this stands, 2026-11-15 — read this before asking "is it done?"
+
+**Done means the work this audit scoped is finished.** It does not mean the system
+has no open questions, and this project's whole argument is that the difference
+should be written down rather than blurred. So, plainly:
+
+**Scoped work — finished.** Every row above except 15, which the owner has now put
+out of scope. Suite **1267 passed, 6 skipped, 0 xfailed** at **88.82%** against an
+85% gate; CI green on 7 jobs.
+
+**Open, and deliberately not fixed** — each one recorded with its reasoning in its
+own document:
+
+| # | Item | Why it stays open |
+|---|------|-------------------|
+| 1 | **Logout does not revoke the token** | Would sign out every other tab of the same user. One line to change; it is a behaviour decision, not a code gap. `SECURITY_FINDINGS.md`, Finding 16 |
+| 2 | **Citations are filenames, not evidence** (S4) | The honest fix is a per-claim entailment judge — and this project established it cannot validate a judge. Adding one to check grounding would repeat the central mistake. `SECURITY_FINDINGS.md` |
+| 3 | **`@team` latency 90–155 s** | Real work, but every agent step in the DAG is serial. Profiling first; a guessed fix would be noise. `AGENT_FINDINGS.md` #6 |
+| 4 | **JSON trailing commas; `fact-node-latest` date grounding** | Prompt rules, not code defects. The checks are correct to reject both. `AGENT_FINDINGS.md` #7–8 |
+| 5 | **`code-intervals` re-measurement** | The instrument was fixed; a past score is not re-scored by fixing the ruler. The next nightly re-measures it. It has *not* been claimed as fixed. `AGENT_FINDINGS.md` #5 |
+| 6 | **`llm_guard._tier_of` misclassification** | Latent: the only call site passes a Groq model, and both budgets default alike. `AGENT_FINDINGS.md` #9 |
+
+**The one thing to be careful about.** The nightly evals run against `main`, and
+**none of the 42 commits in this PR are on `main` yet** (verified 2026-11-15). So
+the nightly reports describe the *pre-audit* code. A green nightly is not evidence
+that this branch is healthy, and a nightly that finds nothing new is not evidence
+that the findings here are wrong.
+
+---
+
 ## Where the project stands
 
 | # | Part | Document | Findings | Status |
 |---|---|---|---|---|
 | 1 | **Eval harness** (2,717 lines) | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | **19** | ✅ **DONE** — plus record/replay, so a run is reproducible for 0 tokens |
-| 2 | **Agents** (5 specialists + team) | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | **5 fixed, 4 open** | ✅ **DONE** — the four open are real, listed in the document |
+| 2 | **Agents** (5 specialists + team) | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | **5 fixed, 4 known** | ✅ **DONE** — none of the four can bite a user today; see *Where this stands* below |
 | 3 | **Observability** (Prometheus/Grafana/Phoenix) | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | **4** | ✅ **DONE** — tracing overhead measured: ~5 µs/span |
 | 4 | **RAG** (`rag_optimizations` 1,703 lines — largest module) | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | ✅ **DONE** — retrieval table with three negative results, plus R6: the CI gate could not see the reranker |
 | 5 | **Security & multi-tenancy** (~1,900 lines, 5 modules) | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | **4** | ✅ **DONE** — S1 corrected the README in three places; S4 open and stated |
 | 6 | **Dark modules** (4,629 lines, 12 files) | [`DARK_MODULES.md`](DARK_MODULES.md) | **23 dead names** | ✅ **DONE** — premise was wrong: all 11 are imported by live code |
-| 7 | **k8s / Docker** (31 manifests, 14 services) | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | **8 checks** | ✅ **DONE** — re-audited 2026-11-13, which caught one wrong claim |
+| 7 | **k8s / Docker** (30 YAML files / 87 objects, 13 compose services) | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | **8 checks** | ✅ **DONE** — re-audited 2026-11-13, which caught one wrong claim |
 | 8 | **Publishing** (posts 1–4 written) | `docs/posts/` | 4 posts | ⏸ **UNPUBLISHED** — the user's decision, not work outstanding |
+| 9 | **The audit itself** (13 parts) | [`AUDIT_OVERVIEW.md`](AUDIT_OVERVIEW.md) | 13 parts | ✅ **DONE** — see below |
+| 10 | **Code quality** (env vars, silent handlers, dead files) | [`CODE_QUALITY.md`](CODE_QUALITY.md) | 8 | ✅ **DONE** |
+| 11 | **CI** (what it claimed vs what it ran) | [`CI_FINDINGS.md`](CI_FINDINGS.md) | 8 | ✅ **DONE** |
+| 12 | **Database migrations** | [`MIGRATIONS.md`](MIGRATIONS.md) | 3 | ✅ **DONE** — verified on SQLite only, stated in the doc |
+| 13 | **End-to-end test** | [`E2E_JOURNEY.md`](E2E_JOURNEY.md) | 4 | ✅ **DONE** |
+| 14 | **`api.py` coverage** | [`COVERAGE_API.md`](COVERAGE_API.md) | 13 | 🟡 **PARTIAL** — 74%; `/chat` parity, MCP tool calls, the dashboard-counter fallback, the auth routes and the WebSocket ticket store all done; refresh-token rotation **implemented** (generation counter, enforced on both token paths); logout revocation remains a product decision; the remaining `api.py` gap is error branches, measured line by line (64 of 328 missing lines). `security_hardening.py` 67% → 88% and `pg_store.py` 66% → 92%, `mcp_client.py` 36% → 96%, `websocket.py` 62% → 96%, `rag.py` 71% in the same pass |
+| 15 | **Frontend tests** | — | — | ⚪ **OUT OF SCOPE BY DECISION** — 0 tests across 34 `.tsx` files. The owner chose to demonstrate backend and LLMOps rather than UI; recorded, not hidden |
 
 Legend: ✅ done · 🟡 partial · ❌ not started · ⏸ waiting on a person
 
-Legend: ✅ done · 🟡 partial · ❌ not started
+### Rows 9–15, added after the original seven parts
+
+The seven original parts were finished when this file was written. Everything
+above row 9 happened **afterwards**, and the additions are recorded separately so
+the original claims are not quietly rewritten:
+
+- **Row 9, the audit.** Thirteen parts covering verification bugs, coverage,
+  over-engineering, wiring, correctness, dead code, feature flags, the route
+  split, and my own errors. `AUDIT_OVERVIEW.md` is the single page.
+- **Rows 10–13** each have a document that did not exist before: the silent
+  exception handlers, the CI job that installed a different dependency set, the
+  `create_all` trap that cannot add a column, and the first end-to-end test.
+- **Row 14 is honest about being incomplete.** `api.py` is 74%. The gap is
+  measured (588 lines, only 18% of them error handling), and the untested parts
+  are named in priority order at the end of `COVERAGE_API.md`.
+- **Row 15 is out of scope by decision, not an oversight.** 34 `.tsx` files, zero
+  tests, and a CI job that typechecks and builds them but verifies no behaviour.
+  The owner's call: this repository presents the backend and LLMOps work, so
+  frontend behaviour tests are not on the roadmap. Stated plainly so a reader is
+  not told the project verifies its UI when it does not.
 
 ---
 
@@ -134,7 +190,7 @@ guard.
 | ~~**4**~~ | ~~Tracing overhead measurement~~ | ✅ **DONE** — observability finding #4: ~5 µs/span, 0.003% of a 2 s answer, and a dead collector drops spans instead of blocking. |
 | ~~**5**~~ | ~~Dark-module triage~~ | ✅ **DONE** — [`DARK_MODULES.md`](DARK_MODULES.md). The premise was wrong: all 11 are imported by live code. What IS true: 23 of 61 public names unreachable, 13 of those also untested. |
 | **6** | Publish posts 1–4 | The actual goal. Do not let this stay last forever. |
-| ~~**7**~~ | ~~k8s revisit~~ | ✅ **DONE** — 31 manifests / 89 resources parsed against all 8 checks. One claim was wrong (backups "on the same disk" — two separate PVCs); corrected with the reason that does hold. Four cluster-only checks could not be re-run and say so. Check 8 was added later: the app could not start without an LLM key. |
+| ~~**7**~~ | ~~k8s revisit~~ | ✅ **DONE** — 30 YAML files / 87 resources parsed against all 8 checks. One claim was wrong (backups "on the same disk" — two separate PVCs); corrected with the reason that does hold. Four cluster-only checks could not be re-run and say so. Check 8 was added later: the app could not start without an LLM key. |
 | ~~**8**~~ | ~~**Close**~~ | ✅ **DONE** — README rewritten from this file (seven-part table + closing section). **`ROADMAP.md` kept, not deleted:** `SECURITY_FINDINGS.md` and `DARK_MODULES.md` cite it as the source of their questions, and deleting it would break seven citations. **No release tagged** — the commit hash is the record, and the README already carries the summary a release page would. |
 
 ---

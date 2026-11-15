@@ -74,7 +74,7 @@ class DocumentReader:
                     result += " | ".join(padded[:len(headers)]) + "\n"
                 
                 return result
-        except Exception as e:
+        except Exception :
             # Fallback to plain text reading
             return DocumentReader.read_text(file_path)
     

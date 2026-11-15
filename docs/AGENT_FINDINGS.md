@@ -261,6 +261,11 @@ contextual summaries, and the `hit@6` gate that could not see the reranker.
 > **Asking a question is not the same as measuring the answer, and an instrument can
 > pass its own test suite while being unable to tell right from wrong.**
 
-**The honest summary:** five real agent findings, all fixed, all with tests. Four open.
+**The honest summary:** five real agent findings, all fixed, all with tests. Four
+items remain *open* (#6–#9) — but #7 and #8 are prompt-rule work whose checks are
+already correct, and #9 is latent and unexercised. None of the four is a defect
+that can bite a user today; the one that matters is #6, `@team` latency, which is
+genuine engineering rather than a bug. Call them **known and reasoned**, not
+**unfinished**: what would make them unfinished is not having a reason.
 `code-intervals` is no longer an open failure of the *agents*; it is a fixed gap in the
 *instrument*, with the score itself still to be re-measured on the next run.

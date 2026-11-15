@@ -42,6 +42,7 @@ import time
 from collections import deque
 from typing import Dict, List, Optional, Tuple
 
+from modules.silent import degrade
 _log = logging.getLogger("llama_agent.llm_guard")
 
 # Conservative: real tokenizers average ~4 chars/token for English, less for
@@ -349,8 +350,8 @@ def record_spend(tokens: int, subject: Optional[str] = None) -> None:
         return
     try:
         get_budget().record(subject or budget_subject(), int(tokens or 0))
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("token spend not recorded for this call (budget drifts high)", _e)
 
 
 def budget_message() -> str:
@@ -468,8 +469,8 @@ def _metric(model: str, action: str, trimmed: int = 0) -> None:
         LLM_GUARD_EVENTS.labels(model=model or "unknown", action=action).inc()
         if trimmed:
             LLM_TOKENS_TRIMMED.labels(model=model or "unknown").inc(trimmed)
-    except Exception:
-        pass
+    except Exception as _e:
+        degrade("llm-guard trim metric dropped for this call", _e)
 
 
 # ---------------------------------------------------------------- the guard

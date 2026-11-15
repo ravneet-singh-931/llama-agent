@@ -237,3 +237,495 @@ measured.
 > A limitation stated precisely can still teach a false belief. The README told the
 truth about a function and lied about the posture: containing an injection and
 noticing one are different guarantees, and it had only named the missing one.
+
+---
+
+## S5. CORS reflected any origin with credentials — fixed 2026-11-13
+
+Found while making `test_cors_headers_present` assert something, which it did not.
+Removing the CORS middleware entirely left that test green, so the configuration had
+never been checked by the suite at all.
+
+### What was wrong
+
+`api.py` registered, in every non-production environment:
+
+```python
+cors_origins = ["*"]
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins,
+                   allow_credentials=True, ...)
+```
+
+The assumption in the comment was *"allow all (safe for local testing only)"*. Starlette
+does not simply emit `Access-Control-Allow-Origin: *` here — it reflects the caller:
+
+```
+$ curl -H 'Origin: https://evil.example' localhost:8000/openapi.json -i
+access-control-allow-origin: https://evil.example
+access-control-allow-credentials: true
+```
+
+A browser refuses a literal `*` combined with credentials. It accepts a *reflected*
+origin. So any page the developer visited could issue authenticated cross-origin
+requests to their local API and read the response.
+
+### Why it was reachable
+
+The Next.js frontend does not need it. Everything the shipped UI does goes through a
+same-origin `/api` rewrite (`frontend/next.config.*`), and Nginx proxies `/api/*` as
+well. The wildcard bought nothing and was the only thing making the reflected-origin
+behaviour possible.
+
+### The fix
+
+`api.py` now lists the local development origins explicitly — `localhost:3000`,
+`3001`, `8501`, and the two `127.0.0.1` spellings — in development, and keeps the
+already-restricted list in production. Verified:
+
+```
+Origin: https://evil.example     -> (no access-control-allow-origin header)
+Origin: http://localhost:3000    -> access-control-allow-origin: http://localhost:3000
+```
+
+### The test now tests it
+
+`tests/test_security.py::TestCORS::test_cors_headers_present` asserts that
+`app.user_middleware` contains a `CORSMiddleware`, that `allow_origins` is non-empty,
+that `"*"` is never combined with `allow_credentials=True`, and that the expected
+methods and `Authorization` header are allowed.
+
+**Proof it can fail:** commenting out the `add_middleware(CORSMiddleware, ...)` call
+makes it fail with `assert []`. Before this change the same sabotage left it green —
+the check and the thing checked had been configured to agree.
+
+---
+
+## S6. Fact length limits were declared and enforced nowhere — fixed 2026-11-13
+
+`modules/security.py` declares `MAX_FACT_KEY_LENGTH = 100` and
+`MAX_FACT_VALUE_LENGTH = 1000`, and defines `validate_fact_key` /
+`validate_fact_value` directly beneath them. **Neither function was called from
+anywhere in the repository.**
+
+`POST /remember` was already capped by its Pydantic model
+(`RememberRequest: Field(..., max_length=100/1000)`), so that endpoint was fine — and an
+audit that stopped there would have concluded, wrongly, that the limits were live.
+They were not, because six other call sites build a fact out of free text:
+
+```python
+key, value = content.split("=", 1)
+facts.remember(key.strip(), value.strip(), user_id=user_id)
+```
+
+`content` there is a chat message, capped at `MAX_MESSAGE_LENGTH = 10_000`. So a
+10,000-character message could become a 10,000-character stored fact — ten times the
+declared limit, on the path a user actually reaches.
+
+Enforced now in `FactMemory.remember()`, the one function every caller goes through:
+
+```python
+ok, err = validate_fact_key(key);   if not ok: raise ValueError(err)
+ok, err = validate_fact_value(value); if not ok: raise ValueError(err)
+```
+
+Five tests in `tests/test_security.py::TestFactInputLimits` cover the oversized key,
+the oversized value (the chat path), an empty value, the unaffected happy path, and the
+endpoint's own 422.
+
+### The lesson, again
+
+> A validation function that exists and a validation that runs are different claims.
+
+The declared constant `MAX_FACT_VALUE_LENGTH = 1000` sat in the source next to a
+function that would have enforced it. Reading the file, the limit looks real. Running
+the code, nothing enforced it — on one of seven paths.
+
+---
+
+## S7. A refresh token authenticated requests — fixed 2026-11-13
+
+**Symptom.** None. Login worked, protected routes worked.
+
+**Cause.** Two auth paths existed and only one checked the token type.
+
+| path | checks `type == "access"`? |
+|---|---|
+| `get_current_user` (routes using `Depends(get_current_user)`) | **yes** |
+| `authenticate_user` (dual JWT-or-API-key) | **no** |
+
+`authenticate_user` verified the signature, read `sub`, and returned the user. A
+refresh token is a perfectly valid JWT — same secret, same algorithm, different
+`type` and a **7-day** life instead of 30 minutes. So the long-lived credential
+worked wherever the short-lived one was meant to be required.
+
+Measured before the fix: `authenticate_user(C(credentials=refresh_token))` →
+`vic` **accepted**. A stolen refresh token bought 7 days of access, and refresh
+tokens are the credential most likely to be stored in a place that leaks — they
+are the one you *have* to persist to stay logged in.
+
+**Fix.** Both paths require `payload["type"] == "access"`. Regression tests cover
+the header path, the cookie path, and that a real access token still works.
+
+> **When two functions answer the same question, the weaker one is the answer.**
+
+## S8. Three password-handling bugs, all of which crashed instead of refusing — fixed 2026-11-13
+
+`modules/auth.py` was at **53% coverage**, and the untested half was the half that
+touches credentials. Writing the tests found three defects; none was found by
+reading the file.
+
+**1. bcrypt's 72-byte limit crashed registration.** `hashpw` raises `ValueError`
+beyond 72 bytes — it does not truncate. `RegisterRequest` allows
+`max_length=128`, so a 73-character password was accepted by validation and then
+blew up in `hash()`. `/auth/register` caught the bare `Exception` and returned a
+**500 Internal Server Error**. Measured: 72 ASCII characters fine, 73 raises;
+8 emoji fine, 19 emoji (76 bytes) raises.
+
+Fixed by rejecting at the edge with a message that names the limit and the
+overflow, **not** by truncating to 72 bytes. Truncating would silently make a
+long password and its 72-byte prefix the same password — turning a crash into a
+wrong answer is the worse trade.
+
+**2. A corrupt stored hash crashed login.** `bcrypt.checkpw` raises
+`ValueError("Invalid salt")` when the stored value is not a bcrypt hash — a
+corrupt row, a half-migrated column. Login returned 500 instead of refusing.
+`verify_password` now returns `False` for an unusable hash or an over-long
+password: an auth check that raises is a 500, an auth check that returns `False`
+is a rejected login.
+
+**3. The length requirement could be skipped.** `check_strength` scored 5 checks
+and required `score >= 4`, so **any one check could fail — including length**.
+`"aA1!"` (4 characters) scored 4/5 and was accepted. Not exploitable through the
+HTTP API, because `RegisterRequest.min_length=8` also applies, but that made
+`check_strength` a second, weaker gate that a caller reaching `UserManager`
+directly would fall straight through. Length is now a hard requirement.
+
+All three lived in **four copies** of the bcrypt calls (`PasswordManager`, the
+`User` model, and the two module-level helpers). They are now one implementation
+in `modules/database.py`, because four copies is how they drifted.
+
+**Coverage: 53% → 93%** across 61 tests, covering register / login / refresh /
+profile lookup / API-key create-validate-expire / the four FastAPI dependencies /
+the cookie path. The remaining 7% is the production-import guard, which cannot be
+exercised inside an imported module.
+
+> **An error path that raises is indistinguishable from a bug at the call site.**
+> Three of these read as "500 Internal Server Error" to a user, and a 500 is what
+> the rest of this codebase returns when something is genuinely wrong.
+
+> **A score of 4 out of 5 is a rule about the wrong thing.** It says "most of the
+> checks passed", not "the password is long enough".
+
+### What this part did not do
+
+No change to token lifetimes, algorithms or the secret-loading path. The
+production guard (`ENVIRONMENT=production` with a default secret raises at import)
+was already correct and is unchanged.
+
+---
+
+## 10. The WebSocket ticket: the two properties that make it safe, both untested
+
+**What the design does.** A browser cannot attach an `Authorization` header to a
+WebSocket handshake, so the credential has to go in the query string — where it
+lands in proxy logs, browser history and `Referer` headers. The mitigation is a
+short-lived, **single-use** ticket, issued over HTTPS by `POST /ws/ticket`, and
+the endpoint `/ws/{user_id}` that deliberately **ignores the path segment**.
+
+**What was wrong.** Nothing — the code was correct. **Both properties were
+untested**, which means either could be "simplified" away without a single red
+test:
+
+- Change `pop` to `get` and stop honouring `used` → the ticket becomes replayable,
+  i.e. a password with a 60-second life sitting in a log line.
+- Trust the path segment → **every user can connect as every other user**, and no
+  existing test would notice.
+
+Untested correctness is one edit away from being untested incorrectness.
+
+**Fix.** `tests/test_ws_ticket.py`, 9 tests. The identity test does not settle
+for "the connection opened": it wraps `handler.manager.connect` and asserts
+**which user id was bound**, with a random UUID in the path so a failure names
+the spoofed id.
+
+**Proof (sabotage).** Taking `user_id` from the path fails 1 test; making the
+ticket replayable fails 1; removing the expiry check fails 1; opening
+`/ws/ticket` to unauthenticated callers fails 1. An invalid or expired ticket
+closes with **1008** — fail closed, never a silent anonymous fallback.
+
+**The lesson.** For an auth boundary, "the happy path works" is not the property
+you care about. The properties are *replay* and *identity source*, and each needs
+its own assertion because each fails silently and independently.
+
+**Not covered.** The Redis path (`pop_json`, `GETDEL` + transactional fallback) is
+atomic by construction but is not exercised here — Redis is not configured in
+tests, so only the in-memory path runs.
+
+
+---
+
+## Part B — `modules/security_hardening.py`: 67% → 88%
+
+`api.py` reached 74% and was declared done. Stopping there left the module that
+*makes the security decisions* at **67%**, which is a worse place to stop: what
+remains in `api.py` is mostly print statements, and what remained here was
+defences. `tests/test_security_hardening.py`, 29 tests.
+
+### Finding 1: `CSRFProtection` is dead code — and the app is still protected
+
+The class defines `generate_token`, `validate_token` and `cleanup_expired`,
+says "CSRF (Cross-Site Request Forgery) protection" in its docstring, and is:
+
+- **not imported by `api.py`**
+- **not called anywhere in the application**
+- **not called by any test** (zero references before this file)
+
+So the honest statement is that the app has **no CSRF token mechanism**. What it
+does have is `samesite="lax"` on every auth cookie (`api.py` 823, 967–984), which
+*is* the standard defence for a same-origin app: the frontend reaches the API
+through the Nginx/Next proxy on the same origin, so a cross-site form post does
+not carry the cookie. There is a comment at `api.py` 967 explaining exactly this
+reasoning, including why `secure` is conditional.
+
+**Status: documented, not changed.** Deleting a class or wiring it in is a
+product decision, and the current design is defensible. A guard test
+(`test_csrf_is_not_wired_into_the_app`) fails if someone starts using it, so the
+next person gets a signal instead of a false sense of coverage.
+
+**A second, smaller problem inside it:** `self.tokens` is never pruned except on
+a successful `validate_token` or an explicit `cleanup_expired()`, which nothing
+calls. It is unbounded — dead code today, a leak the moment it is wired up.
+
+### Finding 2: upload filenames have no length bound — measured
+
+`sanitize_filename` strips path traversal, separators, control characters, dot-tricks
+and reserved Windows names. It does **not** bound length. Measured through the real
+endpoint:
+
+```
+300-character filename  -> 200  "Added 1 chunks from aaaa..."   file written
+5000-character filename -> 400  "Invalid multipart data."       but from the PARSER
+```
+
+The 400 is not our validation — it is Starlette refusing the multipart part. So
+nothing in this codebase decides how long a filename may be.
+
+Why it matters: most filesystems cap a single name at **255 bytes**, and a
+multibyte character costs more than one byte, so a name under 300 *characters*
+can still exceed it. The failure would arrive as `OSError: File name too long`
+— a **500 during an upload**, not a clean rejection. ext4 happens to allow it
+today, which is why nothing broke and nobody noticed.
+
+This is recorded rather than fixed because a length limit is a product choice
+(truncate? reject? by bytes or characters?). The test asserts the *current*
+behaviour so it cannot change silently, and its failure message says to invert
+it when the gap closes.
+
+### Finding 3: the traversal defence is six layers deep — and one line is load-bearing
+
+Sabotage found this. Removing the `filename.replace("..", "")` line entirely
+breaks **no test**, and that is not a hole in the tests: the function is
+deliberately over-determined. Measured, removing one line at a time:
+
+| line removed | result |
+|---|---|
+| `os.path.basename` | still safe |
+| `replace("..", "")` | still safe — `\.{2,}` collapses dots anyway |
+| `replace("/", "")` | still safe — `[^\w\-.]` already maps `/` to `_` |
+| `replace("\\", "")` | still safe |
+| `re.sub` special chars | still safe |
+| `\.{2,}` collapse | still safe |
+| **`lstrip(".")`** | **`".htaccess"` survives — hidden file writable** |
+
+So six of seven are redundant *for these inputs* and one is critical. A new test
+(`test_hidden_files_cannot_be_written`) covers the critical line, and it is the
+two-test catch for sabotage S1b.
+
+This is worth stating plainly: **redundancy is good, but only if the tests target
+the outcome.** A test that asserted "the `..` replace ran" would have passed while
+the real defence was elsewhere.
+
+### Sabotage results
+
+| # | sabotage | result |
+|---|---|---|
+| S1 | `replace("..", "")` removed | **SURVIVED — correctly.** Redundant line; S1b covers the real one |
+| S1b | `lstrip(".")` removed | CAUGHT (two tests) |
+| S2 | lockout no longer escalates | CAUGHT |
+| S3 | Redis state ignored | CAUGHT |
+| S4 | local mirror never updated | CAUGHT |
+| S5 | lockout never reported | CAUGHT |
+| S6 | audit log unbounded | CAUGHT |
+| S7 | CSRF token replayable | CAUGHT |
+| S8 | expired CSRF token kept | CAUGHT |
+
+**8 of 9 mutations caught, 1 correctly survived.**
+
+### What was verified about degradation
+
+The Redis branch is the one a multi-replica deployment uses, and nothing reached
+it before. Now asserted:
+
+- a lockout recorded by **pod A is seen by pod B** (empty local mirror, shared
+  Redis) — without this, an attacker retries against a different replica and the
+  per-process counter never fills
+- a **failed Redis read or write degrades to the local mirror** and never
+  propagates into a login request
+- `REDIS_URL` set but **nothing listening** still locks out (the realistic
+  degraded deployment, not a synthetic exception)
+
+### Two of my own errors in this part
+
+**1. I invented the `AuditLogger` API.** I wrote `log.log_event(...)` and
+`log._trim()`. Neither exists; the real methods are `log_login_attempt`,
+`log_registration`, `log_file_upload`, `log_rate_limit_violation`,
+`log_suspicious_activity`, `log_tool_call`, and the bound is inside `_write_log`.
+Two tests failed and I read the source instead of the docstring.
+
+**2. I asserted a PII policy the code deliberately does not have.** I asserted
+that an email address was redacted out of the audit trail; it was not.
+`modules/pii.py` states the scope explicitly: SSNs and Luhn-valid card numbers
+are redacted, and *"names, addresses, emails and phone numbers are deliberately
+left alone, because redacting them would destroy the usefulness of the logs and a
+regex cannot reliably tell a name from a noun"*. **The code was right and my test
+was wrong.** Rewritten to assert what is actually promised, and the Luhn
+behaviour is now covered too (an ordinary 16-digit id is not mangled).
+
+**3. I stubbed away the code under test.** The first version of the bounded-log
+test replaced `_write_log` with a lambda that did the trimming itself — so it
+asserted that *my stub* trimmed a list and could never fail for the real code.
+Found by reading it back before committing; rewritten to run the real
+`_write_log` and stub only its two side effects (file, Redis).
+
+**4. I built a sabotage that could not happen.** An early probe replaced
+`_get_redis` with a function that *raises*, printed `RAISED: ConnectionError`,
+and I briefly reported a defect. The real `_get_redis` catches everything and
+returns `None` — my stub produced a shape the real function cannot produce. The
+correct probe sets `REDIS_URL` to a dead port; that one passes.
+
+### Measured after this part
+
+```
+tests/test_security_hardening.py       -> 29 passed
+security_hardening.py coverage         -> 88%   (was 67%)
+full suite (CI flags)                  -> 1166 passed, 6 skipped, 1 xfailed
+TOTAL (--cov=., CI gate 74)            -> 88%
+sabotage                               -> 8/9 caught, 1 correctly survived
+```
+
+
+---
+
+## Part C — `modules/pg_store.py`: 66% → 92%
+
+`pg_store` is the module that writes chat history to the **real** database. The
+rest of the test suite runs on in-memory SQLite, so this is the layer where a
+defect can be invisible in CI and live in production.
+
+### The gap was structural, not incidental
+
+`tests/test_pg_store.py` is 242 lines and 22 tests. It is *thorough* — and every
+single test ends the same way: the pool raises, and the function returns
+`None`/`[]`/`False` as promised. That is genuinely valuable (it is why chat
+survives an outage) but it means:
+
+> **not one SQL statement in this module had ever been executed by a test.**
+
+A broken `WHERE c.user_id = $2` would still return `None` against an unreachable
+database. Every existing test would stay green. The SQL itself — owner checks,
+conflict handling, ordering, bind order — was unverified.
+
+`tests/test_pg_store_sql.py` (13 tests) drives the real functions against a
+recording fake pool. It does **not** prove the SQL is valid PostgreSQL; only a
+server can. That limit is stated in the file rather than implied away.
+
+### Finding 4: a user can write into another user's conversation (measured)
+
+`add_message` runs:
+
+```sql
+INSERT INTO conversations (id, user_id, title, ...) VALUES ($1, $2, $3, ...)
+ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
+INSERT INTO messages (id, conversation_id, role, content, ...) VALUES ($1, $2, ...)
+```
+
+**There is no owner predicate.** If user B supplies user A's conversation id:
+
+- the conflict clause fires on **A's row**; `user_id` remains A's
+- the `messages` INSERT then writes **B's content into A's conversation**
+
+A's conversation id is not a secret. The default is
+`uuid5(DNS, f"llama-agent-default:{user_id}")` — computable by anyone who knows
+A's user id, which appears in A's own JWT and in URLs the frontend builds.
+
+**What was checked before calling this a defect:**
+
+| question | answer |
+|---|---|
+| can B **read** A's history? | **No.** `get_messages` joins `c.user_id = $2`; verified by test |
+| can B **write** into A's conversation? | **Yes** — measured against the recording fake |
+| can B rename A's conversation? | No — the title update is `WHERE id = $2 AND title IN ('New chat','New Chat')` |
+| what does B gain? | nothing readable: `get_messages(B, ...)` returns `[]` |
+
+So this is a **write-only integrity defect**, not an exfiltration one. B can
+inject content into a conversation B cannot read, and bump its `updated_at`,
+which moves A's conversation to the top of A's own sidebar. A also cannot
+detect it: the message looks like their own history.
+
+**Status: recorded, not fixed.** The correct fix is an owner predicate on the
+conflict clause (`ON CONFLICT (id) DO UPDATE ... WHERE conversations.user_id =
+EXCLUDED.user_id`) or a pre-check, and it is a schema-and-behaviour change that
+belongs with the product owner. The test asserts current behaviour and its
+failure message says to invert it when the fix lands.
+
+### Finding 5: the auto-title can be raced, and the ordering has no stable tie-break
+
+Minor, both recorded rather than changed:
+
+- **Auto-title is a separate statement** after the insert (`UPDATE ... WHERE title
+  IN ('New chat','New Chat')`). Two concurrent first messages both see the
+  default title; the second update wins. Harmless (the title is cosmetic) but it
+  is not atomic with the insert it describes.
+- **`ORDER BY m.created_at ASC, m.id ASC`** — the tie-break is `m.id`, a random
+  UUID, so two messages written in the same timestamp resolve in random order.
+  Removing the tie-break entirely breaks nothing either way (sabotage P4
+  survived); `created_at` is `NOW()`, which is transaction-start time in
+  Postgres, so two messages in one transaction share it. Extremely unlikely with
+  one row per transaction, and not worth changing without evidence.
+
+### Sabotage results
+
+| # | sabotage | result |
+|---|---|---|
+| P1 | owner check removed from the read query | CAUGHT |
+| P2 | auto-title overwrites a user-chosen title | CAUGHT |
+| P3 | title no longer capped at 80 characters | CAUGHT |
+| P4 | ordering tie-break dropped | SURVIVED — redundant, as above |
+| P5 | message row bound to the wrong conversation | **SURVIVED first, then CAUGHT** |
+| P6 | assistant replies retitle the conversation | CAUGHT |
+
+**P5 is the instructive one.** My first version asserted the *conversation*
+argument but never the *message id*, so swapping `$1` and `$2` in the VALUES list
+went unnoticed — and that swap means two messages share a primary key. Fixed by
+adding `test_a_message_row_gets_a_fresh_id_and_the_right_conversation`, which
+also asserts that a second message gets a **different** id.
+
+### A process failure worth recording
+
+P5's sabotage was left **applied on disk** for a moment: the restore ran, then a
+later command re-applied it, and the next coverage run failed with the sabotage
+still in the file. Caught because the failure named the sabotaged SQL
+(`VALUES ($1, $1, $3, $4, NOW())`), not because I remembered. The rule already
+in `RUNNING_TESTS.md` — diff against the backup after every sabotage — is what
+identified it in one step.
+
+### Measured after this part
+
+```
+tests/test_pg_store_sql.py            -> 13 passed
+pg_store.py coverage                  -> 92%   (was 66%)
+existing test_pg_store.py             -> 22 passed, unchanged (degradation paths)
+full suite (CI flags)                 -> 1179 passed, 6 skipped, 1 xfailed
+TOTAL (--cov=., CI gate 74)           -> 88%
+sabotage                              -> 5/6 caught, 1 redundant (P4)
+```

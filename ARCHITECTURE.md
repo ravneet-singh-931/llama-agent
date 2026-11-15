@@ -32,7 +32,7 @@
 │                                     │       │                                     │
 │  ┌───────────────────────────────┐  │       │  ┌───────────────────────────────┐  │
 │  │  Next.js UI (Port 3001)       │  │       │  │   FastAPI REST (Port 8000)    │  │
-│  │  Streamlit UI (Port 8501)     │  │       │  │                               │  │
+│  │                               │  │       │  │                               │  │
 │  │                               │  │       │  │  • REST Endpoints             │  │
 │  │  • Chat Interface             │  │       │  │  • WebSocket Server           │  │
 │  │  • File Upload                │  │       │  │  • JWT Authentication         │  │
@@ -153,7 +153,7 @@
 ### 1. User Uploads Document
 
 ```
-User ──→ Nginx ──→ Next.js/Streamlit ──→ FastAPI ──→ PostgreSQL (metadata)
+User ──→ Nginx ──→ Next.js ──→ FastAPI ──→ PostgreSQL (metadata)
                                     │
                                     ├──→ File System (save file)
                                     │
@@ -163,7 +163,7 @@ User ──→ Nginx ──→ Next.js/Streamlit ──→ FastAPI ──→ Pos
 ### 2. User Asks Question
 
 ```
-User ──→ Nginx ──→ Next.js/Streamlit ──→ FastAPI
+User ──→ Nginx ──→ Next.js ──→ FastAPI
                                     │
                                     ▼
                               Query Router
@@ -182,7 +182,7 @@ User ──→ Nginx ──→ Next.js/Streamlit ──→ FastAPI
                            Answer Generation
                                     │
                                     ▼
-                              Next.js/Streamlit ──→ User
+                              Next.js ──→ User
 ```
 
 ### 3. Observability Flow
@@ -198,13 +198,12 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
 ```
 ┌──────────────┐
 │   Nginx      │──────→ Next.js (3001)
-└──────────────┘       Streamlit (8501)
-       │               FastAPI (8000)
+└──────────────┘       FastAPI (8000)
        │ HTTP
        ▼
 ┌──────────────┐
-│  Next.js /   │──────→ FastAPI (8000)
-│  Streamlit   │       PostgreSQL (5432)
+│   Next.js    │──────→ FastAPI (8000)
+│              │       PostgreSQL (5432)
 └──────────────┘       Redis (6379)
        │               Phoenix (6006)
        │ HTTP

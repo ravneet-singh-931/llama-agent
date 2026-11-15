@@ -25,6 +25,7 @@ import {
   Activity,
   RefreshCw,
   AlertCircle,
+  Database,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -48,11 +49,12 @@ interface AgentStat {
 interface TeamStats {
   agents: AgentStat[];
   health: {
+    // Process health only. Request/error counts used to live here too, but
+    // they were per-pod and only counted chat + MCP traffic; Prometheus owns
+    // them now (see modules/monitoring.py). "tasks_handled_total" is the
+    // replicated counter this dashboard should show.
     status: string;
     uptime_human: string;
-    total_requests: number;
-    total_errors: number;
-    error_rate: string;
   };
   metrics: { total_agents: number; tasks_handled_total: number };
   generated_at: string;
@@ -138,8 +140,6 @@ export function AgentCollaborationDashboard() {
   };
 
   const totalHandled = stats?.metrics.tasks_handled_total ?? 0;
-  const totalRequests = stats?.health.total_requests ?? 0;
-  const errorRate = stats?.health.error_rate ?? "0.00%";
   const healthStatus = stats?.health.status ?? "unknown";
 
   return (
@@ -172,20 +172,22 @@ export function AgentCollaborationDashboard() {
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">API Requests</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">Data Store</CardTitle>
+            <Database className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-amber-600">
-              {loading ? "—" : totalRequests}
+              {loading ? "—" : healthStatus}
             </div>
-            <p className="text-xs text-muted-foreground">Since API start</p>
+            <p className="text-xs text-muted-foreground">
+              Shared across replicas
+            </p>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Error Rate</CardTitle>
-            <Bot className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">Active Agents</CardTitle>
+            <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
             <div
@@ -196,10 +198,12 @@ export function AgentCollaborationDashboard() {
                   : "text-red-600"
               )}
             >
-              {loading ? "—" : errorRate}
+              {loading
+                ? "—"
+                : stats?.agents.filter((a) => a.last_used).length ?? 0}
             </div>
             <p className="text-xs text-muted-foreground">
-              {stats ? `Status: ${healthStatus}` : "Live monitor"}
+              Agents used at least once
             </p>
           </CardContent>
         </Card>

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Dict, List, Optional
 
+from modules.silent import degrade
 from modules import grounding
 
 _FENCE_BLOCK_RE = re.compile(r"```([\w+#.-]*)[^\n]*\n(.*?)(?:```|\Z)", re.S)
@@ -133,8 +134,8 @@ def _looks_like_regex(snippet: str) -> bool:
     try:
         re.compile(snippet)
         return True
-    except re.error:
-        pass
+    except re.error as _e:
+        degrade("a user-supplied regex was invalid (treated as no match)", _e)
     try:
         re.compile(f"(?:{snippet})")
         return True

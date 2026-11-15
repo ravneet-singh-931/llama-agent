@@ -1,42 +1,7 @@
 {
-  "enable_advanced_rag": {
-    "enabled": true,
-    "description": "Enable advanced RAG features (re-ranking, sub-questions)",
-    "rollout_percent": 100
-  },
-  "enable_phoenix_tracing": {
-    "enabled": true,
-    "description": "Enable Phoenix observability tracing",
-    "rollout_percent": 100
-  },
-  "enable_caching": {
-    "enabled": true,
-    "description": "Enable response caching",
-    "rollout_percent": 100
-  },
-  "enable_rate_limiting": {
-    "enabled": true,
-    "description": "Enable rate limiting",
-    "rollout_percent": 100
-  },
-  "enable_websockets": {
-    "enabled": true,
-    "description": "Enable WebSocket support",
-    "rollout_percent": 100
-  },
-  "enable_file_upload": {
-    "enabled": true,
-    "description": "Enable file upload feature",
-    "rollout_percent": 100
-  },
   "enable_mcp_agents": {
     "enabled": true,
     "description": "Enable MCP multi-agent team",
-    "rollout_percent": 100
-  },
-  "enable_beta_features": {
-    "enabled": false,
-    "description": "Enable experimental features",
     "rollout_percent": 100
   }
 }

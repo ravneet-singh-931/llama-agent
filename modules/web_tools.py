@@ -21,6 +21,7 @@ import socket
 import urllib.parse
 import urllib.request
 
+from modules.silent import degrade
 from modules.secrets import get_secret
 
 _USER_AGENT = (
@@ -72,15 +73,16 @@ def _is_private_host(host: str) -> bool:
         return True
     try:
         return any(ipaddress.ip_address(host) in n for n in _PRIVATE_NETWORKS)
-    except ValueError:
-        pass                       # not an IP literal -> resolve it
+    except ValueError as _e:
+        degrade("host is not an IP literal (resolved instead)", _e)
     try:
         for info in socket.getaddrinfo(host, None):
             addr = info[4][0]
             try:
                 if any(ipaddress.ip_address(addr) in n for n in _PRIVATE_NETWORKS):
                     return True
-            except ValueError:
+            except ValueError as _e:
+                degrade("one resolved address was not an IP literal (skipped)", _e)
                 continue
     except OSError:
         # Unresolvable. Do not fail closed here: the caller is about to make

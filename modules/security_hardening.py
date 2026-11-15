@@ -18,6 +18,7 @@ from typing import Tuple, Optional, Dict, List
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from modules.silent import degrade
 
 # ============ SHARED REDIS (best-effort, multi-replica safe) ============
 
@@ -283,8 +284,8 @@ class BruteForceProtection:
                 raw = r.hget(BRUTE_FORCE_KEY, key)
                 if raw:
                     return json.loads(raw)
-            except Exception:
-                pass
+            except Exception as _e:
+                degrade("brute-force state not read from redis (local mirror used)", _e)
         return self.attempts[key]
 
     def _store(self, key: str, data: Dict) -> None:
@@ -429,8 +430,8 @@ class AuditLogger:
                 f.write(f"{event['timestamp']} | {event['event_type']} | "
                         f"{event.get('identifier', 'N/A')} | "
                         f"{event.get('details', '')}\n")
-        except Exception:
-            pass  # Don't fail if logging fails
+        except Exception as _e:
+            degrade("audit log file not written (must not fail the request)", _e)
 
         # Mirror to Redis so every replica shares the same audit trail.
         r = _get_redis()
@@ -561,7 +562,8 @@ class AuditLogger:
                 for raw in raws:
                     try:
                         events.append(json.loads(raw))
-                    except (json.JSONDecodeError, TypeError):
+                    except (json.JSONDecodeError, TypeError) as _e:
+                        degrade("one stored audit event was not valid JSON (skipped)", _e)
                         continue
             except Exception:
                 events = list(self.events)

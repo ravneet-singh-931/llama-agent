@@ -50,12 +50,3 @@ export interface HealthStatus {
   modules: Record<string, string>;
 }
 
-export interface MetricsData {
-  health: HealthStatus;
-  metrics: {
-    total_requests: number;
-    total_errors: number;
-    avg_response_time: number;
-    requests_last_hour: number;
-  };
-}

@@ -1,4 +1,4 @@
-"""v3.5.5: the API, MCP and Streamlit containers never run as root."""
+"""v3.5.5: the API and MCP containers never run as root."""
 import pathlib
 import re
 
@@ -23,7 +23,6 @@ def test_dockerfile_gives_runtime_write_dirs_to_app_user():
 @pytest.mark.parametrize("fname,name", [
     ("api.yaml", "llama-agent-api"),
     ("mcp-server.yaml", "llama-agent-mcp-server"),
-    ("web.yaml", "llama-agent-web"),
 ])
 def test_deployment_security_context(fname, name):
     docs = [x for x in yaml.safe_load_all((ROOT / "k8s" / fname).read_text()) if x]

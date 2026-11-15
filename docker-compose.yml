@@ -11,10 +11,10 @@
 #
 # WHAT DOES THIS FILE DO?
 # -----------------------
-# Defines 14 services (containers) that work together:
+# Defines 13 services (containers) that work together:
 #   1. postgres (DB) + 2. redis (cache) + 2b. chromadb (vectors) + 3. api (FastAPI)
-#   4. web (Streamlit) + 5. mcp-server (agents) + 6. frontend (Next.js) + 7. nginx (proxy)
-#   8. prometheus + 9. grafana + 10. loki + 11. promtail + 12. node-exporter + 13. phoenix
+#   4. mcp-server (agents) + 5. frontend (Next.js) + 6. nginx (proxy)
+#   7. prometheus + 8. grafana + 9. loki + 10. promtail + 11. node-exporter + 12. phoenix
 #
 # DOCKER CONCEPTS:
 # ----------------
@@ -57,12 +57,11 @@
 #   docker compose logs -f grafana          (watch Grafana logs)
 #   docker compose down                     (stop everything)
 #
-# Services: 14 total
+# Services: 13 total
 #   - postgres       (database)
 #   - redis          (caching + shared fact memory)
 #   - chromadb       (shared vector store for all api replicas)
 #   - api            (FastAPI REST + WebSocket)
-#   - web            (Streamlit UI)
 #   - mcp-server     (Model Context Protocol agent server)
 #   - frontend       (Next.js UI)
 #   - nginx          (SSL + Load Balancer + security headers)
@@ -203,45 +202,6 @@ services:
       - backend
       - monitoring  # Also on monitoring network (for Prometheus scraping)
 
-  # =============================================
-  # 4. Streamlit Web UI (Legacy, Python-Based)
-  # =============================================
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile  # Same image as api, different command
-    container_name: llama-agent-web
-    restart: unless-stopped
-    ports:
-      - "8501:8501"  # Publish Streamlit port
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres@postgres:5432/llama_agent
-      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
-      - POSTGRES_HOST=postgres  # app.py connects with psycopg2 via POSTGRES_* vars
-      - REDIS_URL=redis://redis:6379
-      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
-      - TAVILY_API_KEY_FILE=/run/secrets/tavily_api_key
-      - LLM_MODEL_STRONG=${LLM_MODEL_STRONG:-qwen/qwen3.8-27b}
-      - LLM_MODEL_FAST=${LLM_MODEL_FAST:-openai/gpt-oss-20b}
-    secrets:
-      - groq_api_key
-      - tavily_api_key
-      - postgres_password
-    depends_on:
-      - api  # Wait for api (though not strictly needed, but ensures DB is ready)
-    # baseUrlPath=streamlit so it works behind Nginx at /streamlit/
-    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.baseUrlPath=streamlit
-    volumes:
-      - ./data:/app/data
-      - ./data/memory:/app/memory  # Same shared memory as api
-      - chroma_model_cache:/root/.cache/chroma
-    networks:
-      - backend
-      - monitoring
-
-  # =============================================
-  # 5. MCP Agent Server (5 Specialized Agents, SSE)
-  # =============================================
   mcp-server:
     build:
       context: .

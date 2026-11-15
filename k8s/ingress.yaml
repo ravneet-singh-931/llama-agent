@@ -12,7 +12,7 @@
 # WHY INGRESS?
 # ------------
 # - Services are ClusterIP (internal only). Ingress exposes them externally.
-# - Single entry point for all paths: /api, /ws, /mcp, /streamlit
+# - Single entry point for all paths: /api, /ws
 # - Handles TLS (HTTPS), rate limiting, WAF, WebSocket, SSE
 # - Without Ingress, you'd need LoadBalancer per Service (expensive!)
 #
@@ -21,7 +21,6 @@
 #   /api/*       → llama-agent-api-service:8000 (REST API, prefix stripped)
 #   /ws/*        → llama-agent-api-service:8000 (WebSocket, prefix stripped)
 #   /mcp/*       → llama-agent-mcp-server-service:8001 (MCP SSE)
-#   /streamlit/* → llama-agent-web-service:8501 (Streamlit)
 #   /            → Handled by frontend-ingress.yaml (separate, no rewrite!)
 #
 # WHY SEPARATE FRONTEND INGRESS?
@@ -154,7 +153,6 @@ spec:
 # Paths that must reach the backend UNCHANGED (no rewrite-target):
 #   /ws/<id>      -> FastAPI route is literally /ws/{user_id}; the /$2 rewrite
 #                   above would turn /ws/abc into /abc (404 -> WS never opens)
-#   /streamlit/   -> Streamlit runs with --server.baseUrlPath=streamlit
 # /mcp is intentionally NOT exposed: the MCP server is internal (the API calls
 # it over the cluster network) and must not be reachable from the internet.
 # ---------------------------------------------------------------------------
@@ -188,10 +186,3 @@ spec:
                 name: llama-agent-api-service
                 port:
                   number: 8000
-          - path: /streamlit
-            pathType: Prefix
-            backend:
-              service:
-                name: llama-agent-web-service
-                port:
-                  number: 8501

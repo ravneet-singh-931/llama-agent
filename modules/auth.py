@@ -11,6 +11,7 @@ Features:
 
 import os
 import uuid
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
@@ -64,19 +65,24 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 class PasswordManager:
-    """Secure password hashing and verification using bcrypt directly"""
+    """Password hashing, delegating to modules.database.
+
+    There used to be four copies of the bcrypt calls -- here, on the User
+    model, and the hash_password/verify_password helpers -- and all four
+    shared the same bug: a password over bcrypt's 72-byte limit raised
+    ValueError instead of being rejected with a message. One implementation
+    means one place to be right.
+    """
 
     def hash(self, password: str) -> str:
-        """Hash a password"""
-        salt = _bcrypt.gensalt()
-        return _bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+        """Hash a password. Raises ValueError if it exceeds bcrypt's limit."""
+        from modules.database import hash_password
+        return hash_password(password)
 
     def verify(self, plain_password: str, hashed_password: str) -> bool:
-        """Verify a password"""
-        return _bcrypt.checkpw(
-            plain_password.encode("utf-8"),
-            hashed_password.encode("utf-8"),
-        )
+        """Verify a password. False -- never raises -- on a bad hash."""
+        from modules.database import verify_password
+        return verify_password(plain_password, hashed_password)
 
     def check_strength(self, password: str) -> Dict[str, Any]:
         """Check password strength"""
@@ -88,11 +94,19 @@ class PasswordManager:
             "special": any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in password),
         }
         score = sum(checks.values())
+        # Length is a hard requirement, not one vote among five.
+        #
+        # The rule used to be `score >= 4`, so a password could fail the LENGTH
+        # check and still pass: "aA1!" (4 characters) scored 4/5 and was
+        # accepted. Nothing exploitable shipped because RegisterRequest also
+        # enforces min_length=8, but that made this a second, weaker gate that
+        # a caller reaching UserManager directly would fall through.
+        valid = checks["length"] and score >= 4
         return {
-            "valid": score >= 4,  # At least 4/5 checks
+            "valid": valid,
             "score": score,
             "checks": checks,
-            "message": "Strong" if score >= 4 else "Weak - add more character types"
+            "message": "Strong" if valid else "Weak - add more character types",
         }
 
 
@@ -146,17 +160,23 @@ class JWTManager:
         
         return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
 
-    def create_refresh_token(self, data: Dict[str, Any]) -> str:
-        """Create refresh token (longer expiration)"""
+    def create_refresh_token(self, data: Dict[str, Any], generation: int = 0) -> str:
+        """Create refresh token (longer expiration).
+
+        ``generation`` is stamped into the token as ``gen``. Rotation increments
+        the user's generation, which retires every token carrying a lower value -
+        that is what makes a refresh token single-use without a growing denylist.
+        """
         to_encode = data.copy()
         expire = datetime.now(timezone.utc) + timedelta(days=self.refresh_expire_days)
-        
+
         to_encode.update({
             "exp": expire,
             "iat": datetime.now(timezone.utc),
             "type": "refresh",
+            "gen": int(generation),
         })
-        
+
         return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
 
     def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
@@ -172,12 +192,112 @@ class JWTManager:
         except JWTError:
             return None
 
+    @staticmethod
+    def generation_of(payload: Optional[Dict[str, Any]]) -> int:
+        """The `gen` claim, defaulting to 0.
+
+        Tokens issued before rotation existed carry no `gen`. Treating them as
+        generation 0 keeps them working until the user's first rotation, instead
+        of signing everyone out on deploy.
+        """
+        if not payload:
+            return 0
+        try:
+            return int(payload.get("gen", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def is_stale_refresh(self, payload: Optional[Dict[str, Any]]) -> bool:
+        """True when this refresh token has been rotated away.
+
+        One definition, used by BOTH paths that can turn a refresh token into an
+        access token: ``/auth/refresh`` and the identity middleware. That is the
+        point - checking only one of them would leave the other as a bypass.
+        """
+        if not payload or payload.get("type") != "refresh":
+            return True
+        user_id = payload.get("sub")
+        if not user_id:
+            return True
+        current = await token_generations.get(str(user_id))
+        return self.generation_of(payload) < current
+
     def get_user_id_from_token(self, token: str) -> Optional[str]:
         """Extract user ID from token"""
         payload = self.verify_token(token)
         if payload:
             return payload.get("sub")
         return None
+
+
+
+class TokenGenerationStore:
+    """Per-user refresh-token generation, the basis of rotation.
+
+    Why a counter and not a denylist of dead tokens: a JWT cannot be revoked, so
+    "this token is still valid" has to be decided by state the server owns. A
+    token carries `gen`; the store holds the current generation per user. Any
+    token whose `gen` is below the stored value is dead - one read per check, and
+    the state is bounded by the number of users rather than by the number of
+    tokens ever issued.
+
+    Where the state lives: Redis when configured (so several API replicas agree,
+    exactly like the brute-force store), otherwise this process. The in-process
+    fallback is honest about its limit - a restart forgets every generation, so
+    tokens issued before the restart become valid again (they still expire on
+    their own `exp`). That is the same trade-off `redis_store` makes everywhere
+    else in this codebase, and it is stated here rather than left to be found.
+
+    A fresh user has no entry, which means generation 0 - so this adds no write
+    on the login path.
+    """
+
+    REDIS_KEY = "llama:token_generation"
+
+    def __init__(self) -> None:
+        self._generations: Dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    async def get(self, user_id: str) -> int:
+        """Current generation for a user (0 when unknown). Saturates on Redis errors:
+        a failure here must not lock a legitimate user out of their own session."""
+        from modules import redis_store
+        if redis_store.is_configured():
+            try:
+                raw = await redis_store.get_json(f"{self.REDIS_KEY}:{user_id}")
+                if raw is not None:
+                    return int(raw)
+            except Exception as _e:  # noqa: BLE001 - fall back, never lock out
+                from modules.silent import degrade
+                degrade("refresh-token generation not read from redis (local used)", _e)
+        with self._lock:
+            return self._generations.get(user_id, 0)
+
+    async def bump(self, user_id: str) -> int:
+        """Invalidate every refresh token issued for this user so far.
+
+        Returns the new generation. Written locally *and* to Redis so a replay on
+        another replica sees it too.
+        """
+        with self._lock:
+            nxt = self._generations.get(user_id, 0) + 1
+            self._generations[user_id] = nxt
+        from modules import redis_store
+        if redis_store.is_configured():
+            try:
+                await redis_store.set_json(f"{self.REDIS_KEY}:{user_id}", nxt, ttl=0)
+            except Exception as _e:  # noqa: BLE001 - local value still authoritative here
+                from modules.silent import degrade
+                degrade("refresh-token generation not written to redis (local only)", _e)
+        return nxt
+
+    def reset(self) -> None:
+        """Test hook: drop the local mirror."""
+        with self._lock:
+            self._generations.clear()
+
+
+token_generations = TokenGenerationStore()
 
 
 jwt_manager = JWTManager()
@@ -211,6 +331,18 @@ class UserManager:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Password too weak: {strength['message']}"
             )
+
+        # bcrypt hashes at most 72 bytes and raises beyond that. Catch it here,
+        # where the message can reach the user, rather than letting it become
+        # the generic 500 the old code returned for any long password.
+        from modules.database import BCRYPT_MAX_BYTES, password_bytes
+        try:
+            password_bytes(password)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
 
         async with self.db.session() as session:
             # Check if username exists
@@ -299,9 +431,19 @@ class UserManager:
             }
 
     async def refresh_token(self, refresh_token: str) -> Dict[str, str]:
-        """Get new access token using refresh token"""
+        """Rotate a refresh token and mint a new access token.
+
+        Rotation: the presented token must be at the user's current generation,
+        and the response carries a token at the *next* one. The presented token
+        is therefore dead from the moment it is used - a replay gets 401 even
+        though its signature and `exp` are still fine.
+
+        A replayed token is treated as an authentication failure, not a warning:
+        it means either a replay attack or a stolen cookie, and in both cases the
+        right response is to refuse and let the owner log in again.
+        """
         payload = jwt_manager.verify_token(refresh_token)
-        
+
         if not payload or payload.get("type") != "refresh":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -309,10 +451,32 @@ class UserManager:
             )
 
         user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token"
+            )
+
+        # Already rotated (replay, or a second browser racing the first).
+        if await jwt_manager.is_stale_refresh(payload):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token has already been used"
+            )
+
+        # Retire everything at or below this generation, then issue the next one.
+        # A token issued before rotation existed has no `gen` and is generation 0,
+        # so the first rotation retires it too.
+        new_generation = await token_generations.bump(str(user_id))
+
         new_access_token = jwt_manager.create_access_token(data={"sub": user_id})
+        new_refresh_token = jwt_manager.create_refresh_token(
+            data={"sub": user_id}, generation=new_generation
+        )
 
         return {
             "access_token": new_access_token,
+            "refresh_token": new_refresh_token,
             "token_type": "bearer",
         }
 
@@ -513,10 +677,16 @@ async def authenticate_user(
     Try JWT first, then API key
     Allows clients to use either authentication method
     """
-    # Try JWT token
+    # Try JWT token.
+    #
+    # Only ACCESS tokens authenticate a request. A refresh token is a valid,
+    # differently-typed JWT with a 7-day life; without the type check it was
+    # accepted here as a bearer credential, so a stolen refresh token bought
+    # 7 days of access instead of 30 minutes. get_current_user() already
+    # checked this -- this path was the one that did not.
     if credentials:
         payload = jwt_manager.verify_token(credentials.credentials)
-        if payload:
+        if payload and payload.get("type") == "access":
             user_id = payload.get("sub")
             if user_id:
                 user = await user_manager.get_user(user_id)

@@ -52,6 +52,7 @@ nightly path is unchanged.
 
 from __future__ import annotations
 
+from modules.silent import degrade
 import hashlib
 import json
 import logging
@@ -154,8 +155,9 @@ class Recording:
                         continue
                     try:
                         row = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue          # a torn last line from a killed run
+                    except json.JSONDecodeError as _e:
+                        degrade("torn last line from a killed run (skipped)", _e)
+                        continue
                     if "key" in row:
                         store[row["key"]] = row.get("value")
         manifest = os.path.join(self.directory, MANIFEST_NAME)
@@ -163,8 +165,8 @@ class Recording:
             try:
                 with open(manifest, "r", encoding="utf-8") as fh:
                     self.run_date = self.run_date or json.load(fh).get("run_date", "")
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, json.JSONDecodeError) as _e:
+                degrade("recording manifest unreadable (run_date left unset)", _e)
 
     def _append(self, kind: str, key: str, value: Any) -> None:
         with self._lock:
