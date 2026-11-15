@@ -298,10 +298,12 @@ assert the target exists before relying on it.
 1. **`lifespan` (13 missing lines).** Database-down, OptimizedRAG fallback and the
    uploads re-index are covered; what remains is the baseline alert sweep and the
    success-path prints.
-2. **WebSocket ticket lifecycle (28 lines).** Issue → consume → replay. A ticket
-   that can be consumed twice is an auth hole, and nothing checks it.
-3. **Error branches (~90 lines).** Lowest value. These mostly convert an
+2. **Error branches (~90 lines).** Lowest value. These mostly convert an
    exception into a 500 that is already logged.
+
+The WebSocket ticket lifecycle and the auth routes have both moved to **done**.
+What is left in `api.py` is the print-and-log layer of startup plus `except`
+bodies — the point where more coverage buys less than a test somewhere else.
 
 ## Open product decisions (not defects to fix unilaterally)
 
@@ -757,4 +759,89 @@ full suite (CI flags)       -> 1131 passed, 6 skipped, 1 xfailed
 api.py coverage             -> 73%   (was 71%)
 TOTAL (--cov=., CI gate 74) -> 87%
 flake8 on the new file      -> 0
+```
+
+## The WebSocket ticket: the Redis branch and the token fallback
+
+A WebSocket ticket is a credential that travels in a **URL** (`?ticket=`), which
+is why it is single-use and lasts 60 seconds. `tests/test_ws_ticket.py` (9 tests,
+written in an earlier part) already proved the rule that matters most: **identity
+comes from the ticket, never from the path.** What it could not reach:
+
+```
+missing lines in the ticket block (1110-1215) : 10
+  -> the Redis branch of issue and consume
+  -> the `?token=` fallback of the WebSocket handshake
+```
+
+Both are covered now by `tests/test_ws_ticket_redis_and_token.py` (6 tests,
+against a fake `redis_store`). The block is at **0 missing lines**.
+
+### What was verified, not assumed
+
+| property | how it was checked |
+|---|---|
+| with Redis configured, the ticket is written **there**, not kept in memory | asserted the fake store has it *and* `_ws_tickets` does not |
+| a Redis ticket can be redeemed **exactly once** | three redemptions: record, `None`, `None` |
+| an unknown ticket is refused with WS `1008` | socket closed, code asserted |
+| `?token=` authenticates, and the **path is still ignored** | connected as `/ws/somebody-elses-id` with your own token; identity is yours |
+| an invalid token closes with `1008` | code and reason asserted |
+| the access-token **cookie** authenticates the socket | browsers cannot set headers on a handshake |
+
+`redis_store.pop_json` is `GETDEL` (atomic read-and-delete), so the replay
+protection is real rather than incidental. That is now asserted instead of
+inferred from a docstring.
+
+### A test that hung instead of failing — and two wrong fixes
+
+Sabotaging the `1008` close did not produce a red test. It produced a **run that
+sat until the command timed out at 300 seconds**. `ws.receive_text()` waits for a
+server that will never speak, and there is no failure to report because the test
+never reaches its assertion.
+
+A test that hangs is worse than no test: it blocks CI and says nothing. Two
+repairs failed before the third worked:
+
+1. `asyncio.wait_for(...)` around the receive — **does not work**. Starlette's
+   receive is a blocking call; the timeout never fires.
+2. A worker thread with a 5s ceiling — the assertion now fired, but the run
+   **still hung on teardown**, because the never-accepted socket kept the
+   `TestClient` portal alive.
+3. The same thread, plus closing the connection from the main thread in a
+   `finally` — assertion fails in ~2s and the process exits.
+
+The remaining caveat is stated rather than hidden: **in the sabotaged state the
+teardown still stalls**, because the socket was never handed a close frame. It is
+recorded here so the next person does not read that stall as a new bug.
+
+### Sabotage results
+
+| # | sabotage | caught by |
+|---|---|---|
+| W1 | tickets never written to Redis | `test_a_ticket_is_written_to_redis_when_it_is_configured` |
+| W2 | Redis redemption skipped | `test_a_redis_ticket_can_be_consumed_exactly_once` |
+| W3 | `?token=` no longer authenticates | `test_the_websocket_accepts_a_valid_access_token` |
+| W4 | invalid token no longer closes the socket | `test_an_invalid_token_closes_the_connection_with_1008` |
+
+**4 of 4 caught.** W4 is the one that first revealed the hang.
+
+### A process error worth recording
+
+Four times in this part a long-running command was interrupted and left
+`api.py` in a **sabotaged** state — once with a mutation still applied, three
+times with a hung test process. The fix was not more care in general: it was
+smaller commands, a `diff` against a backup after every sabotage, and one
+sabotage per invocation instead of a loop. Reaching for `pkill` and a restore
+after each step costs seconds; discovering later that a commit contains a
+sabotage costs a debugging session.
+
+### Measured after this part
+
+```
+tests/test_ws_ticket_redis_and_token.py -> 6 passed
+ticket block coverage                   -> 0 missing lines (was 10)
+full suite (CI flags)                   -> 1137 passed, 6 skipped, 1 xfailed
+api.py coverage                         -> 74%   (was 73%)
+TOTAL (--cov=., CI gate 74)             -> 87%
+flake8 on the new file                  -> 0
 ```

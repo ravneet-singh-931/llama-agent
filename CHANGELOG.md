@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-14) — the WebSocket ticket's Redis branch and token fallback
+
+- `tests/test_ws_ticket.py` (9 tests) proved that a socket takes its identity from
+  the ticket and never from the URL path. It could not reach the two branches a
+  deployment actually uses: **the Redis ticket store** (which is what lets a
+  ticket issued by one replica be redeemed by another) and **the `?token=`
+  fallback**. Both are now covered; the ticket block in `api.py` is at **0
+  missing lines** (was 10).
+- Verified rather than assumed: with Redis configured the ticket is written to
+  Redis and *not* kept in memory; a ticket redeems **exactly once** (three
+  attempts: record, `None`, `None` — `pop_json` is `GETDEL`, so the replay
+  protection is real); an invalid token closes the socket with `1008`; and
+  connecting to `/ws/somebody-elses-id` with your own token still gives *your*
+  identity.
+- **A test of mine hung instead of failing**, and fixing it took three attempts:
+  `ws.receive_text()` blocks forever when the server never closes, and
+  `asyncio.wait_for` does not interrupt it because starlette's receive is not a
+  cancellable await. It is now a worker thread with a 5s ceiling plus a
+  main-thread close in `finally`, so the sabotage fails in ~2s. Recorded in
+  `MY_ERRORS.md` #16, including the caveat that teardown still stalls in the
+  sabotaged state.
+- 4 of 4 sabotages caught. `api.py` coverage 73% → **74%**; full suite
+  **1137 passed, 6 skipped, 1 xfailed**.
+
 ### Added (2026-11-14) — the auth routes, and a refresh token that never dies
 
 - **`/auth/refresh` had never executed in any test.** `tests/test_auth.py` covers

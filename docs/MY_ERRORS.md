@@ -168,7 +168,7 @@ class name**, and check the wiring before raising the alarm.
 
 ## What these have in common
 
-Eight of the nine were **a check that appeared to pass**. Not a wrong answer — a
+Most of them were **a check that appeared to pass**. Not a wrong answer — a
 missing measurement that looked like a completed one.
 
 That is the same failure the audit found in the repository itself: tests that
@@ -329,3 +329,29 @@ the **response**: `set-cookie` must contain `access_token=`.
 **The rule.** When a component's job is to *produce or replace* something, assert
 that the new thing was produced. Asserting that the system still works afterwards
 tests everything except the component.
+
+## 16. I wrote a test that hangs instead of failing, and fixed it twice wrongly
+
+**What I did.** Tested that a WebSocket with an invalid token is closed with code
+`1008`, by calling `ws.receive_text()` and expecting a disconnect. Then I
+sabotaged the close to prove the test guarded it.
+
+**What happened instead.** The test did not fail. The **run sat until the command
+timed out at 300 seconds**. There was nothing to report, because `receive_text()`
+waits for a server that will never speak and the assertion is never reached. A
+test that hangs is worse than no test: it blocks the suite and proves nothing.
+
+**My first two fixes were also wrong.**
+
+1. `asyncio.wait_for(ws.receive_text(), timeout=2)` — the timeout never fires,
+   because starlette's receive is a blocking call, not a cancellable await.
+2. A worker thread with a 5s ceiling — the assertion now fired, but the process
+   **still hung on teardown**: the never-accepted socket kept the TestClient
+   portal alive.
+3. Thread plus a `finally` that closes the connection from the main thread —
+   fails in ~2s and the process exits.
+
+**The rule.** Any test that waits on I/O needs a bound, and the bound must be in
+whatever layer actually blocks. "It passed" and "it would fail if broken" are
+different claims, and only the second one needs a bounded failure to be worth
+anything.

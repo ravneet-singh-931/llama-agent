@@ -56,11 +56,11 @@ could fall and stay green while the build passed.
 
 **Fixed so far.** `--cov-fail-under=74` in CI, with the floor set 4 points below
 the measured value as a ratchet. `api.py` went
-**46% → 51% → 55.5% → 58.7% → 61.9% → 64.4% → 67% → 70% → 71% → 73%**. The order matters more than the
+**46% → 51% → 55.5% → 58.7% → 61.9% → 64.4% → 67% → 70% → 71% → 73% → 74%**. The order matters more than the
 number: conversations, `/chat/stream`, WebSocket/startup, then the agent and
 `@team` streaming bodies and the uploads re-index.
 
-**Still open.** `api.py` is 73%. The remaining gap is measured, not guessed —
+**Still open.** `api.py` is 74%. The remaining gap is measured, not guessed —
 see `COVERAGE_API.md`, including the correction that it is **not** "mostly error
 branches" (only 18% is).
 
