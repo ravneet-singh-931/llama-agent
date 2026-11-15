@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (2026-11-15) — the module that decides, not just the routes
+
+`api.py` reached 74% and was called done, which left `modules/security_hardening.py`
+at **67%** — a worse place to stop, because what remained there was defences
+rather than print statements. It is now **88%** (`tests/test_security_hardening.py`,
+29 tests).
+
+- **`CSRFProtection` is dead code.** Not imported by `api.py`, not called
+  anywhere, not tested. The app is still protected — by `samesite="lax"` on every
+  auth cookie (`api.py` 823, 967–984), which is the right defence for a
+  same-origin frontend and is explained in a comment there. Documented, not
+  changed; a guard test fails if someone later wires the class in, so it cannot
+  become "covered" without being exercised.
+- **Upload filenames have no length bound — measured.** A 300-character name
+  uploads successfully (200, file written); 5000 characters fail at 400, but from
+  Starlette's multipart parser, not from our validation. Most filesystems cap a
+  name at 255 **bytes**, so a multibyte name can overflow and surface as a 500
+  mid-upload. Recorded with the measurement; the test asserts current behaviour
+  and says to invert it when a limit is added.
+- **The traversal defence is over-determined.** Sabotage proved six of
+  `sanitize_filename`'s seven defensive lines can be removed without breaking
+  anything, and one is load-bearing: `lstrip(".")`, without which `.htaccess`
+  survives. Both facts are now tested.
+- Redis degradation is asserted rather than assumed: a lockout from one replica is
+  seen by another; a failed Redis read/write falls back to the local mirror and
+  never raises into a login request; `REDIS_URL` set with nothing listening still
+  locks out.
+
+**8 of 9 sabotages caught; the ninth survived correctly** (a redundant line).
+Full suite **1166 passed, 6 skipped, 1 xfailed**; TOTAL coverage **88%**.
+
+Three of my own errors recorded in `MY_ERRORS.md` #17–19: asserting a PII policy
+the code deliberately does not have, stubbing away the code under test, and
+building a sabotage that could not happen and briefly reporting it as a defect.
+
 ### Added (2026-11-15) — the documents that explain the project, not just its bugs
 
 The findings docs described **what was broken**. Nothing described **what the

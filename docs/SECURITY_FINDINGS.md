@@ -460,3 +460,155 @@ its own assertion because each fails silently and independently.
 **Not covered.** The Redis path (`pop_json`, `GETDEL` + transactional fallback) is
 atomic by construction but is not exercised here — Redis is not configured in
 tests, so only the in-memory path runs.
+
+
+---
+
+## Part B — `modules/security_hardening.py`: 67% → 88%
+
+`api.py` reached 74% and was declared done. Stopping there left the module that
+*makes the security decisions* at **67%**, which is a worse place to stop: what
+remains in `api.py` is mostly print statements, and what remained here was
+defences. `tests/test_security_hardening.py`, 29 tests.
+
+### Finding 1: `CSRFProtection` is dead code — and the app is still protected
+
+The class defines `generate_token`, `validate_token` and `cleanup_expired`,
+says "CSRF (Cross-Site Request Forgery) protection" in its docstring, and is:
+
+- **not imported by `api.py`**
+- **not called anywhere in the application**
+- **not called by any test** (zero references before this file)
+
+So the honest statement is that the app has **no CSRF token mechanism**. What it
+does have is `samesite="lax"` on every auth cookie (`api.py` 823, 967–984), which
+*is* the standard defence for a same-origin app: the frontend reaches the API
+through the Nginx/Next proxy on the same origin, so a cross-site form post does
+not carry the cookie. There is a comment at `api.py` 967 explaining exactly this
+reasoning, including why `secure` is conditional.
+
+**Status: documented, not changed.** Deleting a class or wiring it in is a
+product decision, and the current design is defensible. A guard test
+(`test_csrf_is_not_wired_into_the_app`) fails if someone starts using it, so the
+next person gets a signal instead of a false sense of coverage.
+
+**A second, smaller problem inside it:** `self.tokens` is never pruned except on
+a successful `validate_token` or an explicit `cleanup_expired()`, which nothing
+calls. It is unbounded — dead code today, a leak the moment it is wired up.
+
+### Finding 2: upload filenames have no length bound — measured
+
+`sanitize_filename` strips path traversal, separators, control characters, dot-tricks
+and reserved Windows names. It does **not** bound length. Measured through the real
+endpoint:
+
+```
+300-character filename  -> 200  "Added 1 chunks from aaaa..."   file written
+5000-character filename -> 400  "Invalid multipart data."       but from the PARSER
+```
+
+The 400 is not our validation — it is Starlette refusing the multipart part. So
+nothing in this codebase decides how long a filename may be.
+
+Why it matters: most filesystems cap a single name at **255 bytes**, and a
+multibyte character costs more than one byte, so a name under 300 *characters*
+can still exceed it. The failure would arrive as `OSError: File name too long`
+— a **500 during an upload**, not a clean rejection. ext4 happens to allow it
+today, which is why nothing broke and nobody noticed.
+
+This is recorded rather than fixed because a length limit is a product choice
+(truncate? reject? by bytes or characters?). The test asserts the *current*
+behaviour so it cannot change silently, and its failure message says to invert
+it when the gap closes.
+
+### Finding 3: the traversal defence is six layers deep — and one line is load-bearing
+
+Sabotage found this. Removing the `filename.replace("..", "")` line entirely
+breaks **no test**, and that is not a hole in the tests: the function is
+deliberately over-determined. Measured, removing one line at a time:
+
+| line removed | result |
+|---|---|
+| `os.path.basename` | still safe |
+| `replace("..", "")` | still safe — `\.{2,}` collapses dots anyway |
+| `replace("/", "")` | still safe — `[^\w\-.]` already maps `/` to `_` |
+| `replace("\\", "")` | still safe |
+| `re.sub` special chars | still safe |
+| `\.{2,}` collapse | still safe |
+| **`lstrip(".")`** | **`".htaccess"` survives — hidden file writable** |
+
+So six of seven are redundant *for these inputs* and one is critical. A new test
+(`test_hidden_files_cannot_be_written`) covers the critical line, and it is the
+two-test catch for sabotage S1b.
+
+This is worth stating plainly: **redundancy is good, but only if the tests target
+the outcome.** A test that asserted "the `..` replace ran" would have passed while
+the real defence was elsewhere.
+
+### Sabotage results
+
+| # | sabotage | result |
+|---|---|---|
+| S1 | `replace("..", "")` removed | **SURVIVED — correctly.** Redundant line; S1b covers the real one |
+| S1b | `lstrip(".")` removed | CAUGHT (two tests) |
+| S2 | lockout no longer escalates | CAUGHT |
+| S3 | Redis state ignored | CAUGHT |
+| S4 | local mirror never updated | CAUGHT |
+| S5 | lockout never reported | CAUGHT |
+| S6 | audit log unbounded | CAUGHT |
+| S7 | CSRF token replayable | CAUGHT |
+| S8 | expired CSRF token kept | CAUGHT |
+
+**8 of 9 mutations caught, 1 correctly survived.**
+
+### What was verified about degradation
+
+The Redis branch is the one a multi-replica deployment uses, and nothing reached
+it before. Now asserted:
+
+- a lockout recorded by **pod A is seen by pod B** (empty local mirror, shared
+  Redis) — without this, an attacker retries against a different replica and the
+  per-process counter never fills
+- a **failed Redis read or write degrades to the local mirror** and never
+  propagates into a login request
+- `REDIS_URL` set but **nothing listening** still locks out (the realistic
+  degraded deployment, not a synthetic exception)
+
+### Two of my own errors in this part
+
+**1. I invented the `AuditLogger` API.** I wrote `log.log_event(...)` and
+`log._trim()`. Neither exists; the real methods are `log_login_attempt`,
+`log_registration`, `log_file_upload`, `log_rate_limit_violation`,
+`log_suspicious_activity`, `log_tool_call`, and the bound is inside `_write_log`.
+Two tests failed and I read the source instead of the docstring.
+
+**2. I asserted a PII policy the code deliberately does not have.** I asserted
+that an email address was redacted out of the audit trail; it was not.
+`modules/pii.py` states the scope explicitly: SSNs and Luhn-valid card numbers
+are redacted, and *"names, addresses, emails and phone numbers are deliberately
+left alone, because redacting them would destroy the usefulness of the logs and a
+regex cannot reliably tell a name from a noun"*. **The code was right and my test
+was wrong.** Rewritten to assert what is actually promised, and the Luhn
+behaviour is now covered too (an ordinary 16-digit id is not mangled).
+
+**3. I stubbed away the code under test.** The first version of the bounded-log
+test replaced `_write_log` with a lambda that did the trimming itself — so it
+asserted that *my stub* trimmed a list and could never fail for the real code.
+Found by reading it back before committing; rewritten to run the real
+`_write_log` and stub only its two side effects (file, Redis).
+
+**4. I built a sabotage that could not happen.** An early probe replaced
+`_get_redis` with a function that *raises*, printed `RAISED: ConnectionError`,
+and I briefly reported a defect. The real `_get_redis` catches everything and
+returns `None` — my stub produced a shape the real function cannot produce. The
+correct probe sets `REDIS_URL` to a dead port; that one passes.
+
+### Measured after this part
+
+```
+tests/test_security_hardening.py       -> 29 passed
+security_hardening.py coverage         -> 88%   (was 67%)
+full suite (CI flags)                  -> 1166 passed, 6 skipped, 1 xfailed
+TOTAL (--cov=., CI gate 74)            -> 88%
+sabotage                               -> 8/9 caught, 1 correctly survived
+```

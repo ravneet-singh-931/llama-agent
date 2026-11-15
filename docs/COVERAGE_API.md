@@ -295,15 +295,26 @@ assert the target exists before relying on it.
 
 ## What is still untested, in priority order
 
-1. **`lifespan` (13 missing lines).** Database-down, OptimizedRAG fallback and the
-   uploads re-index are covered; what remains is the baseline alert sweep and the
-   success-path prints.
-2. **Error branches (~90 lines).** Lowest value. These mostly convert an
-   exception into a 500 that is already logged.
+`api.py` is **no longer the interesting gap**. It sits at 74%, and what remains
+is the print-and-log layer of startup plus `except` bodies. The security
+primitives were at 67% and are now **88%** (`SECURITY_FINDINGS.md`, part B) —
+that was a better use of the time than the last 26% of `api.py`.
 
-The WebSocket ticket lifecycle and the auth routes have both moved to **done**.
-What is left in `api.py` is the print-and-log layer of startup plus `except`
-bodies — the point where more coverage buys less than a test somewhere else.
+What is left, by measured coverage:
+
+| module | coverage | why it is or is not worth it |
+|---|---:|---|
+| `modules/advanced_rag.py` | 28% | Retrieval quality — wrong answers, not crashes |
+| `modules/mcp_client.py` | 36% | Live MCP calls never exercised end to end |
+| `mcp_agents_server.py` | 52% | Server side of the same path |
+| `modules/cicd_improvements.py` | 56% | Feature flags |
+| `modules/websocket.py` | 62% | Real-time chat |
+| `modules/pg_store.py` | 66% | **Real Postgres path** — tests use SQLite |
+| `modules/rag.py` | 67% | The baseline RAG |
+| Frontend | **0 of 34 `.tsx`** | Deferred by the owner, deliberately |
+
+`api.py`'s remaining ~328 lines: ~90 `except` bodies, ~13 `lifespan` prints, ~225
+scattered helpers and rare branches. Roughly **13 lines are worth covering.**
 
 ## Open product decisions (not defects to fix unilaterally)
 

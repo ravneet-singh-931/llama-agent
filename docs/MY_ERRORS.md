@@ -166,6 +166,58 @@ class name**, and check the wiring before raising the alarm.
 ---
 
 
+## 17. I asserted a policy the code deliberately does not have
+
+**What I did.** Tested that an audit-trail entry had its PII redacted, and asserted
+the user's **email address** was gone. It failed: `contact bob@example.com or
+[REDACTED]`.
+
+**What I did next was the mistake.** My first instinct was that the redactor had a
+bug. Reading `modules/pii.py` showed the opposite: SSNs and Luhn-valid card
+numbers are redacted, and *names, addresses, emails and phone numbers are
+deliberately left alone* — the module says why ("redacting them would destroy the
+usefulness of the logs and a regex cannot reliably tell a name from a noun").
+
+**Why it matters.** I had written a test from what I assumed a security module
+*should* do, then would have "fixed" production code to match my assumption. A
+test that encodes a preference is not a test; it is an opinion with a failure
+message attached. The rule: read the stated scope before asserting on behaviour,
+and when a test fails, consider that the test may be the wrong one.
+
+---
+
+## 18. I stubbed away the code under test and called it covered
+
+**What I did.** To avoid touching disk, I replaced `_write_log` with a lambda that
+appended to the list *and did the trimming itself*. The test then asserted the
+list was bounded — testing my stub, not `_write_log`. It could never have failed
+for the real code.
+
+**How I found it.** Reading the test back before committing, not by a tool.
+
+**The rule.** Stub the *edges* (a file, a socket, a clock), never the *subject*.
+If a stub has to contain the logic you are checking, the thing you are checking
+is missing.
+
+---
+
+## 19. I built a sabotage that could not happen and reported a defect
+
+**What I did.** Probed the brute-force degradation path by replacing
+`_get_redis` with a function that raises `ConnectionError`. It raised, I saw
+`RAISED: ConnectionError`, and I briefly reported "brute-force protection crashes
+when Redis is down".
+
+**What was actually true.** The real `_get_redis` wraps everything in
+`try/except` and returns `None`. My stub produced a return shape the real function
+*cannot* produce. The correct probe — set `REDIS_URL` to a dead port — locks out
+normally.
+
+**The rule.** A stub must be able to exist. If the fake behaves in a way the real
+implementation cannot, the experiment measures the fake.
+
+---
+
 ## What these have in common
 
 Most of them were **a check that appeared to pass**. Not a wrong answer — a
