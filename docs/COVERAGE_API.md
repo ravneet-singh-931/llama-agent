@@ -311,7 +311,7 @@ What is left, by measured coverage:
 | ~~`modules/websocket.py`~~ | **96%** | **Done** — part E. The server is live; the frontend never calls `getWsUrl` |
 | ~~`modules/pg_store.py`~~ | **92%** | **Done** — the SQL paths had never been executed; see `SECURITY_FINDINGS.md` part C |
 | ~~`modules/rag.py`~~ | **71%** | **Done** — owner isolation, caching, filename ranking |
-| Frontend | **0 of 34 `.tsx`** | Deferred by the owner, deliberately |
+| Frontend | **0 of 34 `.tsx`** | **Out of scope by the owner's decision** — this repository demonstrates backend and LLMOps, not UI |
 
 `api.py`'s remaining ~328 lines: ~90 `except` bodies, ~13 `lifespan` prints, ~225
 scattered helpers and rare branches. Roughly **13 lines are worth covering.**

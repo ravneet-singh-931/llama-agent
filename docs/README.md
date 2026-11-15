@@ -66,5 +66,6 @@ caught and corrected:
   verified before that decision.
 - **Deploy to staging/production** — the jobs are skipped on purpose while work
   goes elsewhere. They are not broken. See `CI_FINDINGS.md` #7.
-- **Frontend tests** — currently **0 across 34 `.tsx` files**. Deferred, not
-  forgotten. It is the single largest remaining gap.
+- **Frontend tests** — **0 across 34 `.tsx` files**, and **out of scope by the
+  owner's decision**: this repository is presented for its backend and LLMOps
+  work, not its UI. Recorded rather than left as an implied gap.

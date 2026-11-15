@@ -152,7 +152,7 @@ class name.**
 | `api.py` | Split partially (5 commits), remaining split deferred, 55.5% covered |
 | `evals/` | 19 findings, all with proof |
 | `k8s/` | Out of scope by decision; `KUBERNETES_CHECKS.md` records what was verified |
-| `frontend/` | **0 tests across 34 `.tsx` files** — the largest open gap |
+| `frontend/` | **0 tests across 34 `.tsx` files** — out of scope by the owner's decision |
 | `scripts/`, `config/` | Audited, correct |
 
 ---
@@ -239,7 +239,8 @@ See [`ROADMAP.md`](ROADMAP.md). Current order:
 1. `/chat/stream` — 133 uncovered lines, the path every user touches
 2. WebSocket ticket lifecycle — a re-usable ticket would be an auth hole
 3. `lifespan` failure paths — startup with the database down
-4. **Frontend tests — 0 across 34 files.** Deferred by decision, largest gap.
+4. **Frontend tests — 0 across 34 files.** Out of scope by the owner's decision
+   (backend/LLMOps presentation). If that changes, this is the largest gap.
 
 ## The numbers, as of this document
 
@@ -249,5 +250,5 @@ See [`ROADMAP.md`](ROADMAP.md). Current order:
 | `api.py` coverage | **74%** (was 46% when this audit started) |
 | Repo coverage (CI scope `--cov=.`) | **89%**, gate at **85** |
 | Test files | 67 |
-| Frontend tests | **0 across 34 `.tsx` files** |
+| Frontend tests | **0 across 34 `.tsx` files** (out of scope by decision) |
 | CI | 7 jobs, all green; 3 deploy jobs skipped on purpose |

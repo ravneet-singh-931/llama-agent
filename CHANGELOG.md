@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Scope (2026-11-15) — frontend tests are out of scope, not deferred
+
+The owner's decision: this repository is presented for its **backend and LLMOps**
+work, so frontend behaviour tests leave the roadmap. Six documents called them
+"deferred", which reads as work someone forgot to pick up. They now say what they
+are: **out of scope by decision**, with the 0-of-34 number left in place — the
+number is still true, and hiding it would be the same failure this audit spent
+three days documenting.
+
+`ROADMAP.md` also gains a **"Where this stands"** section: scoped work finished,
+six items open *on purpose* with the reason next to each, and one warning worth
+having in writing — the nightlies run against `main`, where **none of this
+branch's 42 commits exist yet**, so a green nightly describes the pre-audit code.
+
+Also corrected: `AGENT_FINDINGS.md` said "5 fixed, 4 open" without saying the four
+are reasoned rather than pending. Latency (#6) is real engineering; #7 and #8 are
+prompt rules whose checks are already right; #9 is latent.
+
 ### Security (2026-11-15) — refresh-token rotation, and the bypass it exposed
 
 The last open item this audit had recorded as a **product decision**. The owner

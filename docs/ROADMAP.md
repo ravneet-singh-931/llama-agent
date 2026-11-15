@@ -20,12 +20,42 @@ proves the fix.
 
 ---
 
+## Where this stands, 2026-11-15 — read this before asking "is it done?"
+
+**Done means the work this audit scoped is finished.** It does not mean the system
+has no open questions, and this project's whole argument is that the difference
+should be written down rather than blurred. So, plainly:
+
+**Scoped work — finished.** Every row above except 15, which the owner has now put
+out of scope. Suite **1267 passed, 6 skipped, 0 xfailed** at **88.82%** against an
+85% gate; CI green on 7 jobs.
+
+**Open, and deliberately not fixed** — each one recorded with its reasoning in its
+own document:
+
+| # | Item | Why it stays open |
+|---|------|-------------------|
+| 1 | **Logout does not revoke the token** | Would sign out every other tab of the same user. One line to change; it is a behaviour decision, not a code gap. `SECURITY_FINDINGS.md`, Finding 16 |
+| 2 | **Citations are filenames, not evidence** (S4) | The honest fix is a per-claim entailment judge — and this project established it cannot validate a judge. Adding one to check grounding would repeat the central mistake. `SECURITY_FINDINGS.md` |
+| 3 | **`@team` latency 90–155 s** | Real work, but every agent step in the DAG is serial. Profiling first; a guessed fix would be noise. `AGENT_FINDINGS.md` #6 |
+| 4 | **JSON trailing commas; `fact-node-latest` date grounding** | Prompt rules, not code defects. The checks are correct to reject both. `AGENT_FINDINGS.md` #7–8 |
+| 5 | **`code-intervals` re-measurement** | The instrument was fixed; a past score is not re-scored by fixing the ruler. The next nightly re-measures it. It has *not* been claimed as fixed. `AGENT_FINDINGS.md` #5 |
+| 6 | **`llm_guard._tier_of` misclassification** | Latent: the only call site passes a Groq model, and both budgets default alike. `AGENT_FINDINGS.md` #9 |
+
+**The one thing to be careful about.** The nightly evals run against `main`, and
+**none of the 42 commits in this PR are on `main` yet** (verified 2026-11-15). So
+the nightly reports describe the *pre-audit* code. A green nightly is not evidence
+that this branch is healthy, and a nightly that finds nothing new is not evidence
+that the findings here are wrong.
+
+---
+
 ## Where the project stands
 
 | # | Part | Document | Findings | Status |
 |---|---|---|---|---|
 | 1 | **Eval harness** (2,717 lines) | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | **19** | ✅ **DONE** — plus record/replay, so a run is reproducible for 0 tokens |
-| 2 | **Agents** (5 specialists + team) | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | **5 fixed, 4 open** | ✅ **DONE** — the four open are real, listed in the document |
+| 2 | **Agents** (5 specialists + team) | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | **5 fixed, 4 known** | ✅ **DONE** — none of the four can bite a user today; see *Where this stands* below |
 | 3 | **Observability** (Prometheus/Grafana/Phoenix) | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | **4** | ✅ **DONE** — tracing overhead measured: ~5 µs/span |
 | 4 | **RAG** (`rag_optimizations` 1,703 lines — largest module) | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | ✅ **DONE** — retrieval table with three negative results, plus R6: the CI gate could not see the reranker |
 | 5 | **Security & multi-tenancy** (~1,900 lines, 5 modules) | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | **4** | ✅ **DONE** — S1 corrected the README in three places; S4 open and stated |
@@ -38,7 +68,7 @@ proves the fix.
 | 12 | **Database migrations** | [`MIGRATIONS.md`](MIGRATIONS.md) | 3 | ✅ **DONE** — verified on SQLite only, stated in the doc |
 | 13 | **End-to-end test** | [`E2E_JOURNEY.md`](E2E_JOURNEY.md) | 4 | ✅ **DONE** |
 | 14 | **`api.py` coverage** | [`COVERAGE_API.md`](COVERAGE_API.md) | 13 | 🟡 **PARTIAL** — 74%; `/chat` parity, MCP tool calls, the dashboard-counter fallback, the auth routes and the WebSocket ticket store all done; refresh-token rotation **implemented** (generation counter, enforced on both token paths); logout revocation remains a product decision; the remaining `api.py` gap is error branches, measured line by line (64 of 328 missing lines). `security_hardening.py` 67% → 88% and `pg_store.py` 66% → 92%, `mcp_client.py` 36% → 96%, `websocket.py` 62% → 96%, `rag.py` 71% in the same pass |
-| 15 | **Frontend tests** | — | — | ❌ **NOT STARTED — 0 tests across 34 `.tsx` files** |
+| 15 | **Frontend tests** | — | — | ⚪ **OUT OF SCOPE BY DECISION** — 0 tests across 34 `.tsx` files. The owner chose to demonstrate backend and LLMOps rather than UI; recorded, not hidden |
 
 Legend: ✅ done · 🟡 partial · ❌ not started · ⏸ waiting on a person
 
@@ -57,9 +87,11 @@ the original claims are not quietly rewritten:
 - **Row 14 is honest about being incomplete.** `api.py` is 74%. The gap is
   measured (588 lines, only 18% of them error handling), and the untested parts
   are named in priority order at the end of `COVERAGE_API.md`.
-- **Row 15 is the largest gap in the repository and is deferred by decision, not
-  by oversight.** 34 `.tsx` files, zero tests, and a CI job that typechecks and
-  builds them but verifies no behaviour.
+- **Row 15 is out of scope by decision, not an oversight.** 34 `.tsx` files, zero
+  tests, and a CI job that typechecks and builds them but verifies no behaviour.
+  The owner's call: this repository presents the backend and LLMOps work, so
+  frontend behaviour tests are not on the roadmap. Stated plainly so a reader is
+  not told the project verifies its UI when it does not.
 
 ---
 

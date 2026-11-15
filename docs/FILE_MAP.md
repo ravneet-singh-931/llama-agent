@@ -116,7 +116,8 @@ Next.js 16. 34 `.tsx` files, 6 routes:
 Six component groups under `src/components/`: `chat`, `landing`, `layout`,
 `markdown`, `providers`, `ui`.
 
-**No frontend tests exist.** Recorded, not hidden — see `COVERAGE_API.md`.
+**No frontend tests exist** — out of scope by the owner's decision (backend and
+LLMOps presentation). Recorded, not hidden — see `COVERAGE_API.md`.
 
 ---
 
