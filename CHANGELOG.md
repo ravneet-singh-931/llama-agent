@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (2026-11-15) — retrieval and the MCP client: a reachability map
+
+Three modules, and the most useful output is not coverage — it is knowing which
+code the application can actually reach.
+
+| | reachable from `api.py`? |
+|---|---|
+| `rag.py::SimpleRAG` | **yes** — built at startup, used by every document route |
+| `advanced_rag.py::ReRanker` | **yes** — via `rag_optimizations.py` 557 |
+| `advanced_rag.py::AdvancedRAG`, `SubQuestionEngine` | **no** — constructed nowhere |
+| `rag_optimizations.py::QueryDecomposer` | **no** — only used by `OptimizedRAG.query()`, which has no caller |
+
+**Finding: the query decomposer produces garbled sub-questions.** Measured:
+`"Compare the pricing and refund policy"` -> `"What is the the pricing?"` (double
+article) and `"Is it better to call the API and then wait?"` -> `"What is the
+then wait?"`. Three defects in ~15 lines: the trigger (`better`, `vs`, `best`…)
+is unrelated to the split (on `" and "`); the `f"What is the {x}?"` template
+double-counts an article; and `.rstrip("?")` is applied to a fragment rather than
+a sentence. It costs one model call per sub-question and `_combine_answers`
+renders them into the reply, so a user would read `**2. What is the then wait?**`.
+**Latent, not fixed** — `OptimizedRAG.query()` has no caller. Four tests pin the
+current output so wiring it up is a deliberate act.
+
+**Finding: `add_text` appends, `add_document` replaces.** Only `add_document` is
+used by the app, so this is not a defect today; pinned because routing uploads
+through `add_text` would silently double every re-upload.
+
+**Finding: `delete_document(owner=None)` removes every owner's copy** — measured
+and *deliberate* (`doc_scope.py`: "admin / maintenance use only"), and
+unreachable because `scoped()` always binds an owner. Pinned.
+
+**The MCP client had never been executed.** `test_mcp_tool_call.py` (16 tests)
+tests the route and patches `api.call_mcp_tool` wholesale, so 18 of the 28
+statements in `mcp_client.py` — the entire body of both functions — had never
+run. Now 36% -> **96%** (`test_mcp_client_protocol.py`, 12 tests), including every
+`getattr` default that turns an optional MCP field into a working response
+instead of a 500.
+
+`advanced_rag.py` stays at **31%**: its 200 uncovered statements are exactly the
+four classes nothing constructs. Raising it further would be effort spent proving
+that nothing calls nothing.
+
+**10/10 sabotages caught — but five of my first attempts were no-ops**, which is
+the more useful result (`MY_ERRORS.md` #21): two spaces added to a `getattr`, a
+mutated comment, a condition patched at the wrong line, and an owner-key change
+that preserved the behaviour. A "10/10" is only worth reporting if each mutation
+was checked for actually changing behaviour.
+
+Full suite **1212 passed, 6 skipped, 1 xfailed**; TOTAL **88%**.
+
 ### Security (2026-11-15) — the Postgres layer: no query had ever been executed
 
 `tests/test_pg_store.py` is 242 lines and 22 tests, and **every one of them ends

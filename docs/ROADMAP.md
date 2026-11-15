@@ -37,7 +37,7 @@ proves the fix.
 | 11 | **CI** (what it claimed vs what it ran) | [`CI_FINDINGS.md`](CI_FINDINGS.md) | 8 | ✅ **DONE** |
 | 12 | **Database migrations** | [`MIGRATIONS.md`](MIGRATIONS.md) | 3 | ✅ **DONE** — verified on SQLite only, stated in the doc |
 | 13 | **End-to-end test** | [`E2E_JOURNEY.md`](E2E_JOURNEY.md) | 4 | ✅ **DONE** |
-| 14 | **`api.py` coverage** | [`COVERAGE_API.md`](COVERAGE_API.md) | 13 | 🟡 **PARTIAL** — 74%; `/chat` parity, MCP tool calls, the dashboard-counter fallback, the auth routes and the WebSocket ticket store all done; one open product decision (refresh-token rotation); the remaining gap is error branches, measured line by line. `security_hardening.py` 67% → 88% and `pg_store.py` 66% → 92% in the same pass |
+| 14 | **`api.py` coverage** | [`COVERAGE_API.md`](COVERAGE_API.md) | 13 | 🟡 **PARTIAL** — 74%; `/chat` parity, MCP tool calls, the dashboard-counter fallback, the auth routes and the WebSocket ticket store all done; one open product decision (refresh-token rotation); the remaining gap is error branches, measured line by line. `security_hardening.py` 67% → 88% and `pg_store.py` 66% → 92%, `mcp_client.py` 36% → 96%, `rag.py` 71% in the same pass |
 | 15 | **Frontend tests** | — | — | ❌ **NOT STARTED — 0 tests across 34 `.tsx` files** |
 
 Legend: ✅ done · 🟡 partial · ❌ not started · ⏸ waiting on a person

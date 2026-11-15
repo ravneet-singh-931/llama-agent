@@ -304,13 +304,13 @@ What is left, by measured coverage:
 
 | module | coverage | why it is or is not worth it |
 |---|---:|---|
-| `modules/advanced_rag.py` | 28% | Retrieval quality — wrong answers, not crashes |
-| `modules/mcp_client.py` | 36% | Live MCP calls never exercised end to end |
+| ~~`modules/advanced_rag.py`~~ | **31%** | **Measured as dead code** — the 200 missing lines are four classes nothing constructs |
+| ~~`modules/mcp_client.py`~~ | **96%** | **Done** — the client's own logic had never run; only the route was tested |
 | `mcp_agents_server.py` | 52% | Server side of the same path |
 | `modules/cicd_improvements.py` | 56% | Feature flags |
-| `modules/websocket.py` | 62% | Real-time chat |
+| `modules/websocket.py` | 62% | Real-time chat — part E |
 | ~~`modules/pg_store.py`~~ | **92%** | **Done** — the SQL paths had never been executed; see `SECURITY_FINDINGS.md` part C |
-| `modules/rag.py` | 67% | The baseline RAG |
+| ~~`modules/rag.py`~~ | **71%** | **Done** — owner isolation, caching, filename ranking |
 | Frontend | **0 of 34 `.tsx`** | Deferred by the owner, deliberately |
 
 `api.py`'s remaining ~328 lines: ~90 `except` bodies, ~13 `lifespan` prints, ~225
@@ -855,4 +855,131 @@ full suite (CI flags)                   -> 1137 passed, 6 skipped, 1 xfailed
 api.py coverage                         -> 74%   (was 73%)
 TOTAL (--cov=., CI gate 74)             -> 87%
 flake8 on the new file                  -> 0
+```
+
+
+---
+
+## Part D — retrieval and the MCP client
+
+Three modules, and the most useful thing this part produced is a **reachability
+map**. Coverage said `advanced_rag.py` was at 28%; it said nothing about whether
+anyone could reach it.
+
+### What is live, and what is not
+
+| | reachable from `api.py`? | evidence |
+|---|---|---|
+| `modules/rag.py::SimpleRAG` | **yes** | built at startup, `api.py` 605 and every document route |
+| `modules/advanced_rag.py::ReRanker` | **yes** | imported by `rag_optimizations.py` 557 |
+| `modules/advanced_rag.py::AdvancedRAG` | **no** | constructed nowhere; only a docstring example |
+| `modules/advanced_rag.py::SubQuestionEngine` | **no** | no reference outside its own file |
+| `modules/rag_optimizations.py::QueryDecomposer` | **no** | only used by `OptimizedRAG.query()`, which has **no caller** |
+
+The last row is the important one. `QueryDecomposer` is on the *apparent*
+"advanced" path, but `api.py` builds `OptimizedRAG` (line 544) and then calls
+`get_context` on it — never `.query()`. So query decomposition, sub-questions,
+CRAG and the rest of the `query()` pipeline are **not reachable from the
+application**. The 200 uncovered statements in `advanced_rag.py` are exactly this:
+`PhoenixTracer` 62, `SubQuestionEngine` 58, `AdvancedRAG` 44,
+`RouterQueryEngine` 36. Coverage there measures dead code, and raising it further
+would be effort spent proving that nothing calls nothing.
+
+### Finding 6: the query decomposer produces garbled sub-questions (latent)
+
+Measured against the real `QueryDecomposer`:
+
+```
+Compare the pricing and refund policy
+  -> "What is the the pricing?"          double article
+  -> "What is the refund policy?"
+
+Is it better to call the API and then wait?
+  -> "What is the is it better to call the api?"    question mark stripped mid-fragment
+  -> "What is the then wait?"                       not a question at all
+```
+
+Three separate defects in ~15 lines:
+
+1. **The trigger and the split are unrelated.** It fires on any "complex
+   indicator" (`better`, `vs`, `all`, `best`, `both`…) and then splits on
+   `" and "` whether or not that "and" joins two topics.
+2. **The template double-counts the article**: `f"What is the {fragment}?"` where
+   the fragment already begins with "the".
+3. **`.rstrip("?")` is applied to a fragment**, not a sentence, so a mid-query
+   question mark is removed and the grammar breaks.
+
+The consequence is not cosmetic: `answer()` makes **one model call per
+sub-question** (2 calls instead of 1) and `_combine_answers` renders every
+sub-question into the reply, so the user would read
+`**2. What is the then wait?**` in their answer.
+
+**Status: recorded, not fixed.** It is unreachable today. Fixing it would be a
+change with no observable effect, and the same 15 lines are worth rewriting
+rather than patching when someone wires `query()` up. Four tests pin the current
+output so that wiring it in is a deliberate act.
+
+### Finding 7: `add_text` appends, `add_document` replaces
+
+The two ways to add content to `SimpleRAG` behave differently:
+
+- `add_document` removes any previous version of the same file **for that owner**
+- `add_text` has no replace logic at all — same `source` twice means duplicated chunks
+
+Only `add_document` is used by the application (`api.py` 605, `llama_agent1.py`
+495, `evals/rag_eval.py`), and nothing calls `add_text`, so this is not a defect
+today. It is pinned because routing uploads through `add_text` would silently
+double every re-upload and dilute retrieval, with no error.
+
+### Finding 8: `delete_document(owner=None)` removes every owner's copy
+
+Measured: two owners each with `x.txt`, `delete_document("x.txt")` returns 2 and
+both are gone. This is **documented, deliberate behaviour** — `doc_scope.py` says
+`owner=None` means "no filter (admin / maintenance use only)" — and it is **not
+reachable from the application**: `scoped()` always binds `owner=self.owner`
+(`doc_scope.py` 158). Pinned so that the moment a handler passes `None`, a test
+notices.
+
+### What the MCP client tests actually cover
+
+`tests/test_mcp_tool_call.py` (16 tests) tests the `/mcp/tools` **route** and
+patches `api.call_mcp_tool` wholesale. That is a reasonable thing to test and it
+is not the client: **18 of the 28 statements in `mcp_client.py` had never run.**
+The entire body of `get_mcp_status` and `call_mcp_tool` was unexecuted.
+
+`tests/test_mcp_client_protocol.py` (12 tests) drives both functions against a
+fake session. It matters because every field there is
+`getattr(..., default)` — the MCP spec leaves `serverInfo`, `tools`,
+`description` and `isError` optional, and a missing one without a default is a
+`500` for a server that is working fine. Now 36% → **96%**.
+
+### Sabotage results
+
+| # | sabotage | result |
+|---|---|---|
+| R1 | owner filter removed from reads | CAUGHT |
+| R2 | re-upload no longer replaces | CAUGHT (after I fixed my own line offset) |
+| R3 | filename no longer weighted 2x | CAUGHT |
+| R4 | fallback-to-all-documents removed | CAUGHT |
+| R5 | cache key no longer per-owner | CAUGHT |
+| M1 | `serverInfo` default removed | CAUGHT |
+| M2 | tool description default removed | CAUGHT |
+| M3 | absent `tools` key no longer tolerated | CAUGHT (after a real removal) |
+| M4 | text/image branches collapsed | CAUGHT |
+| M5 | `isError` default removed | CAUGHT |
+
+**10 of 10 caught** — but **five of my first attempts were not sabotages at
+all**, which is the more instructive result. See `MY_ERRORS.md` #21.
+
+### Measured after this part
+
+```
+tests/test_rag_retrieval.py            -> 21 passed
+tests/test_mcp_client_protocol.py      -> 12 passed
+rag.py coverage                        -> 71%   (was 67%)
+mcp_client.py coverage                 -> 96%   (was 36%)
+advanced_rag.py coverage               -> 31%   (was 28%) - 200 missing lines are dead code
+full suite (CI flags)                  -> 1212 passed, 6 skipped, 1 xfailed
+TOTAL (--cov=., CI gate 74)            -> 88%
+sabotage                               -> 10/10 caught, 5 first attempts were no-ops
 ```

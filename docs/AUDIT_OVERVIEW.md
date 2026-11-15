@@ -58,7 +58,8 @@ could fall and stay green while the build passed.
 the measured value as a ratchet. `api.py` went
 **46% → 51% → 55.5% → 58.7% → 61.9% → 64.4% → 67% → 70% → 71% → 73% → 74%** (`api.py`)
 **67% → 88%** (`modules/security_hardening.py`)
-**66% → 92%** (`modules/pg_store.py`). The order matters more than the
+**66% → 92%** (`modules/pg_store.py`)
+**36% → 96%** (`modules/mcp_client.py`). The order matters more than the
 number: conversations, `/chat/stream`, WebSocket/startup, then the agent and
 `@team` streaming bodies and the uploads re-index.
 

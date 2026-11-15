@@ -235,6 +235,49 @@ pinning a quarter of the contract and looks like it pins all of it.
 
 ---
 
+## 21. Five of my "sabotages" were not sabotages
+
+**What I did.** To prove the new tests had teeth I mutated the source and
+expected red. Five mutations "survived", and I nearly recorded five holes in my
+own tests.
+
+**What was actually true.** The mutations were no-ops:
+
+| mutation | why it changed nothing |
+|---|---|
+| `getattr(x, "tools", [])` -> `getattr(x, "tools", []  )` | I added two spaces. Literally nothing |
+| `if not (d["file"] == f and owner_match)` -> `if not (d["file"])` | every document has a file, so it still filtered everything this one file's docs |
+| line 172 patched at line 171 | I replaced the *loop body*, not the *condition*, so the real filter stayed |
+| `owner or ""` -> `owner or "x"` | still a distinct key per owner — the behaviour was preserved |
+| comment line rewritten | comments are not code |
+
+**The rule.** Before concluding "my test missed this", prove the sabotage
+changed behaviour. A mutation that cannot fail is not evidence about the test; it
+is only evidence about the mutation. I now hand-run the sabotaged behaviour
+against a direct call before trusting a SURVIVED verdict.
+
+Worth stating plainly: a sabotage matrix that reports 10/10 is easy to produce
+and nearly worthless if several entries were never sabotages. The number is only
+meaningful if each mutation was checked.
+
+---
+
+## 22. I asserted that `add_text` replaced a file, when it does not
+
+**What I did.** Wrote `test_re_adding_the_same_file_replaces_it_rather_than_duplicating`
+against `SimpleRAG.add_text` and got `2 == 1` failing.
+
+**What was true.** `add_document` replaces; `add_text` appends, always. Two
+different methods with two different contracts, and I assumed the name of neither
+and read neither. Nothing in the application calls `add_text`, so there was no
+bug to find — only a test asserting a contract that does not exist.
+
+**The rule.** Before asserting "re-adding replaces", check which method the
+application actually calls. Writing the test against the method I *guessed* would
+have produced a "bug report" for behaviour that was never promised.
+
+---
+
 ## What these have in common
 
 Most of them were **a check that appeared to pass**. Not a wrong answer — a
