@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Shipped (2026-11-15) — PR #50 merged into `main` as `920004d`
+
+42 commits. First `main` CI run (**43718717758**) is **10/10 green** — and it is
+the first run that *executes* the Docker and deploy jobs, which are gated on
+`refs/heads/main` and merely skipped on pull requests.
+
+That gap mattered: three days of green PRs never once ran those jobs. On `main`
+they execute, and the deploy jobs then **skip every step that touches a cluster**
+for want of a kubeconfig secret — a green job that deploys nothing. Both facts are
+now in `CI_FINDINGS.md`, which had said "skipped on every run" and was measuring
+only PRs.
+
+Evidence boundary, stated rather than rounded off: the Docker job **built** three
+images and its step reports success, but whether it **pushed** depends on a secret
+this environment cannot read (`gh secret list` → 403) and a registry it cannot
+reach (`hub.docker.com` → HTTP 000). "The build ran" is proven; "the image is
+published" is not.
+
 ### Scope (2026-11-15) — frontend tests are out of scope, not deferred
 
 The owner's decision: this repository is presented for its **backend and LLMOps**
