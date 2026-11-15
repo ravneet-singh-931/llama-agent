@@ -122,7 +122,20 @@ comparing two different measurements.
 ## 7. The deploy gate: three jobs that skip, on purpose
 
 **Symptom.** Two `Deploy` jobs and `Build & Push Docker` show as **skipped** on
-every run. A skipped run does not look like a green one.
+every *pull-request* run. A skipped run does not look like a green one.
+
+> **Corrected 2026-11-15, after merging.** This section said "skipped on every
+> run". That was measured on PRs and is wrong about `main`. Verified on run
+> **43718717758** (the merge of #50, `920004d`), all three jobs **execute**:
+> `if: github.ref == 'refs/heads/main'` for Docker, `if: github.ref ==
+> 'refs/heads/main'` for both deploy jobs. What they show on a PR is a *skip*,
+> which is why three days of green PRs never exercised them.
+>
+> On `main` the deploy jobs run and pass — but every step that touches the cluster
+> is **skipped** after "✅ Check deploy is configured", because no kubeconfig
+> secret exists. So the job is green while deploying nothing. That is the sharper
+> version of the original point: *green* and *deployed* are different claims, and
+> the run log is what separates them.
 
 **What I got wrong first.** I called the Docker job decorative. It is not. It
 **builds on every main push**; only the *push* is conditional
@@ -134,6 +147,16 @@ every run. A skipped run does not look like a green one.
 goes to other parts of the project, and the pipeline is tied to Kubernetes. This
 is **not broken**. It is a scope decision, and it is recorded in the workflow
 itself.
+
+**What the first `main` run after the merge proved, and what it did not.**
+Run **43718717758** (`920004d`): 10/10 jobs success. Docker **built** three
+images. Whether it **pushed** them depends on `secrets.DOCKER_USERNAME`
+(`push: ${{ secrets.DOCKER_USERNAME != '' }}`), and that cannot be checked from
+here — `gh secret list` returns 403 and `hub.docker.com` is unreachable from this
+environment (HTTP 000). The step *reports* success either way, because a
+`push: false` build is still a successful build. **So: "the build ran" is proven;
+"the image is on Docker Hub" is not.** That is the same distinction as everything
+else in this document — the step name is not the evidence.
 
 **One honest consequence, not acted on.** `k8s/api.yaml`, `k8s/frontend.yaml` and
 `k8s/mcp-server.yaml` pin the **moving tag** `:v7`, not a commit SHA. If the

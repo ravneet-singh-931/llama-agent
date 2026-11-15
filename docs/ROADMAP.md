@@ -42,11 +42,23 @@ own document:
 | 5 | **`code-intervals` re-measurement** | The instrument was fixed; a past score is not re-scored by fixing the ruler. The next nightly re-measures it. It has *not* been claimed as fixed. `AGENT_FINDINGS.md` #5 |
 | 6 | **`llm_guard._tier_of` misclassification** | Latent: the only call site passes a Groq model, and both budgets default alike. `AGENT_FINDINGS.md` #9 |
 
-**The one thing to be careful about.** The nightly evals run against `main`, and
-**none of the 42 commits in this PR are on `main` yet** (verified 2026-11-15). So
-the nightly reports describe the *pre-audit* code. A green nightly is not evidence
-that this branch is healthy, and a nightly that finds nothing new is not evidence
-that the findings here are wrong.
+**~~The one thing to be careful about.~~ Resolved 2026-11-15.** This section
+originally warned that the nightlies run against `main` while none of the work was
+there. **PR #50 is merged (`920004d`, 42 commits)** and the first `main` CI run
+(**43718717758**) is 10/10 green.
+
+Two consequences follow, and both are recorded rather than assumed:
+
+1. **The next nightly measures the audit's code for the first time.** Every
+   nightly before this one described the pre-audit code. It also re-measures
+   `code-intervals` — the score still listed as unverified above.
+2. **The deploy jobs ran and deployed nothing.** They are gated on
+   `refs/heads/main`, so PRs skipped them entirely; on `main` they execute and
+   then skip every cluster step for want of a kubeconfig. Green, but not deployed.
+   See `CI_FINDINGS.md`.
+
+The branch's own test evidence stands on its own regardless of any nightly: 1267
+passed, 6 skipped, 0 xfailed, 88.82% against an 85% gate.
 
 ---
 
