@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (2026-11-15) — the WebSocket manager and the MCP feature flag
+
+**A corrupt feature-flags file is silently overwritten with the defaults.** The
+fallback itself is right and well documented (a bad config must cost flags, not
+availability) — but `_apply_defaults()` ends with `_save_flags()`, so the
+half-written file that caused the failure is replaced. Because the built-in
+defaults ship `enable_mcp_agents: false` while `config/feature_flags.json` ships
+`true`, **a corrupt file switches MCP off for everyone** — `/mcp/status` and
+`/mcp/tools` return `404 "MCP agents disabled (feature flag)"` — and because the
+defaults are now persisted, a restart does not recover. The evidence of what went
+wrong is gone too. Recorded, not fixed: never writing on the failure path is a
+one-line change somebody should make deliberately.
+
+**A user override cannot rescue a user excluded by rollout.** `is_enabled`
+applies the rollout gate *before* the per-user overrides, so
+`rollout_percent: 0` with `user_overrides: {"vip": true}` returns `False` for
+`vip`. The override — whose entire purpose is "give this one customer the feature
+early" — does nothing during a rollout, which is the only time anyone would use
+it. Invisible with the shipped config (100%).
+
+Also pinned: `rollout_percent: 0` means "on for anonymous callers" (the check is
+skipped when no `user_id` is passed).
+
+**A malformed WebSocket frame closes the whole connection.** `from_json` runs
+inside the `try`, so one non-JSON frame produces an "Internal error" and a
+disconnect — measured: the heartbeat sent afterwards is never answered. A chat
+socket should reject the frame, not the session. Same for an unknown `type`.
+Latent: the frontend never opens a socket (`getWsUrl` at `api.ts:423` has no
+caller), so the server is live but unreached.
+
+Two latent bookkeeping leaks pinned: `connection_users` never shrinks while any
+connection remains (the comment claims the opposite), and `get_online_users()`
+reports a stale `connection_count`. Neither is used; `/ws/status` reads
+`connection_count`/`user_count`, which are computed and correct — verified.
+
+`websocket.py` 62% -> **96%** (24 tests). `cicd_improvements.py` stays at 56%:
+`ABTestManager` and `DeploymentManager` are instantiated nowhere in the
+repository, so covering them would prove nothing. `mcp_agents_server.py` stays at
+52% — it is a separate container and needs a live server and model; its client
+side is at 96%.
+
+**11/11 sabotages caught, each verified to change behaviour first** — the lesson
+from part D's five no-op sabotages. `MY_ERRORS.md` #23–24: I invented an enum
+member that does not exist, and built a "dead socket" that died during `connect`
+instead of during the broadcast.
+
+Full suite **1251 passed, 6 skipped, 1 xfailed**; TOTAL **89%**.
+
 ### Changed (2026-11-15) — retrieval and the MCP client: a reachability map
 
 Three modules, and the most useful output is not coverage — it is knowing which

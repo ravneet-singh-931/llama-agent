@@ -278,6 +278,36 @@ have produced a "bug report" for behaviour that was never promised.
 
 ---
 
+## 23. I invented an enum member
+
+**What I did.** Wrote `MessageType.BROADCAST` for a broadcast test. It does not
+exist — the enum has `CONNECT, DISCONNECT, CHAT, RESPONSE, TYPING, ERROR,
+HEARTBEAT, HISTORY, ONLINE_USERS, AGENT_STATUS`. Two tests failed with
+`AttributeError: BROADCAST`.
+
+**The rule.** I had read the class earlier in the same session and still wrote
+the name I expected rather than the one that was there. Reading a file once is
+not the same as consulting it while writing; for short, enumerable facts (enum
+members, field names, method signatures) the check is one grep and costs nothing.
+
+---
+
+## 24. My "dead socket" could not reach the code under test
+
+**What I did.** Built a `DeadWS` whose `send_text` always raises, to prove one
+bad socket does not break a broadcast for everyone. It failed for the wrong
+reason: `connect()` sends a welcome frame, so the socket died *during connect*
+and never got registered.
+
+**The fix.** Let it connect normally, then set `dead = True`, so the failure
+happens where a real socket dies — after it is in the manager.
+
+**The rule.** A fake that fails too early tests the wrong line. The same rule as
+#19 (a stub must be able to exist): the fake must fail *at the point the real
+thing fails*, or the experiment measures the fake.
+
+---
+
 ## What these have in common
 
 Most of them were **a check that appeared to pass**. Not a wrong answer — a

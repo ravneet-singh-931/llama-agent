@@ -306,9 +306,9 @@ What is left, by measured coverage:
 |---|---:|---|
 | ~~`modules/advanced_rag.py`~~ | **31%** | **Measured as dead code** — the 200 missing lines are four classes nothing constructs |
 | ~~`modules/mcp_client.py`~~ | **96%** | **Done** — the client's own logic had never run; only the route was tested |
-| `mcp_agents_server.py` | 52% | Server side of the same path |
-| `modules/cicd_improvements.py` | 56% | Feature flags |
-| `modules/websocket.py` | 62% | Real-time chat — part E |
+| `mcp_agents_server.py` | **52%** | Runs as a **separate container**; needs a live server + model. Client side is 96% |
+| `modules/cicd_improvements.py` | **56%** | Flags are **done** (`feature_flags` is live and tested); the missing 73 lines are `ABTestManager`/`DeploymentManager`, never instantiated |
+| ~~`modules/websocket.py`~~ | **96%** | **Done** — part E. The server is live; the frontend never calls `getWsUrl` |
 | ~~`modules/pg_store.py`~~ | **92%** | **Done** — the SQL paths had never been executed; see `SECURITY_FINDINGS.md` part C |
 | ~~`modules/rag.py`~~ | **71%** | **Done** — owner isolation, caching, filename ranking |
 | Frontend | **0 of 34 `.tsx`** | Deferred by the owner, deliberately |
@@ -982,4 +982,144 @@ advanced_rag.py coverage               -> 31%   (was 28%) - 200 missing lines ar
 full suite (CI flags)                  -> 1212 passed, 6 skipped, 1 xfailed
 TOTAL (--cov=., CI gate 74)            -> 88%
 sabotage                               -> 10/10 caught, 5 first attempts were no-ops
+```
+
+
+---
+
+## Part E — the WebSocket manager and the feature flags
+
+Two modules, and the first question for both was the same one this audit keeps
+asking: **is anything actually reaching this code?**
+
+### `modules/websocket.py` — live server, unwired client
+
+| | |
+|---|---|
+| served by `api.py`? | **yes** — `/ws/{user_id}` (1165), `/ws/status` (1217) |
+| opened by the frontend? | **no** — `getWsUrl` exists at `frontend/src/lib/api.ts:423` and **nothing calls it** |
+
+So the server is real and will serve anything that connects, but no page ever
+opens a socket. That is the frame for everything below: these are real defects in
+live code with no current UI path to them.
+
+### Finding 9: a corrupt flag file is overwritten with the defaults (live, dangerous)
+
+`_load_flags` is careful and well documented — a bad file must cost flags, not
+availability. It catches the exception, logs it, records `load_error`, and falls
+back to `_apply_defaults()`. Then `_apply_defaults()` ends with `_save_flags()`.
+
+Measured: a half-written `flags.json` is **replaced by the built-in defaults**.
+Three consequences:
+
+1. The operator loses the evidence of what went wrong.
+2. The defaults ship `enable_mcp_agents: **false**` while
+   `config/feature_flags.json` ships **true** — so a corrupt file silently turns
+   MCP off, and `/mcp/status` and `/mcp/tools` start returning `404 "MCP agents
+   disabled (feature flag)"` for everyone.
+3. Because the defaults have now been *persisted*, a restart does not recover: it
+   loads a valid file that says `false`.
+
+This is the worst kind of defect in this codebase's taxonomy: a control that
+works exactly as designed and produces the wrong outcome. Recorded, not fixed —
+whether to overwrite a config file on a load error is a deployment decision, and
+"never write on the failure path" is a one-line change someone should make
+deliberately.
+
+### Finding 10: a user override cannot rescue a user excluded by rollout
+
+`is_enabled` checks the rollout gate **before** the per-user overrides:
+
+```
+if rollout_percent < 100 and user_id:
+    if user_hash >= rollout_percent: return False      <-- returns here
+if user_id and user_id in user_overrides: ...          <-- never reached
+```
+
+Measured: `rollout_percent: 0` with `user_overrides: {"vip-user": true}` returns
+**False** for `vip-user`. So "give this one customer the feature early" — the
+entire purpose of the override — does not work during a rollout, which is the
+only time anyone would use it. At `rollout_percent: 100` the override works
+fine, which is why this has never been noticed: the shipped config is 100.
+
+### Finding 11: `rollout_percent: 0` means "on for anonymous callers"
+
+The rollout check is skipped when `user_id is None`, so the flag falls through to
+`return True`. `0` therefore reads as "off for everyone identified, on for
+everyone else" — the opposite of what "0%" says. Measured and pinned.
+
+### Finding 12: a malformed frame closes the whole connection
+
+`WSMessage.from_json(data)` is called **inside** the `try` in
+`handle_connection`, whose `except Exception` sends an `"Internal error"` frame
+and returns. Measured: a client that sends one non-JSON frame gets an error and
+is disconnected — the heartbeat sent afterwards is never answered.
+
+A chat socket should reject the **frame**, not the **session**. Same root cause
+for `{"type": "nonsense"}`: `MessageType(...)` raises `ValueError`, which is
+caught by the same handler.
+
+### Findings 13–14: two latent bookkeeping leaks
+
+- **`connection_users` never shrinks** while any connection remains. `disconnect`
+  only prunes it when the user has *no* connections left, and the comment says
+  the opposite ("other tabs of the same user stay mapped"). Measured: two tabs,
+  close one, both mappings remain. Nothing reads `connection_users` today.
+- **`get_online_users()` reports a stale `connection_count`** — the count is a
+  snapshot written at connect time and never updated, so after closing a tab it
+  still says 2. Nothing calls it.
+
+Neither is user-visible: `/ws/status` reads `connection_count` and `user_count`,
+which are **computed** from `active_connections` and are correct. So the endpoint
+does not lie — verified explicitly.
+
+Also pinned: `message_id` is written by `to_json` and never read by `from_json`,
+so a decoded message gets a new id. My first test asserted it survived; it does
+not.
+
+### What was NOT chased
+
+`cicd_improvements.py` stays at **56%**. The remaining 73 lines are
+`ABTestManager` (experiment assignment, metric rollup) and `DeploymentManager`
+(canary, rollback) — **neither is instantiated anywhere in the repository**, not
+even in a test. Covering them would be effort spent proving that nothing calls
+nothing, which is the same judgment made about `advanced_rag.py` in part D.
+
+`mcp_agents_server.py` stays at **52%**: it runs as a **separate container**
+(`mcp-server:8001`), and its 50 uncovered lines are inside `team_status`,
+`_run_agent` and `_run_collaborate`, which need a live server and a model. The
+client side of that path is now at 96% (part D); the server is exercised by
+`tests/test_mcp_server.py` at the level it can be without the container.
+
+### Sabotage results
+
+| # | sabotage | result |
+|---|---|---|
+| W1 | last tab never removes the user | CAUGHT |
+| W2 | welcome frame not sent | CAUGHT |
+| W3 | heartbeat answers something other than pong | CAUGHT |
+| W4 | empty chat reaches the agent | CAUGHT |
+| W5 | every WS user shares one conversation | CAUGHT |
+| W6 | history returns all 200 messages | CAUGHT |
+| W7 | agent runs as `guest` | CAUGHT |
+| F1 | unknown flags default to enabled | CAUGHT |
+| F2 | rollout gate removed | CAUGHT |
+| F3 | rollout hash always 0 | CAUGHT |
+| F4 | corrupt file not overwritten | CAUGHT |
+
+**11 of 11 caught**, and this time every mutation was verified to change
+behaviour before the result was accepted — the lesson from part D's five no-op
+sabotages.
+
+### Measured after this part
+
+```
+tests/test_websocket_manager.py        -> 24 passed
+tests/test_feature_flags.py            -> 15 passed
+websocket.py coverage                  -> 96%   (was 62%)
+cicd_improvements.py coverage          -> 56%   (unchanged - ABTest/Deployment unused)
+mcp_agents_server.py coverage          -> 52%   (separate container; needs a live server)
+full suite (CI flags)                  -> 1251 passed, 6 skipped, 1 xfailed
+TOTAL (--cov=., CI gate 74)            -> 89%
+sabotage                               -> 11/11 caught, each verified first
 ```
