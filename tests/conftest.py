@@ -125,7 +125,12 @@ def journey(tmp_path, monkeypatch):
     async def _fake_agent(message, **kw):
         return f"echo: {message}"
 
-    async def _fake_stream(message, **kw):
+    # run_agent_stream is a plain *sync* generator: the streaming route drives it
+    # through `aiter_in_thread`, which iterates it on a worker thread. An
+    # `async def` fake yields an async generator, and `for item in <async
+    # generator>` is a TypeError - so this fixture made every test that reached
+    # the general streaming path fail, and silently left that path untested.
+    def _fake_stream(message, **kw):
         yield "echo: "
         yield message
 

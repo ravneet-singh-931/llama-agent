@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-11-14) — `/chat` and `/chat/stream` disagreed, and "hello" was eating real questions
+
+- **Four divergences between the two chat routes**, each measured before it was
+  fixed. The chat box calls `/chat/stream`; `/chat` is the other implementation of
+  the same interface. `remember` accepted three forms on one route and only `=`
+  on the other, so the route users were on **refused two of the three forms its
+  own usage text advertises**. `recall my name` resolved to `user's name` on
+  `/chat` only. A failed `recall` was prefixed with a checkmark
+  (`"✅ nothing-here: I don't remember..."`) because `FactMemory.recall()` returns
+  a *truthy message string* on a miss, not `None`. And `/chat/stream` had no
+  greeting branch at all. Each behaviour now has one shared helper
+  (`_parse_remember`, `_parse_recall_key`, `_recall_reply`, `_is_greeting`) and
+  `tests/test_chat_route_parity.py` posts the same message to both routes.
+- **The greeting check was a raw substring test**, so any message containing the
+  letters `hi`, `yo` or `sup` was answered with "Hello! How can I help you
+  today?" instead of being answered: `can you help me write a function`,
+  `do you know python`, `explain this code to me` and `summarise this week` all
+  hit it, and the model was never called. Matching is now whole-word and
+  whole-message, so `hi there` still greets and `hi, write me a function` does not.
+- **The streaming greeting yields to an explicit agent choice.** The first version
+  of the branch ran before the UI override, so picking "Coder Agent" and typing
+  `hello` returned the canned greeting and the agent never executed. Caught by an
+  existing `test_multitenancy` test.
+- **`tests/conftest.py` faked `run_agent_stream` with `async def`**, but the real
+  function is a sync generator consumed on a worker thread. Iterating an async
+  generator there is a `TypeError`, so every journey test that reached the general
+  streaming path failed — and that path was therefore untested by the fixture.
+- 31 new tests; 8 of 8 sabotages caught by a named test. `api.py` coverage
+  64.4% → **67%**; full suite **1101 passed, 6 skipped**.
+
 ### Added (2026-11-14) — the agent and @team streaming bodies, and the startup re-index
 
 - `test_chat_slo_metrics.py` posted to `/chat/stream` with `agent=` and `@team`, but

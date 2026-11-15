@@ -37,7 +37,7 @@ proves the fix.
 | 11 | **CI** (what it claimed vs what it ran) | [`CI_FINDINGS.md`](CI_FINDINGS.md) | 8 | ✅ **DONE** |
 | 12 | **Database migrations** | [`MIGRATIONS.md`](MIGRATIONS.md) | 3 | ✅ **DONE** — verified on SQLite only, stated in the doc |
 | 13 | **End-to-end test** | [`E2E_JOURNEY.md`](E2E_JOURNEY.md) | 4 | ✅ **DONE** |
-| 14 | **`api.py` coverage** | [`COVERAGE_API.md`](COVERAGE_API.md) | 8 | 🟡 **PARTIAL** — 64.4%, remaining gap measured line by line |
+| 14 | **`api.py` coverage** | [`COVERAGE_API.md`](COVERAGE_API.md) | 9 | 🟡 **PARTIAL** — 67%; `/chat` done (31 parity tests, 4 divergences fixed), remaining gap measured line by line |
 | 15 | **Frontend tests** | — | — | ❌ **NOT STARTED — 0 tests across 34 `.tsx` files** |
 
 Legend: ✅ done · 🟡 partial · ❌ not started · ⏸ waiting on a person
@@ -54,7 +54,7 @@ the original claims are not quietly rewritten:
 - **Rows 10–13** each have a document that did not exist before: the silent
   exception handlers, the CI job that installed a different dependency set, the
   `create_all` trap that cannot add a column, and the first end-to-end test.
-- **Row 14 is honest about being incomplete.** `api.py` is 55.5%. The gap is
+- **Row 14 is honest about being incomplete.** `api.py` is 67%. The gap is
   measured (588 lines, only 18% of them error handling), and the untested parts
   are named in priority order at the end of `COVERAGE_API.md`.
 - **Row 15 is the largest gap in the repository and is deferred by decision, not

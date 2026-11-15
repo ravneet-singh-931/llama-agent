@@ -313,3 +313,159 @@ assert the target exists before relying on it.
 Line coverage counts executed lines. It does not know which lines decide **who is
 allowed to see what**. Ten tests over a `secure` handler are worth more than a
 hundred over an `except` block.
+
+## `/chat` — the non-streaming route, and the four divergences it was hiding
+
+`/chat` was the last large untested block: 67 lines, no behaviour tests at all.
+It is also a second implementation of an interface `/chat/stream` already had,
+and the frontend calls **both** (`frontend/src/lib/api.ts`: `chat()` posts
+`/chat`, `chatStream()` posts `/chat/stream`). The chat box uses the streaming
+one, so a defect on `/chat` was invisible to real users — and a defect on
+`/chat/stream` was invisible to the tests, because nothing compared the two.
+
+`tests/test_chat_route_parity.py` (31 tests) posts the **same message to both
+routes** and requires the same answer.
+
+### What was actually broken
+
+Measured on the same user, same message, before any change:
+
+| message | `/chat` | `/chat/stream` |
+|---|---|---|
+| `remember colour = blue` | Remembered | Remembered |
+| `remember food is pizza` | Remembered | **"Usage: remember key = value"** |
+| `remember my name is Ravi` | Remembered | **"Usage: remember key = value"** |
+| `recall my name` | reads `user's name` | **reads literal `"my name"` → nothing** |
+| `recall nothing-here` | `"✅ nothing-here: I don't remember..."` | `"I don't remember..."` |
+| `hi` | canned greeting | **no greeting branch at all — full model call** |
+
+So the route the chat box actually uses **refused two of the three `remember`
+forms its own usage text advertises**, could not recall a name it had just
+stored, and paid a model round-trip for "hi".
+
+### The fix that holds
+
+Four behaviours, one implementation each:
+
+| helper | replaces |
+|---|---|
+| `_parse_remember` | the `=`-only parser on `/chat/stream` vs three forms on `/chat` |
+| `_parse_recall_key` | `"my name"` → `user's name`, which only `/chat` did |
+| `_recall_reply` | the reply text, including the miss |
+| `_is_greeting` | a raw substring test, now used by both routes |
+
+### `recall` of a miss wears a success tick
+
+`FactMemory.recall()` does **not** return `None` on a miss. It returns the
+sentence `"I don't remember anything about '<key>'"` — a *truthy string*. So
+`if value:` in `/chat` always took the success path:
+
+```
+✅ nothing-here: I don't remember anything about 'nothing-here'
+```
+
+A checkmark on "I don't remember". The first version of `_recall_reply` that I
+wrote had **the same bug**, because I wrote `if value:` again. It was caught by
+sabotage, not by review (see S2 below).
+
+> A lookup need not return a falsy value on a miss. Read the store; don't assume.
+
+### `"you"` contains `"yo"`: the greeting hijack
+
+The greeting check was:
+
+```python
+elif any(g in request.message.lower() for g in greetings):
+    response = "Hello! How can I help you today?"
+```
+
+A **raw substring test**. The greeting list contains `hi`, `yo` and `sup`, so any
+message containing those two letters — not those words — was answered with the
+canned greeting *instead of being answered at all*:
+
+| message | answered with |
+|---|---|
+| `can you help me write a function` | "Hello! How can I help you today?" |
+| `do you know python` | "Hello! How can I help you today?" |
+| `explain this code to me` | "Hello! How can I help you today?" |
+| `summarise this week` | "Hello! How can I help you today?" |
+
+`this`, `think`, `while`, `machine`, `your`, `support` all trigger it. The model
+was never called. `_is_greeting` matches whole words **and** the whole message:
+a greeting may be followed only by filler (`hi there`, `hello again`), so
+`hi, write me a function` is still a request.
+
+### A regression I introduced, and what caught it
+
+The new `/chat/stream` greeting branch was placed **before** the UI override was
+applied. Picking "Coder Agent" and typing `hello` then returned the canned
+greeting and the agent never ran. `test_multitenancy::test_stream_config_reports_what_actually_ran`
+failed, which is why the branch now yields to an explicit `agent`/`team` choice:
+
+```python
+_explicit_agent = (agent_override or "").lower() == "team" or agent_override in AGENT_KEYS
+if not _explicit_agent and _is_greeting(request.message):
+```
+
+This is the one place where adding a branch to a shared codepath broke an
+existing test, and the test was right.
+
+### The fixture bug that hid the whole general stream path
+
+`tests/conftest.py` faked the streaming model with `async def`:
+
+```python
+async def _fake_stream(message, **kw):   # yields an ASYNC generator
+    yield "echo: "
+```
+
+but `run_agent_stream` is a plain `def` (a **sync** generator) and the route
+consumes it through `aiter_in_thread`, which does `for item in make_iter()` on a
+worker thread. Iterating an async generator that way is a `TypeError`. Every
+journey test that reached the general streaming path failed — and the fake could
+never have worked, so that path was silently untested. The fix is one word.
+
+### Sabotage results
+
+Each was applied by **line number** with a content assertion first, then
+`compile()`d, because (as recorded earlier in this file) a sabotage that does not
+compile proves nothing and reads as a pass.
+
+| # | sabotage | caught by |
+|---|---|---|
+| S1 | stream route back to `=`-only `remember` | 3 tests, incl. 2 `remember` forms |
+| S2 | `/chat` puts a tick on a failed recall | `test_an_unknown_recall_reads_the_same_on_both_routes` |
+| S3 | `/chat` stops mapping `my name` → `user's name` | `test_recall_my_name_works_on_both_routes` |
+| S4 | `/chat` greeting back to a substring test | 9 tests |
+| S5 | `/chat/stream` loses its greeting branch | 8 tests |
+| S6 | `/chat` recall key not normalised | `test_recall_my_name_works_on_both_routes` |
+| S7 | conftest fake is `async def` again | 5 tests |
+| S8 | greeting ignores an explicit agent choice | `test_multitenancy::test_stream_config_reports_what_actually_ran` |
+
+**8 of 8 caught.** Two survived on the first attempt and both were my error:
+
+1. **S2 survived** because my test only asserted *that the two routes agree*.
+   With `/chat` sabotaged and `/chat/stream` using the shared helper, **both**
+   returned the ticked string — they agreed, and both were wrong. A parity
+   assertion is not a correctness assertion. The test now asserts the answer
+   itself (`"✅" not in text`, `starts with "I don't remember"`) *and* the parity.
+
+2. **S8 exposed the regression above** — it was a real bug, not a test gap.
+
+### One claim I am not making
+
+A single full-suite run with `--cov` reported `1 failed, 1100 passed`; two
+subsequent full runs (with and without `--cov`) reported `1101 passed, 0 failed`,
+and the failing test's name was lost to output that did not reach the log. I am
+recording it rather than pretending it did not happen, and rather than naming a
+test I did not see fail.
+
+### Measured after this part
+
+```
+tests/test_chat_route_parity.py   -> 31 passed
+full suite (CI flags)             -> 1101 passed, 6 skipped
+api.py coverage                   -> 67%   (was 64.4%)
+TOTAL (--cov=., the CI gate)      -> 87%   (gate: 74%)
+flake8 on the new test file       -> 0
+```

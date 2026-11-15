@@ -234,3 +234,51 @@ branch cannot run.
 reachability, and reachability has to be measured. Confirming a bug requires
 making it happen, not showing that it could.
 
+## 12. I compared a mixed-case expectation to a lowercased string
+
+**What I did.** Wrote a parametrised test:
+
+```python
+assert expected in plain.lower()      # expected == "your name is Ravi"
+```
+
+`"your name is Ravi"` cannot be a substring of `plain.lower()`, because the
+lowercased haystack contains `ravi`, not `Ravi`. The test failed on the *name*
+case and passed on the others, which looked like a route bug.
+
+**What was true.** The routes were fine. `expected` needed `.lower()` too. One
+line, and it was mine — but it cost a full run and a detour because a failing
+test is not automatically evidence about the code under test.
+
+**The rule.** When the assertion compares a literal to a lowercased value, the
+literal is also a suspect. Lowercase both sides, or assert on the canonical form.
+
+## 13. My fix had the same bug as the code it fixed
+
+**What I did.** Found `/chat` answering a failed recall with a checkmark:
+
+```
+✅ nothing-here: I don't remember anything about 'nothing-here'
+```
+
+Cause: `FactMemory.recall()` returns the sentence `"I don't remember anything
+about '<key>'"` on a miss — a truthy string — so `if value:` always took the
+success path. I extracted a helper to fix it in one place, and wrote:
+
+```python
+if value:
+    return f"✅ {key}: {value}"
+```
+
+**The same test. In the fix.** The helper reproduced the exact defect it was
+created to remove.
+
+**How I caught it.** Not by reading it back. I sabotaged `/chat` to restore the
+old line, and the parity test *passed* — because both routes now returned the
+identical ticked string. They agreed, and both were wrong. That made me look at
+the helper, and it had the bug too.
+
+**The rule.** A parity assertion only proves two things are *equal*, never that
+either is *right*. Assert the property you actually want ("no tick on a miss"),
+then assert parity as a second condition. And when a fix is extracted into a
+helper, the helper needs the same adversarial test the original bug got.

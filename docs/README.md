@@ -22,10 +22,10 @@ interests you. You do not need to read them in order.
 | 8 | [`CODE_QUALITY.md`](CODE_QUALITY.md) | Env vars, silent handlers, unused locals, the Streamlit deletion, the route split | 8 |
 | 9 | [`E2E_JOURNEY.md`](E2E_JOURNEY.md) | The first end-to-end test, and the four wrong assumptions it caught | 4 |
 | 10 | [`MIGRATIONS.md`](MIGRATIONS.md) | `create_all` cannot add a column; Alembic baseline; the logging bug | 3 |
-| 11 | [`COVERAGE_API.md`](COVERAGE_API.md) | What is missing in `api.py`, measured; ownership, `/chat/stream`, agent/team bodies, uploads re-index, WebSocket, startup | 8 |
+| 11 | [`COVERAGE_API.md`](COVERAGE_API.md) | What is missing in `api.py`, measured; ownership, `/chat` **and** `/chat/stream` parity, agent/team bodies, uploads re-index, WebSocket, startup | 9 |
 | 12 | [`CASE_STUDIES.md`](CASE_STUDIES.md) | The long-form write-ups of the bugs worth reading in full | 6 |
 | 13 | [`CI_FINDINGS.md`](CI_FINDINGS.md) | The pipeline: what it claimed, what it did, and the three times it broke | 8 |
-| 14 | [`MY_ERRORS.md`](MY_ERRORS.md) | **My own eleven mistakes**, kept deliberately — the audit applies to the auditor | 11 |
+| 14 | [`MY_ERRORS.md`](MY_ERRORS.md) | **My own thirteen mistakes**, kept deliberately — the audit applies to the auditor | 13 |
 | — | [`ROADMAP.md`](ROADMAP.md) | What is done, what is next, what is deliberately not being done | — |
 | — | [`SLO.md`](SLO.md) | Chat latency SLOs per route | — |
 

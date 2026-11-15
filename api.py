@@ -1246,6 +1246,119 @@ _NAME_PATTERN = re.compile(r"my name is\s+(" + _NAME_TOKEN + r"(?:\s+" + _NAME_T
 _IS_PATTERN = re.compile(r"(.{5,}?)\s+is\s+(.+)", re.IGNORECASE)
 
 
+def _parse_remember(content: str):
+    """Parse the body of a `remember ...` command.
+
+    Returns `(key, value)`, or `(None, None)` when the text does not name a fact.
+
+    This exists because /chat and /chat/stream had **two different** parsers for
+    the same command, and they disagreed. Measured on the same user and message:
+
+        "remember colour = blue"        /chat -> Remembered   /chat/stream -> Remembered
+        "remember food is pizza"        /chat -> Remembered   /chat/stream -> "Usage: remember key = value"
+        "remember my name is Ravi"      /chat -> Remembered   /chat/stream -> "Usage: remember key = value"
+
+    The chat box in the frontend calls /chat/stream (frontend/src/store/
+    chat-store.ts -> api.chatStream), so users were told the correct syntax for a
+    form the route refused to accept. One parser, used by both routes, means the
+    two cannot drift apart again.
+
+    Order matters: "my name is X" is checked before "X is Y", otherwise
+    "my name is Ravi" would be stored under the key "my name".
+    """
+    content = (content or "").strip()
+    if not content:
+        return None, None
+    name_match = _NAME_PATTERN.search(content)
+    if name_match:
+        return "user's name", name_match.group(1)
+    if "=" in content:
+        key, value = content.split("=", 1)
+        if key.strip() and value.strip():
+            return key.strip(), value.strip()
+        return None, None
+    is_match = _IS_PATTERN.search(content)
+    if is_match:
+        key, value = is_match.group(1).strip(), is_match.group(2).strip()
+        if key and value:
+            return key, value
+    return None, None
+
+
+def _parse_recall_key(raw: str) -> str:
+    """Map what the user typed after `recall ` to the key it was stored under.
+
+    Same defect as `_parse_remember`, found the same way: /chat normalised
+    "my name" to "user's name" and /chat/stream did not, so `recall my name`
+    worked on one route and returned nothing on the other. The chat box uses the
+    streaming route, so it was the one that failed.
+    """
+    key = (raw or "").strip()
+    if _NAME_PATTERN.search(key) or key.lower() in ("my name", "my name please"):
+        return "user's name"
+    return key
+
+
+def _recall_reply(key: str, value: str) -> str:
+    """The user-facing answer for a `recall` command.
+
+    One formatter, so an unknown fact reads the same on both routes. /chat used
+    to prefix `✅ <key>:` even when the lookup failed, which put a success tick on
+    "I don't remember anything about ...".
+    """
+    # `FactMemory.recall()` does NOT return None/"" on a miss - it returns the
+    # sentence "I don't remember anything about '<key>'". So `if value:` is
+    # always true and cannot be used to tell a hit from a miss. That single
+    # fact is why /chat used to answer a failed recall with a tick:
+    #     "✅ nothing-here: I don't remember anything about 'nothing-here'"
+    # Detect the miss by its text, and return it unchanged.
+    if not value or value.strip().lower().startswith("i don't remember"):
+        return f"I don't remember anything about '{key}'."
+    return f"✅ {key}: {value}"
+
+
+# ── Greetings ────────────────────────────────────────────────────
+GREETING_REPLY = "Hello! How can I help you today?"
+
+# Whole words only, longest phrases first.
+_GREETING_PHRASES = ("good afternoon", "good morning", "good evening",
+                     "hello", "howdy", "hola", "hey", "hi", "yo", "sup")
+# A greeting may be followed by these without turning into a real request.
+_GREETING_FILLER = frozenset({
+    "there", "again", "all", "everyone", "folks", "agent", "bot",
+    "assistant", "llama", "please",
+})
+
+
+def _is_greeting(message: str) -> bool:
+    """True only when the whole message is a greeting - not when it contains one.
+
+    The original check was `any(g in message.lower() for g in greetings)`, a raw
+    substring test, so any message containing the letters "hi", "yo" or "sup"
+    was answered with the canned greeting instead of being answered at all.
+    Measured on /chat before this fix:
+
+        "summarise this week"            -> "Hello! How can I help you today?"
+        "can you help me write a function" -> "Hello! How can I help you today?"
+        "do you know python"             -> "Hello! How can I help you today?"
+        "explain this code to me"        -> "Hello! How can I help you today?"
+
+    ("this" contains "hi"; "you"/"your" contain "yo"; "support"/"suppose"
+    contain "sup".) Matching is now on whole words *and* on the whole message:
+    a greeting may be followed only by filler ("hi there", "hello again"), so
+    "hi, write me a function" is still treated as a request.
+    """
+    text = re.sub(r"[^a-z\s]", " ", (message or "").lower())
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return False
+    for phrase in _GREETING_PHRASES:
+        if text == phrase or text.startswith(phrase + " "):
+            rest = text[len(phrase):].split()
+            return all(word in _GREETING_FILLER for word in rest)
+    return False
+
+
 
 
 
@@ -1576,34 +1689,18 @@ async def chat(
         # Check for special commands
         if request.message.lower().startswith("remember "):
             content = request.message[9:].strip()
-            # Support "my name is X" format
-            name_match = _NAME_PATTERN.search(content)
-            if name_match:
-                facts.remember("user's name", name_match.group(1), user_id=user_id)
-                response = f"✅ Remembered: your name is {name_match.group(1)}"
-            elif "=" in content:
-                key, value = content.split("=", 1)
-                facts.remember(key.strip(), value.strip(), user_id=user_id)
-                response = f"✅ Remembered: {key.strip()} = {value.strip()}"
+            key, value = _parse_remember(content)
+            if key is None:
+                response = ("Usage: remember key = value, or say 'my name is X', "
+                            "or 'X is Y'.")
             else:
-                # Support "X is Y" format (e.g. "favorite color is blue")
-                is_match = _IS_PATTERN.search(content)
-                if is_match:
-                    facts.remember(is_match.group(1).strip(), is_match.group(2).strip(), user_id=user_id)
-                    response = f"✅ Remembered: {is_match.group(1).strip()} = {is_match.group(2).strip()}"
-                else:
-                    response = "Usage: remember key = value, or say 'my name is X', or 'X is Y'."
+                facts.remember(key, value, user_id=user_id)
+                response = (f"✅ Remembered: your name is {value}" if key == "user's name"
+                            else f"✅ Remembered: {key} = {value}")
         
         elif request.message.lower().startswith("recall "):
-            key = request.message[7:].strip()
-            # "recall my name" → look up "user's name"
-            if _NAME_PATTERN.search(key) or key.lower() in ("my name", "my name please"):
-                key = "user's name"
-            value = facts.recall(key, user_id=user_id)
-            if value:
-                response = f"✅ {key}: {value}"
-            else:
-                response = f"I don't remember anything about '{key}'."
+            key = _parse_recall_key(request.message[7:].strip())
+            response = _recall_reply(key, facts.recall(key, user_id=user_id))
         
         elif request.message.lower() == "show facts":
             all_facts = facts.get_all_facts(user_id=user_id)
@@ -1646,7 +1743,6 @@ async def chat(
             
             if not fact_answered:
                 # Simple greeting handler - bypass agent for simple messages
-                greetings = ["hi", "hello", "hey", "hola", "good morning", "good afternoon", "good evening", "howdy", "yo", "sup"]
                 if is_document_question(request.message, rag):
                     # Clean answers about uploaded documents (RAG retrieval +
                     # LLM summary) instead of dumping raw chunks.
@@ -1662,8 +1758,8 @@ async def chat(
                     if followup_query:
                         response = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, followup_query, rag), timeout=DOWNSTREAM_TIMEOUT)
                         query_type = "document_question"
-                    elif any(g in request.message.lower() for g in greetings):
-                        response = "Hello! How can I help you today?"
+                    elif _is_greeting(request.message):
+                        response = GREETING_REPLY
                     else:
                         # Try routing through multi-agent system for specialized tasks
                         from multi_agent import MultiAgentOrchestrator
@@ -1851,20 +1947,22 @@ async def chat_stream(
         if request.message.lower().startswith("remember "):
             content = request.message[9:].strip()
             await _persist_message(user_id, conversation_id, "user", request.message)
-            if "=" in content:
-                key, value = content.split("=", 1)
-                facts.remember(key.strip(), value.strip(), user_id=user_id)
-                reply = f"✅ Remembered: {key.strip()} = {value.strip()}"
+            key, value = _parse_remember(content)
+            if key is None:
+                reply = ("Usage: remember key = value, or say 'my name is X', "
+                         "or 'X is Y'.")
             else:
-                reply = "Usage: remember key = value"
+                facts.remember(key, value, user_id=user_id)
+                reply = (f"✅ Remembered: your name is {value}" if key == "user's name"
+                         else f"✅ Remembered: {key} = {value}")
             async for chunk in done(reply):
                 yield chunk
             return
 
         elif request.message.lower().startswith("recall "):
-            key = request.message[7:].strip()
+            key = _parse_recall_key(request.message[7:].strip())
             await _persist_message(user_id, conversation_id, "user", request.message)
-            result = facts.recall(key, user_id=user_id)
+            result = _recall_reply(key, facts.recall(key, user_id=user_id))
             async for chunk in done(result):
                 yield chunk
             return
@@ -1939,6 +2037,23 @@ async def chat_stream(
             await _persist_message(user_id, conversation_id, "user", request.message)
             result = await asyncio.wait_for(asyncio.to_thread(answer_from_documents, followup_query, rag), timeout=DOWNSTREAM_TIMEOUT)
             async for chunk in done(result):
+                yield chunk
+            return
+
+        # Greeting: same branch the non-streaming route has had all along. It was
+        # missing here, so "hi" cost a full model round-trip on the route the
+        # chat box uses while /chat answered instantly.
+        #
+        # An explicit choice in the UI beats a greeting. Picking "Coder Agent"
+        # and typing "hello" means "say hello to the Coder Agent", not "give me
+        # a canned line without running anything" - and without the override
+        # check this branch swallowed exactly that request (caught by
+        # test_multitenancy::test_stream_config_reports_what_actually_ran).
+        _explicit_agent = (agent_override or "").lower() == "team" or agent_override in AGENT_KEYS
+        if not _explicit_agent and _is_greeting(request.message):
+            chat_meta["route"] = "greeting"
+            await _persist_message(user_id, conversation_id, "user", request.message)
+            async for chunk in done(GREETING_REPLY):
                 yield chunk
             return
 
