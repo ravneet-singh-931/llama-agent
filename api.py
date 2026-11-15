@@ -131,6 +131,32 @@ async def _save_shared_dict(key: str, value: dict) -> None:
         degrade("redis conversation cache write failed (chat continues on memory)", _e)
 
 
+async def _shared_state(name: str, key: str) -> dict:
+    """The shared dict for `key`, falling back to this process's own copy.
+
+    Returns Redis' value when Redis answers, otherwise the dict held on
+    `app.state` under `name` (created on first use). Callers mutate the result
+    and pass it to `_save_shared_dict`; when Redis is absent that save is a
+    no-op, so the local copy is the only thing that persists - which is the
+    whole point.
+
+    Use this for state that must survive between requests. `_load_shared_dict`
+    remains for genuinely read-only lookups where an empty default is correct.
+    """
+    try:
+        from modules import redis_store
+        val = await redis_store.get_json(key)
+        if isinstance(val, dict) and val:
+            return val
+    except Exception as _e:  # pragma: no cover - redis_store never raises
+        degrade("redis shared-state read failed (falling back to local)", _e)
+    local = getattr(app.state, name, None)
+    if not isinstance(local, dict):
+        local = {}
+        setattr(app.state, name, local)
+    return local
+
+
 # Lazy singleton Groq client (P2 #7): avoid rebuilding the client on every
 # document question.
 
@@ -1388,11 +1414,9 @@ async def _record_agent_usage(agent_keys) -> None:
 
     Mirrored to Redis so all replicas share the same counters (P0 #2).
     """
-    stats = getattr(app.state, "agent_stats", None)
-    if stats is None:
-        stats = {"handled": {}, "last_used": {}}
-        app.state.agent_stats = stats
-    shared = await _load_shared_dict(_AGENT_STATS_KEY, {"handled": {}, "last_used": {}})
+    # One dict, whatever the backend: Redis when it answers, otherwise this
+    # process's own `app.state.agent_stats`.
+    shared = await _shared_state("agent_stats", _AGENT_STATS_KEY)
     handled = shared.setdefault("handled", {})
     last_used = shared.setdefault("last_used", {})
     # UTC-aware so the frontend can compute relative times correctly
@@ -1402,9 +1426,6 @@ async def _record_agent_usage(agent_keys) -> None:
             continue
         handled[key] = handled.get(key, 0) + 1
         last_used[key] = now
-    # Keep the in-process mirror in sync for single-replica speed.
-    stats["handled"] = handled
-    stats["last_used"] = last_used
     await _save_shared_dict(_AGENT_STATS_KEY, shared)
 
 
@@ -2751,7 +2772,7 @@ async def agent_team_stats(user = Depends(optional_auth)):
     live performance monitor. Nothing is simulated.
     """
     try:
-        stats = await _load_shared_dict(_AGENT_STATS_KEY, {"handled": {}, "last_used": {}})
+        stats = await _shared_state("agent_stats", _AGENT_STATS_KEY)
         handled = stats.get("handled", {})
         last_used = stats.get("last_used", {})
         health = app.state.monitor.get_health()

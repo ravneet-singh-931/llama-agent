@@ -282,3 +282,29 @@ the helper, and it had the bug too.
 either is *right*. Assert the property you actually want ("no tick on a miss"),
 then assert parity as a second condition. And when a fix is extracted into a
 helper, the helper needs the same adversarial test the original bug got.
+
+## 14. I asserted a number before reading the code that produces it
+
+**What I did.** Wrote a test for the Redis-present path of the counter fix and
+asserted that two dispatches against a cold Redis would leave `2`:
+
+```python
+assert shared["handled"].get("coder") == 2
+```
+
+It failed with `101`.
+
+**What was true.** `_shared_state` seeds Redis from the local copy when the
+store is empty — `99 + 2 = 101`. That is deliberate and correct: a replica that
+has just started should join the running total, not reset it to zero. The code
+was right; my expectation was invented.
+
+**Why it matters.** This is the same failure as entry 12, in a different
+costume: I wrote the number I *assumed* the correct behaviour would produce
+instead of deriving it from the implementation and then checking the derivation
+against the run. In a test, an invented expectation does not merely fail — if it
+had passed for the wrong reason it would have locked in a fiction.
+
+**The rule.** An expected value in a test is a claim about the code. Make the
+claim from the code, then let the run confirm it. If the run disagrees, the test
+is at least as likely to be wrong as the program.

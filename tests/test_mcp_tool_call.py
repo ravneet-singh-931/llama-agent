@@ -300,22 +300,51 @@ def test_agent_stats_are_initialised_when_absent(journey, monkeypatch):
     assert stats["handled"].get("coder") == 1
 
 
-def test_the_counter_does_not_accumulate_without_redis(journey, monkeypatch):
-    """MEASURED DEFECT, pinned so it cannot be lost.
+def test_the_counter_accumulates_without_redis(journey, monkeypatch):
+    """Three dispatches must count as three, with no Redis configured.
 
-    With no Redis (the default for local runs and for the test suite), the
-    dashboard counter counts every dispatch as the *first* one. Three
-    `coder_agent` calls leave `agent_stats["handled"] == {"coder": 1}`.
+    This was a real defect, now fixed: `_record_agent_usage` read through
+    `_load_shared_dict`, which without Redis hands back the caller's `default` -
+    a brand-new empty dict each call - and then wrote `app.state.agent_stats`
+    *from* that empty dict instead of merging into it. The in-memory counter
+    therefore capped at 1, and `/agents/stats` reported `tasks_handled: 0`.
 
-    Cause: `_record_agent_usage` reads through `_load_shared_dict`, which without
-    Redis returns the `default` argument it was handed — a brand-new
-    `{"handled": {}, "last_used": {}}` on every call. It then writes
-    `app.state.agent_stats = {**handled}` (line 1406), replacing the previous
-    total instead of adding to it. The mirror is updated *from* the empty dict,
-    not merged *into* it.
+    The fix is `_shared_state()`: one place that returns Redis' dict when it has
+    one, and otherwise this process's own copy on `app.state`.
+    """
+    from modules.security import rate_limiter
+    rate_limiter._requests.clear()
 
-    This test asserts the current, wrong behaviour. When the merge is fixed,
-    this test must be inverted to expect 3 — that failure is the reminder.
+    async def _fake(name, arguments):
+        return {"tool": name, "isError": False, "result": "ok"}
+
+    monkeypatch.setattr(api, "call_mcp_tool", _fake)
+    monkeypatch.setattr(api.app.state, "agent_stats",
+                        {"handled": {}, "last_used": {}}, raising=False)
+
+    c = journey.client
+    name = f"mcp_{os.urandom(4).hex()}"
+    c.cookies.clear()
+    c.post("/auth/register", json={
+        "username": name, "email": f"{name}@example.com", "password": PASSWORD})
+    c.cookies.clear()
+    assert c.post("/auth/login", json={
+        "username": name, "password": PASSWORD}).status_code == 200
+
+    for expected in (1, 2, 3):
+        assert _call(c, "coder_agent").status_code == 200
+        got = api.app.state.agent_stats["handled"].get("coder")
+        assert got == expected, (
+            f"the counter did not accumulate: expected {expected}, got {got}"
+        )
+
+
+def test_the_dashboard_reports_the_real_count(journey, monkeypatch):
+    """`/agents/stats` must show what actually ran - it showed 0.
+
+    The dashboard is what a user reads. It was reporting `tasks_handled: 0`
+    after three successful `coder_agent` calls, because the reader took its own
+    fresh empty default rather than the process's stored counters.
     """
     from modules.security import rate_limiter
     rate_limiter._requests.clear()
@@ -339,14 +368,102 @@ def test_the_counter_does_not_accumulate_without_redis(journey, monkeypatch):
     for _ in range(3):
         assert _call(c, "coder_agent").status_code == 200
 
-    got = api.app.state.agent_stats["handled"].get("coder")
-    assert got == 1, (
-        "the counter behaviour changed - if it now accumulates, invert this test "
-        f"to expect 3 (got {got})"
-    )
-    # ...and the dashboard therefore reads zero even though the calls ran.
     data = c.get("/agents/stats").json()
     coder = [a for a in data["agents"] if a["key"] == "coder"][0]
-    assert coder["tasks_handled"] == 0, (
-        "/agents/stats now reports real counts - invert this assertion too"
+    assert coder["tasks_handled"] == 3, (
+        f"the dashboard disagrees with what ran: {coder['tasks_handled']} != 3"
+    )
+    assert coder["last_used"], "last_used was not recorded for the dashboard"
+
+
+def test_counters_go_through_redis_when_it_is_available(journey, monkeypatch):
+    """With Redis answering, the counters live there - and accumulate.
+
+    The fallback fix must not break the multi-replica case the Redis mirror
+    exists for. This fakes `redis_store` and asserts the route *uses* it: the
+    value written back must contain the accumulated count, and `/agents/stats`
+    must read that same store.
+    """
+    from modules.security import rate_limiter
+    from modules import redis_store
+    rate_limiter._requests.clear()
+
+    store = {}
+
+    async def _get(key):
+        return store.get(key)
+
+    async def _set(key, value, ttl=0):
+        import copy
+        store[key] = copy.deepcopy(value)
+        return True
+
+    monkeypatch.setattr(redis_store, "get_json", _get)
+    monkeypatch.setattr(redis_store, "set_json", _set)
+    # A different local dict, so a fallback would be visibly wrong.
+    monkeypatch.setattr(api.app.state, "agent_stats",
+                        {"handled": {"coder": 99}, "last_used": {}}, raising=False)
+
+    async def _fake(name, arguments):
+        return {"tool": name, "isError": False, "result": "ok"}
+
+    monkeypatch.setattr(api, "call_mcp_tool", _fake)
+
+    c = journey.client
+    name = f"mcp_{os.urandom(4).hex()}"
+    c.cookies.clear()
+    c.post("/auth/register", json={
+        "username": name, "email": f"{name}@example.com", "password": PASSWORD})
+    c.cookies.clear()
+    assert c.post("/auth/login", json={
+        "username": name, "password": PASSWORD}).status_code == 200
+
+    for _ in range(2):
+        assert _call(c, "coder_agent").status_code == 200
+
+    shared = store.get(api._AGENT_STATS_KEY)
+    assert shared is not None, "nothing was written to Redis"
+    # Redis was empty, so the first call seeded it from the local copy (99) and
+    # then counted twice: 101. Seeding on a cold cache is deliberate - it is how
+    # a replica that just came up joins the existing total instead of restarting
+    # from zero. (My first version of this test asserted 2 and was wrong about
+    # the code, not the other way round.)
+    assert shared["handled"].get("coder") == 101, (
+        f"Redis does not hold the accumulated count: {shared}"
+    )
+
+    # Now that Redis holds a value, it wins over the stale local copy: a second
+    # dispatch must read 101 from Redis, not 99 from app.state.
+    assert _call(c, "coder_agent").status_code == 200
+    assert store[api._AGENT_STATS_KEY]["handled"]["coder"] == 102, (
+        f"the second call did not continue from Redis: {store[api._AGENT_STATS_KEY]}"
+    )
+
+    data = c.get("/agents/stats").json()
+    coder = [a for a in data["agents"] if a["key"] == "coder"][0]
+    assert coder["tasks_handled"] == 102, (
+        f"the dashboard did not read Redis: {coder['tasks_handled']}"
+    )
+
+
+def test_an_unknown_agent_key_is_skipped_by_the_recorder(journey, monkeypatch):
+    """A key that is not a real agent must not appear on the dashboard.
+
+    `_record_agent_usage` guards with `if key not in AGENT_KEYS: continue`. That
+    line had never executed: every caller passes keys from a fixed map. It is
+    the guard that stops a typo (or a future dynamic tool name) from creating a
+    phantom agent row, so it is worth its own test rather than a comment.
+    """
+    import asyncio
+
+    monkeypatch.setattr(api.app.state, "agent_stats",
+                        {"handled": {}, "last_used": {}}, raising=False)
+
+    asyncio.get_event_loop_policy().new_event_loop()
+    asyncio.run(api._record_agent_usage(["not_an_agent", "coder"]))
+
+    handled = api.app.state.agent_stats["handled"]
+    assert "coder" in handled, "the real agent key was not counted"
+    assert "not_an_agent" not in handled, (
+        f"a phantom agent reached the dashboard: {handled}"
     )

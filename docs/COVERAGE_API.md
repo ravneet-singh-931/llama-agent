@@ -295,18 +295,13 @@ assert the target exists before relying on it.
 
 ## What is still untested, in priority order
 
-1. **Dashboard counters do not accumulate without Redis (found this part).**
-   `/agents/stats` reports `tasks_handled: 0` after real dispatches, and the
-   in-memory counter caps at 1 — see "The MCP tool-call path" above. Needs the
-   merge fix plus a sabotage pass of its own.
-2. **`lifespan` (13 missing lines).** Database-down, OptimizedRAG fallback and the
+1. **`lifespan` (13 missing lines).** Database-down, OptimizedRAG fallback and the
    uploads re-index are covered; what remains is the baseline alert sweep and the
    success-path prints.
-3. **WebSocket ticket lifecycle (28 lines).** Issue → consume → replay. A ticket
+2. **WebSocket ticket lifecycle (28 lines).** Issue → consume → replay. A ticket
    that can be consumed twice is an auth hole, and nothing checks it.
-4. **Error branches (106 lines).** Lowest value of the five. These mostly
-   convert an exception into a 500 that is already logged.
-## The lesson worth keeping
+3. **Error branches (106 lines).** Lowest value of the five. These mostly
+   convert an exception into a 500 that is already logged.## The lesson worth keeping
 
 Line coverage counts executed lines. It does not know which lines decide **who is
 allowed to see what**. Ten tests over a `secure` handler are worth more than a
@@ -506,7 +501,7 @@ counter to bump**. `nonexistent_tool` is forwarded to the MCP server verbatim an
 returns whatever the server decides. Pinned as the current contract, not
 endorsed — if it should be an allowlist, that test is the one to change.
 
-### The real defect: the dashboard counter resets to 1
+### The real defect: the dashboard counter resets to 1 — and the fallback that was never there
 
 Found by chasing a coverage line, not by looking for a bug.
 
@@ -520,7 +515,8 @@ app.state.agent_stats   -> {"handled": {"coder": 1}}
 
 **The dashboard shows zero tasks while the calls are running.**
 
-Cause, traced through `_record_agent_usage` (api.py 1386–1408):
+Cause, traced through the **old** `_record_agent_usage` (removed by the fix
+below; kept here because the failure shape is the lesson):
 
 1. `_load_shared_dict(key, default)` returns `default` when Redis is absent —
    and the caller passes a **newly built** `{"handled": {}, "last_used": {}}` on
@@ -531,15 +527,78 @@ Cause, traced through `_record_agent_usage` (api.py 1386–1408):
    with that one-entry dict instead of merging into it.
 
 The in-process mirror is written *from* the empty shared dict, not *into* it.
+That is the bug in one sentence.
 
-This is pinned by `test_the_counter_does_not_accumulate_without_redis`, which
-asserts the **current, wrong** behaviour and says in its docstring that fixing the
-merge must invert it. A defect that is recorded fails loudly when it is fixed;
-a defect that is merely described rots.
+It was first pinned by `test_the_counter_does_not_accumulate_without_redis`,
+which asserted the **current, wrong** behaviour and said in its docstring that
+fixing the merge must invert it. That pin worked exactly as intended: the moment
+the code was fixed, that test failed and forced the expectation to be rewritten
+as `test_the_counter_accumulates_without_redis`.
 
-**Not fixed in this part**, deliberately: it is a behavioural change to a
-dashboard that a user reads, and the fix (merge into the existing mirror) wants
-its own sabotage pass. Recorded in the backlog below.
+> A defect that is recorded fails loudly when it is fixed; a defect that is
+> merely described rots.
+
+### The fix, and how deep the defect went
+
+The cause was not the counter arithmetic — it was `_load_shared_dict`, which
+gated **both** backends on one call:
+
+```python
+async def _load_shared_dict(key, default):
+    try:
+        val = await redis_store.get_json(key)   # None when Redis is absent
+        if isinstance(val, dict):
+            return val
+    except Exception:
+        ...
+    return default        # <- the caller's FRESH, EMPTY dict
+```
+
+Every caller passed a newly built `{"handled": {}, "last_used": {}}`. So with
+Redis down there was **no fallback at all**, despite the comment at `api.py:102`
+claiming *"falls back to the in-process copy if Redis is unavailable, so
+behaviour is unchanged when Redis is down."* The comment described an intention
+the code never implemented.
+
+The fix is one helper, used by both the writer and the reader:
+
+```python
+async def _shared_state(name, key) -> dict:
+    """Redis' dict when it answers, otherwise this process's own copy."""
+    ...
+    local = getattr(app.state, name, None)
+    if not isinstance(local, dict):
+        local = {}
+        setattr(app.state, name, local)
+    return local
+```
+
+Three properties, each measured:
+
+| property | measured |
+|---|---|
+| no Redis: counter accumulates | 1 → 2 → 3 across three dispatches |
+| no Redis: dashboard agrees | `/agents/stats` reports `tasks_handled: 3` |
+| Redis present: still used | value written to the store; local copy untouched |
+
+That last row has a subtlety worth keeping: on a **cold** Redis the first call
+seeds the store from the local copy (`99 + 2 = 101`), which is what lets a
+replica that just started join the running total instead of restarting at zero.
+My first version of that test asserted `2` and failed — the test was wrong about
+the code, not the other way round. Corrected, and the comment in the test says so.
+
+### Sabotage results for the fix
+
+| # | sabotage | caught by |
+|---|---|---|
+| D1 | dashboard reader takes a fresh default again | `test_the_dashboard_reports_the_real_count` |
+| D2 | writer starts from an empty dict again | 4 tests |
+| D3 | `_shared_state` never returns the stored local copy | 4 tests |
+| D4 | counter set to 1 instead of incremented | 2 tests |
+| D5 | `last_used` not recorded | `test_the_dashboard_reports_the_real_count` |
+| D6 | unknown agent key no longer skipped | `test_an_unknown_agent_key_is_skipped_by_the_recorder` |
+
+**6 of 6 caught.**
 
 ### A coverage artifact, settled by substitution
 
@@ -569,9 +628,9 @@ report alone.
 ### Measured after this part
 
 ```
-tests/test_mcp_tool_call.py   -> 13 passed
-full suite (CI flags)         -> 1114 passed, 6 skipped
-api.py coverage               -> 70%   (was 67%)
+tests/test_mcp_tool_call.py   -> 16 passed (13 for the route, 3 for the fix)
+full suite (CI flags)         -> 1116 passed, 6 skipped
+api.py coverage               -> 71%   (was 67%)
 TOTAL (--cov=., CI gate 74)   -> 87%
 flake8 on the new file        -> 0
 ```

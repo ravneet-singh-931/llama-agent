@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-11-14) — the Agent Team dashboard reported zero tasks, and there was no fallback at all
+
+- **`/agents/stats` showed `tasks_handled: 0`** after three successful
+  `coder_agent` calls, and the in-memory counter capped at `1`. Root cause was
+  not the counter arithmetic: `_load_shared_dict` gated Redis *and* the local
+  copy on one call, returning the caller's **newly built empty dict** whenever
+  Redis had no value. Every caller passed a fresh one, so with Redis down there
+  was no fallback at all — while the comment at `api.py:102` claimed the
+  in-process copy was used and "behaviour is unchanged when Redis is down".
+  The comment described an intention the code never implemented.
+- **Fix:** one helper, `_shared_state(name, key)`, returns Redis' dict when it
+  answers and otherwise this process's own copy on `app.state`. Both the writer
+  (`_record_agent_usage`) and the reader (`/agents/stats`) go through it.
+  Measured: the counter now accumulates 1 → 2 → 3, the dashboard reports 3, and
+  with Redis present the store holds the total and the local copy is untouched.
+- On a **cold Redis** the first call seeds the store from the local copy, so a
+  replica that has just started joins the running total instead of restarting at
+  zero. Pinned by a test, with a note that my first version of it asserted the
+  wrong number and had to be corrected.
+- 6 of 6 sabotages caught, including one for the `if key not in AGENT_KEYS`
+  guard, which had never executed in any test.
+- 3 new tests; `api.py` coverage 70% → **71%**; full suite **1116 passed, 6 skipped**.
+
 ### Added (2026-11-14) — the MCP tool-call path, and a dashboard that reports zero
 
 - **`/mcp/tools` had two tests and both asserted `401`.** The successful call,
