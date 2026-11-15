@@ -3,9 +3,9 @@
 Why this exists
 ---------------
 CI used to run exactly one eval -- ``evals.rag_eval retrieval``. The agent eval
-suite (``evals/run.py``: 30 golden cases, the LLM judge, ``compare()``
-regression detection) was only ever run by a human, so a prompt or routing
-regression shipped green.
+suite (``evals/run.py``: 60 golden cases -- 12 tagged ``smoke`` -- plus the LLM
+judge and ``compare()`` regression detection) was only ever run by a human, so a
+prompt or routing regression shipped green.
 
 Most of that suite genuinely cannot run on every PR: it needs ``GROQ_API_KEY``
 and a judge call per case (~minutes). But two layers underneath it are pure
