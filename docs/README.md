@@ -25,7 +25,11 @@ interests you. You do not need to read them in order.
 | 11 | [`COVERAGE_API.md`](COVERAGE_API.md) | What is missing in `api.py`, measured; ownership, `/chat` **and** `/chat/stream` parity, the MCP tool-call path, the auth routes (incl. the refresh token that never dies), the WebSocket ticket store (Redis branch + replay), agent/team bodies, uploads re-index, startup | 13 |
 | 12 | [`CASE_STUDIES.md`](CASE_STUDIES.md) | The long-form write-ups of the bugs worth reading in full | 6 |
 | 13 | [`CI_FINDINGS.md`](CI_FINDINGS.md) | The pipeline: what it claimed, what it did, and the three times it broke | 8 |
-| 14 | [`MY_ERRORS.md`](MY_ERRORS.md) | **My own thirteen mistakes**, kept deliberately — the audit applies to the auditor | 13 |
+| 15 | [`GLOSSARY.md`](GLOSSARY.md) | Every term the code and docs use — RAG, grounding, ticket, journey, MCP, xfail — defined, with where each lives | 0 |
+| 16 | [`FILE_MAP.md`](FILE_MAP.md) | All 39 modules, all 6 frontend routes, 62 test modules. The README tree lists 10 of 39 | 0 |
+| 17 | [`REQUEST_FLOW.md`](REQUEST_FLOW.md) | One `POST /chat`, step by step through the real line numbers; the three ways in; where to start reading | 1 |
+| 18 | [`RUNNING_TESTS.md`](RUNNING_TESTS.md) | The CI command, why each flag exists, and the traps that cost real time | 0 |
+| 14 | [`MY_ERRORS.md`](MY_ERRORS.md) | **My own sixteen mistakes**, kept deliberately — the audit applies to the auditor | 16 |
 | — | [`ROADMAP.md`](ROADMAP.md) | What is done, what is next, what is deliberately not being done | — |
 | — | [`SLO.md`](SLO.md) | Chat latency SLOs per route | — |
 

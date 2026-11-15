@@ -967,7 +967,8 @@ llama-agent/
 │   ├── memory.py             # Per-user conversation memory
 │   ├── mcp_client.py         # MCP client (SSE → agent server)
 │   └── secrets.py            # Docker-secret reader (env/file fallback)
-├── tests/                    # pytest suite (23 modules)
+│   #  ...and 29 more. docs/FILE_MAP.md lists every module with a one-line purpose.
+├── tests/                    # pytest suite (62 modules)
 ├── config/
 │   ├── nginx/                # SSL + reverse proxy config
 │   ├── prometheus/           # Metrics + alert rules

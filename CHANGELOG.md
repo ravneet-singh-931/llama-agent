@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-15) — the documents that explain the project, not just its bugs
+
+The findings docs described **what was broken**. Nothing described **what the
+code is**, so a newcomer had no way in. Four documents now do:
+
+- **`GLOSSARY.md`** — every term the code and docs use, defined, each naming
+  where it lives: RAG, chunk, embedding, grounding, citation, orchestrator, tool
+  round, MCP, ticket, brute-force store, shared state, lifespan, `journey`,
+  `xfail`. Several were used throughout without ever being defined.
+- **`FILE_MAP.md`** — all 39 modules, all 6 frontend routes, 62 test modules,
+  each in a line taken from the module's own docstring.
+- **`REQUEST_FLOW.md`** — one `POST /chat`, step by step through real line
+  numbers: who is asking, input screening, retrieval, the three routing paths,
+  post-checks.
+- **`RUNNING_TESTS.md`** — the CI command with the reason for every flag, plus
+  the traps that actually cost time here (global brute-force store, the Phoenix
+  tracer, a blocking read that hangs instead of failing).
+
+**Three inaccurate claims found and fixed while writing them:**
+
+1. `README.md` said `tests/` holds **23 modules**; it holds **62**.
+2. The README tree listed **10 of 39** modules, silently omitting `rag.py`,
+   `pg_store.py`, `redis_store.py`, `pii.py`, `grounding.py` and 24 others. It now
+   points at `FILE_MAP.md`.
+3. `docs/README.md` said "my own **thirteen** mistakes"; there are 16.
+
+**One real behaviour documented, not changed:** `/chat/stream` reports a mid-stream
+failure as an ordinary `data:` line carrying an apology, **not** as
+`event: error` (`api.py` 2136, 2197, 2221). A client waiting for an error event
+type would wait forever. Verified by reading all three handlers.
+
+All four documents were checked against the code rather than written from
+memory: file counts, 12 line-number citations, 44 module references and every
+relative link were verified.
+
 ### Added (2026-11-14) — the WebSocket ticket's Redis branch and token fallback
 
 - `tests/test_ws_ticket.py` (9 tests) proved that a socket takes its identity from
