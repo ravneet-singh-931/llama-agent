@@ -165,6 +165,7 @@ class name**, and check the wiring before raising the alarm.
 
 ---
 
+
 ## What these have in common
 
 Eight of the nine were **a check that appeared to pass**. Not a wrong answer — a
@@ -308,3 +309,23 @@ had passed for the wrong reason it would have locked in a fiction.
 **The rule.** An expected value in a test is a claim about the code. Make the
 claim from the code, then let the run confirm it. If the run disagrees, the test
 is at least as likely to be wrong as the program.
+
+## 15. I tested that the session worked, not that it was refreshed
+
+**What I did.** Wrote a test for `/auth/refresh` that called `/auth/me` afterwards
+and asserted `200`. It passed. Then I sabotaged the route by replacing the
+`_set_auth_cookies(...)` call with `pass` — and the test **still passed**.
+
+**What was true.** Login had already put a perfectly valid access token in the
+cookie jar. `/auth/me` was authenticating with *that* token, not with any token
+the refresh had produced. The route could have been doing nothing at all and my
+test would have called it healthy.
+
+**How I caught it.** Sabotage, not review — and then it took two attempts to fix
+properly. My first repair checked the cookie jar for a token, which still cannot
+distinguish a fresh cookie from a leftover one. The version that works asserts on
+the **response**: `set-cookie` must contain `access_token=`.
+
+**The rule.** When a component's job is to *produce or replace* something, assert
+that the new thing was produced. Asserting that the system still works afterwards
+tests everything except the component.

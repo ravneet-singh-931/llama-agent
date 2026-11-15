@@ -300,8 +300,17 @@ assert the target exists before relying on it.
    success-path prints.
 2. **WebSocket ticket lifecycle (28 lines).** Issue → consume → replay. A ticket
    that can be consumed twice is an auth hole, and nothing checks it.
-3. **Error branches (106 lines).** Lowest value of the five. These mostly
-   convert an exception into a 500 that is already logged.## The lesson worth keeping
+3. **Error branches (~90 lines).** Lowest value. These mostly convert an
+   exception into a 500 that is already logged.
+
+## Open product decisions (not defects to fix unilaterally)
+
+- **Refresh-token rotation.** The refresh token is never rotated and has no
+  revocation list, so it can be replayed for its full 7-day life and logout does
+  not revoke it — see "The auth routes" above. Recorded with an
+  `xfail(strict=True)` so fixing it fails loudly.
+
+## The lesson worth keeping
 
 Line coverage counts executed lines. It does not know which lines decide **who is
 allowed to see what**. Ten tests over a `secure` handler are worth more than a
@@ -633,4 +642,119 @@ full suite (CI flags)         -> 1116 passed, 6 skipped
 api.py coverage               -> 71%   (was 67%)
 TOTAL (--cov=., CI gate 74)   -> 87%
 flake8 on the new file        -> 0
+```
+
+## The auth routes — and a refresh token that never dies
+
+`tests/test_auth.py` (53 tests) covers `modules/auth.py` thoroughly: password
+hashing at the bcrypt byte limit, JWT signing and expiry, the user manager,
+`get_current_user`, and that a refresh token cannot authenticate a request.
+
+It never calls the **routes**. Measured before this part:
+
+```
+missing lines in api.py's auth block (990-1100) : 26
+/auth/refresh                                    : had never executed in any test
+register/login failure branches                  : uncovered (audits, lockout, counter)
+```
+
+After: **0 missing lines** in that block. `tests/test_auth_routes.py` — 14
+tests + 1 `xfail`.
+
+### FINDING 1 — the refresh token is never rotated and cannot be revoked
+
+Measured behaviour of `POST /auth/refresh`:
+
+| action | result |
+|---|---|
+| refresh with the cookie | `200`, new access token |
+| refresh with no token | `401 Missing refresh token` |
+| refresh with an *access* token | `401 Invalid refresh token` |
+| refresh with the **same** refresh token ×3 | `200, 200, 200` |
+| logout, then replay the token taken before logout | **`200`** |
+
+`api.py:1078` says so in a comment: *"Keep the same refresh token (it is still
+valid); only rotate access."* Nothing records issued refresh tokens, so there is
+no server-side revocation list.
+
+**What that means in practice:**
+
+- A refresh token is valid for **7 days** (`JWT_REFRESH_EXPIRE_DAYS`, default 7).
+  Replaying it refreshes the session again — indefinitely, from any number of
+  clients, for that whole window.
+- `POST /auth/logout` clears cookies on **that browser only**. A copy taken
+  earlier keeps working. That is a normal stateless-JWT trade-off, but it is
+  usually paired with rotation, and here it is not.
+- If a refresh token leaks, there is no way to revoke it short of rotating the
+  JWT secret, which signs every user out.
+
+**Not changed in this part**, deliberately — it is a product decision, not a bug
+fix. Rotation logs out every second client sharing a token (two tabs, phone plus
+laptop), and needs a revocation store the app does not have. Recorded instead:
+
+- `test_a_refresh_token_can_only_be_used_once` — what we *want*, marked
+  `xfail(strict=True)`. When rotation is implemented this starts passing, pytest
+  fails the suite, and someone must remove the marker and keep the assertion.
+- `test_replaying_a_refresh_token_is_currently_accepted` — the measured reality,
+  asserted so a change to it cannot slip by unnoticed.
+- `test_logout_clears_the_cookies_but_does_not_revoke_the_token` — states the
+  logout limitation as behaviour rather than as prose.
+
+> An `xfail(strict=True)` is the only way to record "this is broken" that gets
+> louder when it is fixed instead of quieter.
+
+### FINDING 2 — two refreshes in one second return the same token
+
+JWT `iat`/`exp` are **second** granularity, so a refresh in the same second as
+the login produces a byte-identical access token:
+
+```
+access token 1: iat=1794732145 exp=1794733945
+access token 2: iat=1794732145 exp=1794733945    (after POST /auth/refresh)
+string differs : False
+```
+
+Harmless on its own — the token is still valid for its full 30 minutes — but any
+test asserting "the token changed" is flaky by construction. Pinned in
+`test_two_refreshes_in_the_same_second_return_the_same_token`.
+
+### Two test bugs of mine, both found by sabotage
+
+**1. "works" is not "was renewed."** My first refresh test called `/auth/me`
+after refreshing and passed — even when `_set_auth_cookies(...)` was replaced
+with `pass`, because **the old access token was still in the cookie jar and still
+valid**. The test now asserts on the *response* (`set-cookie: access_token=...`),
+which is the only way to tell a new cookie from a leftover one.
+
+**2. The brute-force store is global and IP-keyed.** Every test in the file
+shares one client and therefore one client IP. After the lockout test tripped,
+five later tests failed with `429 Try again in 899 seconds`. The fixture now
+snapshots and restores `brute_force.attempts`. Keys are `login:<identifier>`, not
+the raw username — my first version looked under the wrong key and reported "not
+recorded" for a route that records correctly.
+
+### Sabotage results
+
+| # | sabotage | caught by |
+|---|---|---|
+| A1 | failed login no longer recorded | `test_a_locked_out_login_is_429_and_audited` |
+| A2 | lockout check bypassed | `test_a_locked_out_login_is_429_and_audited` |
+| A3 | refresh accepts any token type | `test_refresh_rejects_an_access_token_in_the_body` |
+| A4 | missing refresh token no longer refused | `test_refresh_with_no_token_is_401` |
+| A5 | refresh stops setting the new cookie | `test_refresh_issues_a_usable_access_token` |
+| A6 | logout stops clearing cookies | `test_logout_clears_the_cookies_...` |
+| A7 | login failure leaks the internal message | 2 tests |
+| A8 | refresh failure leaks the internal message | `test_a_database_failure_on_refresh_is_503_not_500` |
+
+**8 of 8 caught. A5 survived the first version** — that is test bug 1 above.
+
+### Measured after this part
+
+```
+tests/test_auth_routes.py   -> 14 passed, 1 xfailed
+auth route block coverage   -> 0 missing lines (was 26)
+full suite (CI flags)       -> 1131 passed, 6 skipped, 1 xfailed
+api.py coverage             -> 73%   (was 71%)
+TOTAL (--cov=., CI gate 74) -> 87%
+flake8 on the new file      -> 0
 ```

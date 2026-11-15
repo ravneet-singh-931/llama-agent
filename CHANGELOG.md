@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-14) — the auth routes, and a refresh token that never dies
+
+- **`/auth/refresh` had never executed in any test.** `tests/test_auth.py` covers
+  `modules/auth.py` thoroughly (53 tests) but never calls the routes. The whole
+  auth block in `api.py` was 26 uncovered lines; it is now **0**.
+  `tests/test_auth_routes.py` (14 tests + 1 `xfail`) covers register/login failure
+  branches and audits, the brute-force counter and lockout, every refresh path,
+  logout, and the internal-failure mapping (503 for an outage, 500 for a bug).
+- **FINDING (pinned, not changed): the refresh token is never rotated and cannot
+  be revoked.** Measured: the same refresh token refreshes successfully three
+  times in a row, and a token copied before `POST /auth/logout` still refreshes
+  after it. Nothing records issued tokens, so there is no revocation list. A
+  leaked refresh token is usable for its full 7 days, and killing it means
+  rotating the JWT secret, which signs everyone out. Recorded three ways:
+  `xfail(strict=True)` for what we want (it fails the suite the day rotation is
+  added), an assertion of the current behaviour, and a test naming the logout
+  limitation. Changing it is a product decision - rotation signs out every second
+  client sharing a token and needs a store the app does not have.
+- **FINDING (pinned): two refreshes in the same second return a byte-identical
+  access token.** JWT `iat`/`exp` are second-granularity. Harmless, but it makes
+  "the token changed" a flaky assertion, so it is recorded rather than
+  rediscovered by a future failing test.
+- Sabotage caught a weak test of mine: asserting the session still worked after a
+  refresh passed even with `_set_auth_cookies(...)` replaced by `pass`, because
+  the *old* access token was still in the cookie jar. The test now asserts on the
+  response's `set-cookie` header. (`MY_ERRORS.md` #15.)
+- 8 of 8 sabotages caught. `api.py` coverage 71% → **73%**; full suite
+  **1131 passed, 6 skipped, 1 xfailed**.
+
 ### Fixed (2026-11-14) — the Agent Team dashboard reported zero tasks, and there was no fallback at all
 
 - **`/agents/stats` showed `tasks_handled: 0`** after three successful
