@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (2026-11-15) — refresh-token rotation, and the bypass it exposed
+
+The last open item this audit had recorded as a **product decision**. The owner
+asked for it, so it is implemented — a refresh token is now single-use.
+
+**Design: a generation counter, not a denylist.** A JWT cannot be revoked, so
+"still valid?" must come from server-side state. A denylist grows with every
+refresh forever; a per-user generation is one integer. Each refresh token carries
+`gen`; the store holds the user's current generation; rotation increments it, so
+every token below it is dead. One read per check, no write on the login path, and
+the state is bounded by the number of users. Redis-backed when configured (pod A's
+rotation retires the token on pod B), in-process otherwise — with the limit stated
+in the docstring: a restart forgets generations, so pre-restart tokens become
+valid again until their own `exp`.
+
+Legacy tokens carry no `gen` and are generation 0, so the first rotation retires
+them and **nobody is signed out by deploying this**.
+
+**Finding: rotating at `/auth/refresh` alone would have been theatre.** The
+identity middleware (`api.py` 775) also mints access tokens from the refresh
+cookie. Measured before the fix: a request carrying only a refresh cookie got
+`200` from `/auth/me` **and a fresh access cookie**. A rotation check placed only
+in the route would have left that second path alive — the same shape this audit
+kept finding, a control that is present but not connected. One shared predicate
+(`JWTManager.is_stale_refresh`) now guards both. Sabotage R3 restores the bypass
+and a test catches it.
+
+**Still open, and now the only part of the finding left: logout does not revoke.**
+Rotation retires a token when it is *used*; logout would retire one that has not
+been used, which signs out every other tab. One `token_generations.bump(...)` in
+the logout handler — a behavioural decision, documented rather than taken.
+
+**The `xfail(strict=True)` did exactly its job.** It failed the suite with XPASS
+the moment rotation landed, which is how this changelog got written rather than
+the gap quietly rotting. `test_replaying_a_refresh_token_is_currently_accepted`
+was inverted to `..._is_refused`, and a third test asserts the replay is refused
+on **generation**, not on signature or expiry — a 401 from the wrong cause would
+look identical from outside.
+
+`modules/auth.py` **95%**. Suite **1267 passed, 6 skipped, 0 xfailed**. 3/3
+sabotages caught. `MY_ERRORS.md` #25: my "two users rotate independently" test
+logged in twice with one `TestClient`, so it tested one user twice.
+
 ### Fixed (2026-11-15) — seven numbers that had gone stale, and a CI gate that was 11 points low
 
 The findings documents were edited across five parts. Every number in them was

@@ -226,19 +226,18 @@ def test_refresh_accepts_the_token_from_the_body_as_well_as_the_cookie(fresh_use
     assert r.status_code == 200, r.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="MEASURED FINDING: the refresh token is never rotated, so it can be "
-           "replayed for its full 7-day lifetime. Pinning the current behaviour "
-           "only; changing it is a product decision (it would log out every "
-           "second client that shares a token).",
-)
 def test_a_refresh_token_can_only_be_used_once(fresh_user):
-    """What we WANT. Today the same token works over and over - see the docstring.
+    """Rotation is implemented: a used refresh token is dead.
 
-    This is `xfail(strict=True)`: if rotation is ever implemented, this test
-    starts passing and pytest fails the suite, which is the reminder to delete
-    the marker and keep the assertion.
+    This started as `xfail(strict=True)` pinning the *old* behaviour - the token
+    was replayed for its full 7-day lifetime. `strict` meant that the day the gap
+    closed, pytest would fail the suite and point here. It did exactly that when
+    rotation landed, so the marker is gone and the assertion below is the real
+    requirement.
+
+    The replay is refused because the token is at a retired generation, not
+    because its signature or `exp` is wrong - see `test_a_replayed_token_is_
+    refused_even_though_its_signature_is_still_valid` for that distinction.
     """
     c = _login(fresh_user)
     token = c.cookies.get("refresh_token")
@@ -251,11 +250,13 @@ def test_a_refresh_token_can_only_be_used_once(fresh_user):
     assert second.status_code == 401, "the replayed refresh token was accepted again"
 
 
-def test_replaying_a_refresh_token_is_currently_accepted(fresh_user):
-    """The measured reality, asserted so a change to it cannot pass unnoticed.
+def test_replaying_a_refresh_token_is_refused(fresh_user):
+    """Inverted from "replaying is accepted" when rotation landed.
 
-    Documenting a weakness in prose lets it rot; asserting it means the day
-    someone adds rotation, this test fails and points at the finding above.
+    Kept as a separate test from the one-use check because they fail differently:
+    this one states the *outcome* (three attempts, one success) without caring
+    why, so it still fails if rotation is replaced by some other mechanism that
+    silently allows two.
     """
     c = _login(fresh_user)
     token = c.cookies.get("refresh_token")
@@ -265,18 +266,50 @@ def test_replaying_a_refresh_token_is_currently_accepted(fresh_user):
         c.post("/auth/refresh", json={"refresh_token": token}).status_code
         for _ in range(3)
     ]
-    assert codes == [200, 200, 200], (
-        f"refresh-token replay behaviour changed ({codes}) - update the finding "
-        "and the xfail test above"
+    assert codes == [200, 401, 401], f"refresh-token replay behaviour: {codes}"
+
+
+def test_a_replay_is_refused_even_though_the_token_is_still_cryptographically_valid(fresh_user):
+    """The point of rotation, stated as a test: the replay is refused on
+    *generation*, not on signature or expiry.
+
+    A denylist, an expiry change or a broken signature would all produce a 401
+    for the wrong reason. This asserts the token still verifies - only the
+    server-side generation has moved on.
+    """
+    import modules.auth as auth_mod
+
+    c = _login(fresh_user)
+    token = c.cookies.get("refresh_token")
+    c.cookies.clear()
+
+    assert c.post("/auth/refresh", json={"refresh_token": token}).status_code == 200
+
+    payload = auth_mod.jwt_manager.verify_token(token)
+    assert payload is not None, "the token no longer verifies - rotation is not what refused it"
+    assert payload["type"] == "refresh"
+    assert payload.get("sub")
+    import asyncio
+    current = asyncio.run(auth_mod.token_generations.get(str(payload["sub"])))
+    assert auth_mod.jwt_manager.generation_of(payload) < current, (
+        "the refused token is at the current generation - it was refused for a "
+        "different reason than rotation"
     )
 
 
 def test_logout_clears_the_cookies_but_does_not_revoke_the_token(fresh_user):
-    """Logout is client-side only, and that is worth stating explicitly.
+    """Logout is client-side only, and rotation does not change that.
 
-    `POST /auth/logout` clears the cookies. It does **not** invalidate the
-    token. A copy taken before logout still refreshes successfully - which is
-    the same root cause as the replay finding.
+    `POST /auth/logout` clears the cookies. It does **not** bump the token
+    generation, so a copy of the refresh token taken *before* logout still
+    refreshes successfully afterwards.
+
+    This is deliberately NOT fixed by rotation: rotation retires a token when it
+    is *used*, whereas logout would need to retire a token that has not been
+    used. That is a one-line `token_generations.bump(...)` in the logout handler,
+    and it is a behavioural change for every other tab of the same user, so it
+    stays a product decision. The test asserts the current behaviour and names
+    the fix.
     """
     c = _login(fresh_user)
     stolen = c.cookies.get("refresh_token")

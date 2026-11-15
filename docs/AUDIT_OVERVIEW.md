@@ -245,7 +245,7 @@ See [`ROADMAP.md`](ROADMAP.md). Current order:
 
 | | |
 |---|---|
-| Tests | **1251 passed, 6 skipped, 1 xfailed** |
+| Tests | **1267 passed, 6 skipped, 0 xfailed** |
 | `api.py` coverage | **74%** (was 46% when this audit started) |
 | Repo coverage (CI scope `--cov=.`) | **89%**, gate at **85** |
 | Test files | 67 |

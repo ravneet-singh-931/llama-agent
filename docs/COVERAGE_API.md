@@ -318,10 +318,16 @@ scattered helpers and rare branches. Roughly **13 lines are worth covering.**
 
 ## Open product decisions (not defects to fix unilaterally)
 
-- **Refresh-token rotation.** The refresh token is never rotated and has no
-  revocation list, so it can be replayed for its full 7-day life and logout does
-  not revoke it — see "The auth routes" above. Recorded with an
-  `xfail(strict=True)` so fixing it fails loudly.
+- ~~**Refresh-token rotation.**~~ **DONE** — see "Part F" below. Rotation is
+  implemented with a per-user generation counter, enforced on both paths that can
+  mint an access token. The `xfail(strict=True)` that pinned the gap did its job:
+  it failed the suite with XPASS the moment the fix landed, which is how this
+  document got updated rather than quietly going stale.
+- **Logout does not revoke.** Still open, and now the *only* part of the original
+  finding that remains. Rotation retires a token when it is used; logout would
+  have to retire one that has not been used, which signs out every other tab of
+  the same user. One `token_generations.bump(...)` in the logout handler; the
+  decision is behavioural, not technical.
 
 ## The lesson worth keeping
 
@@ -701,9 +707,13 @@ no server-side revocation list.
 - If a refresh token leaks, there is no way to revoke it short of rotating the
   JWT secret, which signs every user out.
 
-**Not changed in this part**, deliberately — it is a product decision, not a bug
-fix. Rotation logs out every second client sharing a token (two tabs, phone plus
-laptop), and needs a revocation store the app does not have. Recorded instead:
+**Not changed in that part**, deliberately — it is a product decision, not a bug
+fix. *(This section is the record as it stood then; it was **closed later** in
+Part F, which implements rotation and explains the bypass it exposed. Read on.)*
+
+The original reasoning: rotation logs out every second client sharing a token
+(two tabs, phone plus laptop), and needs a revocation store the app does not have.
+Recorded at the time as:
 
 - `test_a_refresh_token_can_only_be_used_once` — what we *want*, marked
   `xfail(strict=True)`. When rotation is implemented this starts passing, pytest
@@ -1122,4 +1132,106 @@ mcp_agents_server.py coverage          -> 52%   (separate container; needs a liv
 full suite (CI flags)                  -> 1251 passed, 6 skipped, 1 xfailed
 TOTAL (--cov=., CI gate 74)            -> 89%
 sabotage                               -> 11/11 caught, each verified first
+```
+
+
+---
+
+## Part F — refresh-token rotation: implemented, and the bypass it exposed
+
+This was the one item this audit deliberately left as a **product decision**:
+a refresh token could be replayed for its full 7-day lifetime, and there was an
+`xfail(strict=True)` waiting for the day it was fixed. The owner asked for it, so
+here it is — including the part that made it non-trivial.
+
+### The design: a generation counter, not a denylist
+
+A JWT cannot be revoked. "Is this token still valid?" therefore has to be decided
+by server-side state. Two options:
+
+| option | cost | problem |
+|---|---|---|
+| denylist of dead token ids | grows with every refresh, forever | needs TTL bookkeeping, unbounded, and one write per refresh |
+| **generation counter per user** | one integer per user | --- |
+
+So each refresh token carries `gen`. The store holds the current generation per
+user; rotation increments it; **any token below the current value is dead**.
+Bounded by the number of users, one read per check, no writes on the login path
+(a new user is generation 0).
+
+State lives in Redis when configured — the same pattern as the brute-force store
+— so a rotation on pod A retires the token on pod B. Without that, "single use"
+would hold only until the load balancer sent the replay to a different replica.
+The in-process fallback is stated honestly: a restart forgets every generation,
+so pre-restart tokens become valid again (they still expire on their own `exp`).
+
+Legacy tokens are generation 0 (they carry no `gen`), so the first rotation
+retires them and **nobody is signed out by deploying this**.
+
+### Finding 15: rotating at `/auth/refresh` alone would have been theatre
+
+The identity middleware (`api.py` 775) mints an access token from the refresh
+cookie whenever the access cookie is missing or expired. **Measured before the
+fix:** a request carrying only a refresh cookie returned `200` from `/auth/me`
+and set a fresh access cookie.
+
+So a rotation check placed only in the route would have left a second, older way
+to turn a revoked refresh token into a working access token — the repo's
+recurring shape, *a control that is present but not connected*. The fix is a
+single shared predicate, `JWTManager.is_stale_refresh`, used by **both** paths.
+Sabotage R3 restores the bypass and a test catches it.
+
+### Finding 16: logout still does not revoke
+
+Rotation retires a token **when it is used**. Logout needs to retire a token that
+has *not* been used, which is a different operation: one `token_generations.bump`
+in the logout handler. That is not done here, and not because it is hard — it
+signs out every other tab of the same user, which is a behavioural decision. The
+existing test stays green and now says exactly that.
+
+### What the tests assert, and why they are split
+
+| file | what it covers |
+|---|---|
+| `tests/test_auth_routes.py` (16) | what a client sees: replay → 401, chain of refreshes, the replay is refused **on generation, not signature** |
+| `tests/test_refresh_rotation.py` (14) | the mechanism: store monotonicity, Redis cross-replica agreement, degradation on a Redis failure, the middleware bypass, two users rotating independently |
+
+The two are separate because they fail differently. The route test fails if
+rotation is broken; the mechanism test fails if the *reason* changes — a broken
+signature check or a shortened `exp` would also produce a 401, and only the
+generation test distinguishes them.
+
+**The `xfail` did its job.** It was `strict=True`, so the moment rotation landed
+pytest failed the run with XPASS and pointed at the test. That is the difference
+between a finding that is *recorded* and one that is *described*: a recorded one
+fails loudly when it is fixed.
+
+### Sabotage results
+
+| # | sabotage | result |
+|---|---|---|
+| R1 | staleness check always returns False | CAUGHT (3 tests) |
+| R2 | generation never advances | CAUGHT (3 tests) |
+| R3 | middleware bypass restored | CAUGHT |
+
+**3 of 3 caught**, and R3 is the one that matters: it restores the exact
+behaviour measured before the fix.
+
+### One error of mine
+
+`test_two_users_rotate_independently` failed on its first run, and the *test* was
+wrong: `journey.client` is a single `TestClient`, so "log in as alice, then log in
+as bob" replaced alice's cookies rather than creating a second user. Rewritten
+with two real sessions. Recorded in `MY_ERRORS.md` #25 — a test that logs in
+twice with one client tests one user twice.
+
+### Measured after this part
+
+```
+tests/test_refresh_rotation.py   -> 14 passed
+tests/test_auth_routes.py        -> 16 passed (was 16 with 1 xfailed)
+modules/auth.py coverage         -> 95%
+full suite (CI flags)            -> 1267 passed, 6 skipped, 0 xfailed
+TOTAL (--cov=., gate 85)         -> 89%
+sabotage                         -> 3/3 caught
 ```

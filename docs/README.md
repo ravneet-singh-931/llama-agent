@@ -29,7 +29,7 @@ interests you. You do not need to read them in order.
 | 16 | [`FILE_MAP.md`](FILE_MAP.md) | All 39 modules, all 6 frontend routes, 62 test modules. The README tree lists 10 of 39 | 0 |
 | 17 | [`REQUEST_FLOW.md`](REQUEST_FLOW.md) | One `POST /chat`, step by step through the real line numbers; the three ways in; where to start reading | 1 |
 | 18 | [`RUNNING_TESTS.md`](RUNNING_TESTS.md) | The CI command, why each flag exists, and the traps that cost real time | 0 |
-| 14 | [`MY_ERRORS.md`](MY_ERRORS.md) | **My own twenty-four mistakes**, kept deliberately — the audit applies to the auditor | 24 |
+| 14 | [`MY_ERRORS.md`](MY_ERRORS.md) | **My own twenty-five mistakes**, kept deliberately — the audit applies to the auditor | 25 |
 | — | [`ROADMAP.md`](ROADMAP.md) | What is done, what is next, what is deliberately not being done | — |
 | — | [`SLO.md`](SLO.md) | Chat latency SLOs per route | — |
 

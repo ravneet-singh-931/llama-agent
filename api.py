@@ -801,7 +801,13 @@ async def identity_middleware(request: Request, call_next):
         if not payload or payload.get("type") != "access":
             refresh = cookies.get("refresh_token")
             rpayload = jwt_manager.verify_token(refresh) if refresh else None
-            if rpayload and rpayload.get("type") == "refresh" and rpayload.get("sub"):
+            # A rotated-away token must NOT mint an access token here. Without
+            # this check the middleware is a bypass around /auth/refresh's
+            # rotation: measured before the fix, a request carrying only a
+            # refresh cookie got a 200 and a fresh access cookie.
+            if (rpayload and rpayload.get("type") == "refresh"
+                    and rpayload.get("sub")
+                    and not await jwt_manager.is_stale_refresh(rpayload)):
                 new_access = jwt_manager.create_access_token(data={"sub": rpayload["sub"]})
 
     if new_guest or new_access:
@@ -1075,8 +1081,10 @@ async def refresh_token(request: Request, response: Response, body: RefreshReque
         raise HTTPException(status_code=401, detail="Missing refresh token")
     try:
         result = await user_manager.refresh_token(refresh)
-        # Keep the same refresh token (it is still valid); only rotate access.
-        _set_auth_cookies(response, result["access_token"], refresh, request)
+        # The refresh token was rotated: store the NEW one. Reusing the old value
+        # here would hand the client a token that is already dead.
+        _set_auth_cookies(response, result["access_token"],
+                          result["refresh_token"], request)
         return AuthSuccess(status="ok")
     except HTTPException:
         raise

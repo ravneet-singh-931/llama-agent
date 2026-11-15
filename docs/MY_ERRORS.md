@@ -308,6 +308,26 @@ thing fails*, or the experiment measures the fake.
 
 ---
 
+## 25. A test that logged in twice with one client tested one user twice
+
+**What I did.** Wrote `test_two_users_rotate_independently`: log in as alice, read
+her refresh token, log in as bob, read his, rotate alice's, then assert bob's
+still works. It failed with `401` and I briefly thought rotation was retiring the
+wrong user's session - a serious bug.
+
+**What was true.** `journey.client` is a single `TestClient` with one cookie jar.
+The second login did not create a second session; it **replaced** alice's
+cookies. Both "users" were the same user, so rotating once made the shared token
+generation 1 and the "other" token - also alice's - was correctly refused.
+
+**The fix.** Two `TestClient` instances, two registrations, two logins.
+
+**The rule.** In this suite one client is one browser. Any test about isolation
+between users needs two clients, and a test that wants two users but reuses one
+client is testing the same user twice while looking like it tests two.
+
+---
+
 ## What these have in common
 
 Most of them were **a check that appeared to pass**. Not a wrong answer — a
