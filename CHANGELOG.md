@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-11-14) — the MCP tool-call path, and a dashboard that reports zero
+
+- **`/mcp/tools` had two tests and both asserted `401`.** The successful call,
+  the `504` timeout, the `502` mapping, the `HTTPException` passthrough and the
+  whole circuit breaker had never executed. `tests/test_mcp_tool_call.py` (13
+  tests) covers all of them against a fake MCP client: no network, no LLM.
+- **The route needed no changes.** It was correct and unproven. Measured and now
+  pinned: the breaker opens after 3 consecutive failures and then fails fast
+  without calling the client, a success resets the count, a timeout is a `504`
+  (not `502`), a deliberate `HTTPException` is not rewritten, and the feature
+  flag returns `404`.
+- **Ordering worth knowing:** authentication runs *before* the feature flag, so an
+  anonymous caller on a disabled `/mcp/tools` gets `401`, not `404`. Both cases
+  are pinned because the handler reads as if the flag came first.
+- **`_MCP_TOOL_TO_AGENT` is not an allowlist.** It only decides which dashboard
+  counter to bump; an unknown tool name is forwarded verbatim. Pinned as the
+  current contract rather than endorsed.
+- **Real defect found and recorded:** the Agent Team dashboard shows
+  `tasks_handled: 0` after real dispatches. `_record_agent_usage` writes
+  `app.state.agent_stats` *from* an empty shared dict instead of merging into it,
+  so the in-memory count caps at 1 and `/agents/stats` (which reads the shared
+  dict) reports 0. Pinned by a test asserting the current wrong behaviour, so
+  fixing it fails loudly. Not fixed here — it changes a number a user reads and
+  wants its own sabotage pass.
+- Also settled the second coverage artifact of this audit: `api.py:2846` is
+  reported unexecuted but demonstrably runs (proven by substitution).
+- 13 new tests; 8 of 8 sabotages caught. `api.py` coverage 67% → **70%**; full
+  suite **1114 passed, 6 skipped**.
+
 ### Fixed (2026-11-14) — `/chat` and `/chat/stream` disagreed, and "hello" was eating real questions
 
 - **Four divergences between the two chat routes**, each measured before it was

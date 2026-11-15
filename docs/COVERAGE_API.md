@@ -295,19 +295,17 @@ assert the target exists before relying on it.
 
 ## What is still untested, in priority order
 
-1. **`/chat` — the non-streaming route (67 missing lines).** The streaming twin is
-   now well covered; this one is not, and it shares the same command parsing.
-2. **`/chat` (the non-streaming route) command branches (76 lines).** `remember` / `recall` / `show facts`
-   parsing. `remember` and `recall` are covered indirectly by the facts tests;
-   the failure modes (empty key, oversized value, unknown key) are not.
-3. **`lifespan` (13 missing lines).** Database-down, OptimizedRAG fallback and the
+1. **Dashboard counters do not accumulate without Redis (found this part).**
+   `/agents/stats` reports `tasks_handled: 0` after real dispatches, and the
+   in-memory counter caps at 1 — see "The MCP tool-call path" above. Needs the
+   merge fix plus a sabotage pass of its own.
+2. **`lifespan` (13 missing lines).** Database-down, OptimizedRAG fallback and the
    uploads re-index are covered; what remains is the baseline alert sweep and the
    success-path prints.
-4. **WebSocket ticket lifecycle (28 lines).** Issue → consume → replay. A ticket
+3. **WebSocket ticket lifecycle (28 lines).** Issue → consume → replay. A ticket
    that can be consumed twice is an auth hole, and nothing checks it.
-5. **Error branches (106 lines).** Lowest value of the five. These mostly
+4. **Error branches (106 lines).** Lowest value of the five. These mostly
    convert an exception into a 500 that is already logged.
-
 ## The lesson worth keeping
 
 Line coverage counts executed lines. It does not know which lines decide **who is
@@ -468,4 +466,112 @@ full suite (CI flags)             -> 1101 passed, 6 skipped
 api.py coverage                   -> 67%   (was 64.4%)
 TOTAL (--cov=., the CI gate)      -> 87%   (gate: 74%)
 flake8 on the new test file       -> 0
+```
+
+## The MCP tool-call path — correct code, one real defect behind it
+
+`/mcp/tools` is the only route where a **client-supplied string becomes a tool
+name** sent to another server. Before this part it had two tests, and both
+asserted the same thing: an anonymous caller gets `401`. The successful call, the
+timeout, the error mapping and the circuit breaker had never executed in a test.
+
+`tests/test_mcp_tool_call.py` — 13 tests, no network and no LLM (`call_mcp_tool`
+is faked at the api boundary).
+
+### What was already right
+
+The route needed **no changes**. It maps failures correctly and the breaker
+behaves exactly as designed. Measured, now pinned:
+
+| behaviour | result |
+|---|---|
+| breaker after 3 consecutive failures | opens; next call is `503` **without** calling the client |
+| a success | resets the failure count to 0 |
+| timeout | `504`, not `502` |
+| `HTTPException` from the client | re-raised unchanged (a `404` stays a `404`) |
+| any other exception | `502`, internal message not leaked |
+| feature flag off | `404` (not `403`, not `500`) |
+
+### Ordering that is not obvious from the code
+
+**Authentication runs before the feature flag.** `/mcp/tools` is
+`Depends(get_current_user)`, so a stranger hitting a *disabled* route gets `401`,
+not `404`. `/mcp/status` is optional-auth, so it returns `404`. Both are now
+pinned, because reading the handler top-to-bottom suggests the flag comes first.
+
+### There is no allowlist
+
+`_MCP_TOOL_TO_AGENT` looks like one but is only used to decide **which dashboard
+counter to bump**. `nonexistent_tool` is forwarded to the MCP server verbatim and
+returns whatever the server decides. Pinned as the current contract, not
+endorsed — if it should be an allowlist, that test is the one to change.
+
+### The real defect: the dashboard counter resets to 1
+
+Found by chasing a coverage line, not by looking for a bug.
+
+`/agents/stats` ("Agent Team" dashboard) reports `tasks_handled` per agent. After
+three successful `coder_agent` calls, measured:
+
+```
+app.state.agent_stats   -> {"handled": {"coder": 1}}
+/agents/stats           -> tasks_handled: 0
+```
+
+**The dashboard shows zero tasks while the calls are running.**
+
+Cause, traced through `_record_agent_usage` (api.py 1386–1408):
+
+1. `_load_shared_dict(key, default)` returns `default` when Redis is absent —
+   and the caller passes a **newly built** `{"handled": {}, "last_used": {}}` on
+   every call, so the "shared" dict is empty each time.
+2. `handled = shared.setdefault("handled", {})` therefore starts empty.
+3. `handled[key] = handled.get(key, 0) + 1` writes `1`.
+4. `stats["handled"] = handled` **replaces** `app.state.agent_stats["handled"]`
+   with that one-entry dict instead of merging into it.
+
+The in-process mirror is written *from* the empty shared dict, not *into* it.
+
+This is pinned by `test_the_counter_does_not_accumulate_without_redis`, which
+asserts the **current, wrong** behaviour and says in its docstring that fixing the
+merge must invert it. A defect that is recorded fails loudly when it is fixed;
+a defect that is merely described rots.
+
+**Not fixed in this part**, deliberately: it is a behavioural change to a
+dashboard that a user reads, and the fix (merge into the existing mirror) wants
+its own sabotage pass. Recorded in the backlog below.
+
+### A coverage artifact, settled by substitution
+
+The report listed `api.py:2846` — the `raise HTTPException(503)` inside the open
+breaker — as **unexecuted**, even though a test asserts its exact body. Replacing
+the line with a different status made that test fail, proving the line runs.
+
+This is the second time in this audit that a `raise` line was reported as
+unexecuted while demonstrably executing. Do not report dead code from a coverage
+report alone.
+
+### Sabotage results
+
+| # | sabotage | caught by |
+|---|---|---|
+| M1 | `except asyncio.TimeoutError` removed | `test_a_timeout_becomes_a_504` |
+| M2 | `except HTTPException: raise` removed | `test_an_http_exception_is_not_rewritten` |
+| M3 | success no longer resets the counter | `test_a_success_resets_the_failure_count` |
+| M4 | breaker threshold never reached | `test_the_breaker_opens_...` |
+| M5 | breaker check ignored | `test_the_breaker_opens_...` |
+| M6 | usage never recorded | `test_a_known_tool_records_agent_usage` |
+| M7 | flag ignored on `/mcp/tools` | `test_the_flag_refuses_an_authenticated_caller_with_404` |
+| M8 | flag ignored on `/mcp/status` | `test_the_feature_flag_gates_both_routes` |
+
+**8 of 8 caught.**
+
+### Measured after this part
+
+```
+tests/test_mcp_tool_call.py   -> 13 passed
+full suite (CI flags)         -> 1114 passed, 6 skipped
+api.py coverage               -> 70%   (was 67%)
+TOTAL (--cov=., CI gate 74)   -> 87%
+flake8 on the new file        -> 0
 ```
