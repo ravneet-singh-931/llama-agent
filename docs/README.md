@@ -18,7 +18,7 @@ interests you. You do not need to read them in order.
 | 4 | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | Retrieval, reranking, caches, cross-user leaks | 6 |
 | 5 | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | Auth, CORS, containment, PII, fact input limits, WebSocket tickets | 10 |
 | 6 | [`DARK_MODULES.md`](DARK_MODULES.md) | 23 dead public names, verified by reference not line count | 23 + addenda |
-| 7 | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 9 live-cluster checks against all 31 manifests | 9 |
+| 7 | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | 9 live-cluster checks against all 30 YAML files (87 objects) | 9 |
 | 8 | [`CODE_QUALITY.md`](CODE_QUALITY.md) | Env vars, silent handlers, unused locals, the Streamlit deletion, the route split | 8 |
 | 9 | [`E2E_JOURNEY.md`](E2E_JOURNEY.md) | The first end-to-end test, and the four wrong assumptions it caught | 4 |
 | 10 | [`MIGRATIONS.md`](MIGRATIONS.md) | `create_all` cannot add a column; Alembic baseline; the logging bug | 3 |

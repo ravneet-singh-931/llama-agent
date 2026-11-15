@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-11-15) — seven numbers that had gone stale, and a CI gate that was 11 points low
+
+The findings documents were edited across five parts. Every number in them was
+then re-checked against a fresh measurement, and seven that a reader would take
+as **current state** were wrong. Historical counts inside part narratives were
+left alone: they were correct when measured, and rewriting history would be a
+different lie.
+
+**Stale as current state (all corrected):**
+
+| where | claimed | measured |
+|---|---|---|
+| `README.md` at-a-glance | 842 passed, 78.6% coverage | **1251 passed, 89%** |
+| `README.md` body | "1020 tests" | **1251** |
+| `README.md` quick start | "842 passed, 6 skipped, 17 deselected" | **1251 passed, 6 skipped, 1 xfailed** |
+| `AUDIT_OVERVIEW.md` status | 1070 passed, api.py 64.4%, 85%, 51 test files | **1251, 74%, 89%, 67** |
+| `README.md` (×3) | "14 services" | **13** — the table below the heading lists 13 rows |
+| `ROADMAP.md` row 7 | "31 manifests, 14 services" | **30 YAML files / 87 objects, 13 services** |
+| `KUBERNETES_CHECKS.md` | "All 31 manifests were parsed" | **30 files, 87 objects** ("31" matched neither) |
+
+**A comment that cited a README it did not have.** `.github/workflows/main.yml`
+said the narrower `--cov=modules --cov=api` scope "reads 70%; both are in the
+README" — the README documented neither. The workflow comment and the README row
+now both state **89% (wide) and 81% (narrow)**, with the warning that they measure
+different sets of files.
+
+**One percentage corrected on re-measurement.** `AUDIT_OVERVIEW.md` said the
+remaining `api.py` gap is "not mostly error branches (only 18% is)". Re-measured
+by parsing `api.py` with `ast` and counting missing lines inside `ExceptHandler`
+nodes: **64 of 328 (19%)**. The original 18% (106 of 588) was right when it was
+written; both are now stated with their denominators.
+
+**The CI coverage gate was 11 points behind reality: raised 74 -> 85.**
+The workflow's own rule is "the floor is set 4 points below the measured value";
+measured was 89%, the floor was 74% — set when the repo was at 78.6%. Verified
+the new gate both ways: `--cov-fail-under=85` passes (89% actual), and
+`--cov-fail-under=95` **fails** with exit 1, so the ratchet is not decoration.
+`README.md`, `AUDIT_OVERVIEW.md` and `CI_FINDINGS.md` were updated to say 85.
+
+Coverage moved 88% -> 89% across this audit and never down.
+
 ### Security (2026-11-15) — the WebSocket manager and the MCP feature flag
 
 **A corrupt feature-flags file is silently overwritten with the defaults.** The

@@ -21,7 +21,7 @@ filename against the README tree.
 | `multi_agent.py` | 1991 | The five specialist agents and the orchestrator that routes to them. Second-largest file. |
 | `llama_agent1.py` | 865 | The Groq/llama-index wrapper and the streaming agent loop. |
 | `mcp_agents_server.py` | 342 | The MCP **server** — exposes the agents as MCP tools over SSE. |
-| `docker-compose.yml` | — | 14 services (app, nginx, postgres, redis, prometheus, grafana, loki, promtail, …). |
+| `docker-compose.yml` | — | 13 services (app, nginx, postgres, redis, chromadb, mcp-server, frontend, prometheus, grafana, loki, promtail, node-exporter, phoenix). |
 | `Dockerfile` / `Dockerfile.nginx` | — | App image and proxy image. |
 | `alembic.ini`, `migrations/` | — | Database migrations. |
 | `init.sql` | — | Initial schema. |

@@ -5,7 +5,7 @@ wrong, what was fixed, and the proof. The commands are safe to rerun.
 
 **Status, stated up front.** The seven checks below were run against a live cluster on
 2026-10-26. On **2026-11-13** every claim that can be verified from the manifests alone was
-re-verified by parsing all 31 files (89 resources) — and **one claim in this document was
+re-verified by parsing all 30 files (87 resources) — and **one claim in this document was
 wrong**. Check 8 is newer still (2026-11-13) and did not come from the cluster at all. See *"What the audit found"* at the end. The four checks that need a running
 cluster (`kubectl`) could not be re-executed here and are marked as such; they are not
 being re-asserted as freshly true.
@@ -217,8 +217,9 @@ first step and what the program accepted as a first step.
 
 ## What the audit found (2026-11-13)
 
-All 31 manifests were parsed and every claim above that can be checked statically was
-checked. Result: **six of seven checks stand, one sentence did not.**
+All 30 YAML files in `k8s/` were parsed (87 Kubernetes objects between them, counted by
+`kind:`; an earlier revision of this line said "31 manifests", which matched neither
+number) and every claim above that can be checked statically was checked. Result: **six of seven checks stand, one sentence did not.**
 
 ### Verified against the manifests
 

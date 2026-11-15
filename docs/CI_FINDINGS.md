@@ -99,7 +99,7 @@ on `PATH` in the step's context.
 **Symptom.** Three consecutive CI failures on changes that passed locally.
 
 **Cause.** My local loop was not CI's loop. CI runs
-`pytest tests/ -v -m "not mcp" -p no:phoenix --cov=. --cov-fail-under=74`;
+`pytest tests/ -v -m "not mcp" -p no:phoenix --cov=. --cov-fail-under=85`;
 running plain `pytest -q` locally is a **different command with a different
 scope**.
 
@@ -107,7 +107,7 @@ scope**.
 
 ```bash
 pytest tests/ -v -m "not mcp" --tb=short -p no:phoenix \
-  --cov=. --cov-report=term --cov-fail-under=74
+  --cov=. --cov-report=term --cov-fail-under=85
 bandit -r . -f json -o bandit-report.json --skip B101,B104,B105,B106,B107,B110
 flake8 . --count --select=E9,F63,F7,F82
 ```

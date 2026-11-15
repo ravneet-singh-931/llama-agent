@@ -54,8 +54,8 @@ checked, and the README then cites it as proof.
 **The problem.** The repo reported a coverage number and never gated on it, so it
 could fall and stay green while the build passed.
 
-**Fixed so far.** `--cov-fail-under=74` in CI, with the floor set 4 points below
-the measured value as a ratchet. `api.py` went
+**Fixed so far.** `--cov-fail-under=85` in CI (raised from 74 when the audit took the
+repo to 89%), with the floor set 4 points below the measured value as a ratchet. `api.py` went
 **46% → 51% → 55.5% → 58.7% → 61.9% → 64.4% → 67% → 70% → 71% → 73% → 74%** (`api.py`)
 **67% → 88%** (`modules/security_hardening.py`)
 **66% → 92%** (`modules/pg_store.py`)
@@ -64,9 +64,9 @@ the measured value as a ratchet. `api.py` went
 number: conversations, `/chat/stream`, WebSocket/startup, then the agent and
 `@team` streaming bodies and the uploads re-index.
 
-**Still open.** `api.py` is 74%; the security primitives are 88% and the Postgres layer 92%. The remaining gap is measured, not guessed —
+**Still open.** `api.py` is 74%; the modules that were the real gap are now **security_hardening 88%**, **pg_store 92%**, **rag 71%**, **mcp_client 96%**, **websocket 96%**. What remains uncovered is measured and named: `advanced_rag.py` 31% (`AdvancedRAG`/`SubQuestionEngine`/`PhoenixTracer`/`RouterQueryEngine` — constructed nowhere), `cicd_improvements.py` 56% (`ABTestManager`/`DeploymentManager` — instantiated nowhere), `mcp_agents_server.py` 52% (a separate container). The remaining gap is measured, not guessed —
 see `COVERAGE_API.md`, including the correction that it is **not** "mostly error
-branches" (only 18% is).
+branches" — measured, 64 of the 328 missing lines (19%) are inside an `except` handler.
 
 **The honest framing:** line coverage counts executed lines. It does not know
 which lines decide who is allowed to see what. Ten tests over an ownership check
@@ -203,7 +203,9 @@ write-ups in `CASE_STUDIES.md`. The short list:
 
 1. Called the Docker job "decorative." It builds on every main push. **Verify with
    `gh run view --json jobs` before calling a job fake.**
-2. Reported "mostly error branches." Measured: **18%**.
+2. Reported "mostly error branches." Measured at the time: **106 of 588 missing
+   lines (18%)**. After this audit the file is at 74% with 328 missing, of which
+   64 (19%) are inside an `except` — the same answer, re-measured.
 3. Wrote a `/facts` sabotage that patched the **first of five** identical lines —
    a different handler. The test passed an unchanged program.
 4. Assumed a passing sabotage meant a weak test, when `delete_conversation`
@@ -243,9 +245,9 @@ See [`ROADMAP.md`](ROADMAP.md). Current order:
 
 | | |
 |---|---|
-| Tests | **1070 passed, 6 skipped** |
-| `api.py` coverage | **64.4%** (was 46% when this audit started) |
-| Repo coverage (CI scope `--cov=.`) | **85%**, gate at 74 |
-| Test files | 51 |
+| Tests | **1251 passed, 6 skipped, 1 xfailed** |
+| `api.py` coverage | **74%** (was 46% when this audit started) |
+| Repo coverage (CI scope `--cov=.`) | **89%**, gate at **85** |
+| Test files | 67 |
 | Frontend tests | **0 across 34 `.tsx` files** |
 | CI | 7 jobs, all green; 3 deploy jobs skipped on purpose |

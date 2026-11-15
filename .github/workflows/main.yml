@@ -54,18 +54,20 @@ jobs:
           # --cov-fail-under: the suite reported coverage but never gated on it,
           # so it could fall and stay green.
           #
-          # The floor is set 4 points BELOW the measured value for headroom.
-          # Measured 2026-11-13 with this exact scope (--cov=., i.e. the whole
+          # The floor is set 4 points BELOW the measured value for headroom
+          # (raised 74 -> 85 after the audit took the repo to 89%).
+          # Measured 2026-11-15 with this exact scope (--cov=., i.e. the whole
           # repo, which is wider than modules/+api.py alone):
-          #   TOTAL 17593 statements, 3764 missed, 78.61%
-          # The narrower --cov=modules --cov=api scope reads 70%; both are in
-          # the README. Do not compare the two numbers.
+          #   TOTAL 20586 statements, 2319 missed, 89%
+          # The narrower --cov=modules --cov=api scope reads 81%. Both are stated
+          # in the README ('at a glance'). Do not compare the two numbers: they
+          # measure different sets of files.
           #
           # This is a ratchet, not a target. Lower it only when a change
           # legitimately deletes covered code, and say so in the commit.
           pytest tests/ -v -m "not mcp" --tb=short -p no:phoenix \
             --cov=. --cov-report=xml --cov-report=term \
-            --cov-fail-under=74
+            --cov-fail-under=85
 
       # Retrieval quality on the committed sample corpus (evals/rag/), real
       # embedding model + real reranker, no LLM. Fails on a cross-user leak, a

@@ -30,7 +30,7 @@ proves the fix.
 | 4 | **RAG** (`rag_optimizations` 1,703 lines — largest module) | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | ✅ **DONE** — retrieval table with three negative results, plus R6: the CI gate could not see the reranker |
 | 5 | **Security & multi-tenancy** (~1,900 lines, 5 modules) | [`SECURITY_FINDINGS.md`](SECURITY_FINDINGS.md) | **4** | ✅ **DONE** — S1 corrected the README in three places; S4 open and stated |
 | 6 | **Dark modules** (4,629 lines, 12 files) | [`DARK_MODULES.md`](DARK_MODULES.md) | **23 dead names** | ✅ **DONE** — premise was wrong: all 11 are imported by live code |
-| 7 | **k8s / Docker** (31 manifests, 14 services) | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | **8 checks** | ✅ **DONE** — re-audited 2026-11-13, which caught one wrong claim |
+| 7 | **k8s / Docker** (30 YAML files / 87 objects, 13 compose services) | [`KUBERNETES_CHECKS.md`](KUBERNETES_CHECKS.md) | **8 checks** | ✅ **DONE** — re-audited 2026-11-13, which caught one wrong claim |
 | 8 | **Publishing** (posts 1–4 written) | `docs/posts/` | 4 posts | ⏸ **UNPUBLISHED** — the user's decision, not work outstanding |
 | 9 | **The audit itself** (13 parts) | [`AUDIT_OVERVIEW.md`](AUDIT_OVERVIEW.md) | 13 parts | ✅ **DONE** — see below |
 | 10 | **Code quality** (env vars, silent handlers, dead files) | [`CODE_QUALITY.md`](CODE_QUALITY.md) | 8 | ✅ **DONE** |
@@ -158,7 +158,7 @@ guard.
 | ~~**4**~~ | ~~Tracing overhead measurement~~ | ✅ **DONE** — observability finding #4: ~5 µs/span, 0.003% of a 2 s answer, and a dead collector drops spans instead of blocking. |
 | ~~**5**~~ | ~~Dark-module triage~~ | ✅ **DONE** — [`DARK_MODULES.md`](DARK_MODULES.md). The premise was wrong: all 11 are imported by live code. What IS true: 23 of 61 public names unreachable, 13 of those also untested. |
 | **6** | Publish posts 1–4 | The actual goal. Do not let this stay last forever. |
-| ~~**7**~~ | ~~k8s revisit~~ | ✅ **DONE** — 31 manifests / 89 resources parsed against all 8 checks. One claim was wrong (backups "on the same disk" — two separate PVCs); corrected with the reason that does hold. Four cluster-only checks could not be re-run and say so. Check 8 was added later: the app could not start without an LLM key. |
+| ~~**7**~~ | ~~k8s revisit~~ | ✅ **DONE** — 30 YAML files / 87 resources parsed against all 8 checks. One claim was wrong (backups "on the same disk" — two separate PVCs); corrected with the reason that does hold. Four cluster-only checks could not be re-run and say so. Check 8 was added later: the app could not start without an LLM key. |
 | ~~**8**~~ | ~~**Close**~~ | ✅ **DONE** — README rewritten from this file (seven-part table + closing section). **`ROADMAP.md` kept, not deleted:** `SECURITY_FINDINGS.md` and `DARK_MODULES.md` cite it as the source of their questions, and deleting it would break seven citations. **No release tagged** — the commit hash is the record, and the README already carries the summary a release page would. |
 
 ---

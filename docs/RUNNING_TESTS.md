@@ -14,10 +14,10 @@ pip install -r requirements.txt
 pip install pytest pytest-cov pytest-asyncio
 
 pytest tests/ -v -m "not mcp" --tb=short -p no:phoenix \
-  --cov=. --cov-report=term --cov-fail-under=74
+  --cov=. --cov-report=term --cov-fail-under=85
 ```
 
-Expected, as of this audit: **1137 passed, 6 skipped, 1 xfailed**, `TOTAL` 87%.
+Expected, as of this audit: **1251 passed, 6 skipped, 1 xfailed**, `TOTAL` 89%.
 
 ---
 
@@ -27,7 +27,7 @@ Expected, as of this audit: **1137 passed, 6 skipped, 1 xfailed**, `TOTAL` 87%.
 |---|---|
 | `-m "not mcp"` | MCP tests spawn a **subprocess server**. They are marked `mcp` in `pyproject.toml`. Without the filter they either hang or fail for reasons unrelated to your change. |
 | `-p no:phoenix` | Booting the app installs a **global OpenTelemetry TracerProvider**, and OTel allows that once per process. Without this, a later test that wants its own in-memory exporter silently gets the global one and collects zero spans. This is not theoretical — it broke `test_provider_client` in the full suite while it passed alone. |
-| `--cov-fail-under=74` | A **ratchet**, not a target. It stops coverage sliding. Lower it only when a change legitimately deletes covered code, and say so in the commit. |
+| `--cov-fail-under=85` | A **ratchet**, not a target: the floor sits 4 points below the measured value (89%). It stops coverage sliding. Lower it only when a change legitimately deletes covered code, and say so in the commit. |
 | `--cov=.` | The whole tree. `--cov=modules --cov=api` reads **70%**; `--cov=.` reads **87%**. They are not comparable — do not mix them. |
 
 Roughly **4 minutes** for the full suite. That matters: see "loops" below.
