@@ -612,3 +612,120 @@ full suite (CI flags)                  -> 1166 passed, 6 skipped, 1 xfailed
 TOTAL (--cov=., CI gate 74)            -> 88%
 sabotage                               -> 8/9 caught, 1 correctly survived
 ```
+
+
+---
+
+## Part C — `modules/pg_store.py`: 66% → 92%
+
+`pg_store` is the module that writes chat history to the **real** database. The
+rest of the test suite runs on in-memory SQLite, so this is the layer where a
+defect can be invisible in CI and live in production.
+
+### The gap was structural, not incidental
+
+`tests/test_pg_store.py` is 242 lines and 22 tests. It is *thorough* — and every
+single test ends the same way: the pool raises, and the function returns
+`None`/`[]`/`False` as promised. That is genuinely valuable (it is why chat
+survives an outage) but it means:
+
+> **not one SQL statement in this module had ever been executed by a test.**
+
+A broken `WHERE c.user_id = $2` would still return `None` against an unreachable
+database. Every existing test would stay green. The SQL itself — owner checks,
+conflict handling, ordering, bind order — was unverified.
+
+`tests/test_pg_store_sql.py` (13 tests) drives the real functions against a
+recording fake pool. It does **not** prove the SQL is valid PostgreSQL; only a
+server can. That limit is stated in the file rather than implied away.
+
+### Finding 4: a user can write into another user's conversation (measured)
+
+`add_message` runs:
+
+```sql
+INSERT INTO conversations (id, user_id, title, ...) VALUES ($1, $2, $3, ...)
+ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
+INSERT INTO messages (id, conversation_id, role, content, ...) VALUES ($1, $2, ...)
+```
+
+**There is no owner predicate.** If user B supplies user A's conversation id:
+
+- the conflict clause fires on **A's row**; `user_id` remains A's
+- the `messages` INSERT then writes **B's content into A's conversation**
+
+A's conversation id is not a secret. The default is
+`uuid5(DNS, f"llama-agent-default:{user_id}")` — computable by anyone who knows
+A's user id, which appears in A's own JWT and in URLs the frontend builds.
+
+**What was checked before calling this a defect:**
+
+| question | answer |
+|---|---|
+| can B **read** A's history? | **No.** `get_messages` joins `c.user_id = $2`; verified by test |
+| can B **write** into A's conversation? | **Yes** — measured against the recording fake |
+| can B rename A's conversation? | No — the title update is `WHERE id = $2 AND title IN ('New chat','New Chat')` |
+| what does B gain? | nothing readable: `get_messages(B, ...)` returns `[]` |
+
+So this is a **write-only integrity defect**, not an exfiltration one. B can
+inject content into a conversation B cannot read, and bump its `updated_at`,
+which moves A's conversation to the top of A's own sidebar. A also cannot
+detect it: the message looks like their own history.
+
+**Status: recorded, not fixed.** The correct fix is an owner predicate on the
+conflict clause (`ON CONFLICT (id) DO UPDATE ... WHERE conversations.user_id =
+EXCLUDED.user_id`) or a pre-check, and it is a schema-and-behaviour change that
+belongs with the product owner. The test asserts current behaviour and its
+failure message says to invert it when the fix lands.
+
+### Finding 5: the auto-title can be raced, and the ordering has no stable tie-break
+
+Minor, both recorded rather than changed:
+
+- **Auto-title is a separate statement** after the insert (`UPDATE ... WHERE title
+  IN ('New chat','New Chat')`). Two concurrent first messages both see the
+  default title; the second update wins. Harmless (the title is cosmetic) but it
+  is not atomic with the insert it describes.
+- **`ORDER BY m.created_at ASC, m.id ASC`** — the tie-break is `m.id`, a random
+  UUID, so two messages written in the same timestamp resolve in random order.
+  Removing the tie-break entirely breaks nothing either way (sabotage P4
+  survived); `created_at` is `NOW()`, which is transaction-start time in
+  Postgres, so two messages in one transaction share it. Extremely unlikely with
+  one row per transaction, and not worth changing without evidence.
+
+### Sabotage results
+
+| # | sabotage | result |
+|---|---|---|
+| P1 | owner check removed from the read query | CAUGHT |
+| P2 | auto-title overwrites a user-chosen title | CAUGHT |
+| P3 | title no longer capped at 80 characters | CAUGHT |
+| P4 | ordering tie-break dropped | SURVIVED — redundant, as above |
+| P5 | message row bound to the wrong conversation | **SURVIVED first, then CAUGHT** |
+| P6 | assistant replies retitle the conversation | CAUGHT |
+
+**P5 is the instructive one.** My first version asserted the *conversation*
+argument but never the *message id*, so swapping `$1` and `$2` in the VALUES list
+went unnoticed — and that swap means two messages share a primary key. Fixed by
+adding `test_a_message_row_gets_a_fresh_id_and_the_right_conversation`, which
+also asserts that a second message gets a **different** id.
+
+### A process failure worth recording
+
+P5's sabotage was left **applied on disk** for a moment: the restore ran, then a
+later command re-applied it, and the next coverage run failed with the sabotage
+still in the file. Caught because the failure named the sabotaged SQL
+(`VALUES ($1, $1, $3, $4, NOW())`), not because I remembered. The rule already
+in `RUNNING_TESTS.md` — diff against the backup after every sabotage — is what
+identified it in one step.
+
+### Measured after this part
+
+```
+tests/test_pg_store_sql.py            -> 13 passed
+pg_store.py coverage                  -> 92%   (was 66%)
+existing test_pg_store.py             -> 22 passed, unchanged (degradation paths)
+full suite (CI flags)                 -> 1179 passed, 6 skipped, 1 xfailed
+TOTAL (--cov=., CI gate 74)           -> 88%
+sabotage                              -> 5/6 caught, 1 redundant (P4)
+```

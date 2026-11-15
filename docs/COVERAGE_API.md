@@ -309,7 +309,7 @@ What is left, by measured coverage:
 | `mcp_agents_server.py` | 52% | Server side of the same path |
 | `modules/cicd_improvements.py` | 56% | Feature flags |
 | `modules/websocket.py` | 62% | Real-time chat |
-| `modules/pg_store.py` | 66% | **Real Postgres path** — tests use SQLite |
+| ~~`modules/pg_store.py`~~ | **92%** | **Done** — the SQL paths had never been executed; see `SECURITY_FINDINGS.md` part C |
 | `modules/rag.py` | 67% | The baseline RAG |
 | Frontend | **0 of 34 `.tsx`** | Deferred by the owner, deliberately |
 

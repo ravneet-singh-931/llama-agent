@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (2026-11-15) — the Postgres layer: no query had ever been executed
+
+`tests/test_pg_store.py` is 242 lines and 22 tests, and **every one of them ends
+with the database down**: the pool raises, the function returns `None`, and the
+test passes. That is why chat survives an outage — but it meant not one SQL
+statement in `modules/pg_store.py` had ever run under test. A broken owner check
+would still return `None` for an unreachable database and every test would stay
+green. Coverage 66% → **92%** (`tests/test_pg_store_sql.py`, 13 tests driving the
+real functions against a recording pool).
+
+**Finding: a user can write into another user's conversation.** `add_message`
+runs `ON CONFLICT (id) DO UPDATE SET updated_at = NOW()` with **no owner
+predicate**. Supplying another user's conversation id makes the conflict fire on
+their row, and the following INSERT writes your content into their conversation.
+Their conversation id is not secret — the default is
+`uuid5(DNS, f"llama-agent-default:{user_id}")`, computable from a user id that
+appears in their JWT and in frontend URLs.
+
+Checked before calling it a defect: **reading** another user's history is
+correctly blocked (`WHERE c.user_id = $2`), so this is a **write-only integrity
+defect** — content injection into a conversation you cannot read, plus bumping
+its `updated_at` so it jumps to the top of the owner's sidebar. Recorded, not
+fixed: the fix is an owner predicate on the conflict clause and belongs with the
+product decision.
+
+Also recorded: the auto-title is a separate non-atomic statement, and the message
+ordering's tie-break is a random UUID (redundant — removing it changes nothing).
+
+**5 of 6 sabotages caught.** The one that first survived is `MY_ERRORS.md` #20:
+I asserted the *conversation* argument of a four-argument INSERT while the
+sabotage broke the *message id* — a test that pinned one quarter of the contract
+and looked like it pinned all of it.
+
+Full suite **1179 passed, 6 skipped, 1 xfailed**; TOTAL **88%**.
+
 ### Security (2026-11-15) — the module that decides, not just the routes
 
 `api.py` reached 74% and was called done, which left `modules/security_hardening.py`

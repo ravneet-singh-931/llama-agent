@@ -218,6 +218,23 @@ implementation cannot, the experiment measures the fake.
 
 ---
 
+## 20. I asserted an argument that could not distinguish the bug I was testing for
+
+**What I did.** Sabotaged the `messages` INSERT by changing `VALUES ($1, $2, ...)`
+to `VALUES ($1, $1, ...)` — binding the message id where the conversation id
+belongs, which would make two messages collide on a primary key. My test asserted
+`msg_args[1]` (the conversation) and passed. **The sabotage survived.**
+
+**Why.** `$1` and `$2` are the *first and second* arguments. I checked the second
+one, and the sabotage broke the first. It would only have shown up against a real
+server, as a duplicate-key error.
+
+**The rule.** Check every bound value, and check that two calls produce two
+different ids. A test that pins one argument of a four-argument statement is
+pinning a quarter of the contract and looks like it pins all of it.
+
+---
+
 ## What these have in common
 
 Most of them were **a check that appeared to pass**. Not a wrong answer — a
