@@ -82,7 +82,7 @@ notes.
 | Read | Why |
 |---|---|
 | `README.md` | The claims. You will spend six weeks testing whether they are true |
-| `docs/ARCHITECTURE.md` | The shape of the whole system |
+| `ARCHITECTURE.md` (repo root) | The shape of the whole system |
 | `docs/REQUEST_FLOW.md` | The best document in the repo. Read twice |
 | `docker-compose.yml` | **The system map.** 13 services — `api`, `chromadb`, `frontend`, `grafana`, `loki`, `mcp-server`, `nginx`, `node-exporter`, `phoenix`, `postgres`, `prometheus`, `promtail`, `redis` |
 | `docs/FILE_MAP.md` | Every file in one or two lines. Skim now, return often |

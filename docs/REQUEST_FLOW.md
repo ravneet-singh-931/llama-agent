@@ -8,18 +8,24 @@ Every entry point below is a real line number in `api.py` at the time of writing
 (commit before this file: `a380351`). If a number has drifted, the function name
 will still find it.
 
+**Line numbers re-verified against the current tree.** Every entry point had
+drifted by exactly +8 or +9 (one block inserted near the top of `api.py`), so the
+values below are current as of the last re-measurement. Search by function name.
+
 ---
 
 ## The three ways in
 
 | entry | route | line | who uses it |
 |---|---|---:|---|
-| REST chat | `POST /chat` | 1664 | anything that wants one JSON answer |
-| Streaming chat | `POST /chat/stream` | 1872 | the frontend, which renders tokens as they arrive |
-| WebSocket | `/ws/{user_id}` | 1165 | live chat, pushed from the server |
+| REST chat | `POST /chat` | 1673 | anything that wants one JSON answer |
+| Streaming chat | `POST /chat/stream` | 1881 | the frontend, which renders tokens as they arrive |
+| WebSocket | `/ws/{user_id}` | 1173 | live chat, pushed from the server |
 
-There is also `POST /documents/ask` (2504) — the same retrieval machinery,
-narrowed to one uploaded document.
+There is also `POST /documents/ask` (2512) — the same retrieval machinery,
+narrowed to **the caller's own document set** (`_user_rag(_request_uid(user))`),
+not to a single file: `SearchRequest` carries only `query` and `top_k`, so there is
+no `document_id` to narrow by.
 
 ---
 
@@ -62,7 +68,7 @@ cannot hold a request open forever).
 | condition | path |
 |---|---|
 | the message looks like a **document question** | `modules/doc_answers.py`, with follow-up tracking so "what about the pricing column?" still knows the topic |
-| the message names a **specialist** intent | `route_multi_agent()` → one agent, or all matched agents concurrently via `run_agents_parallel` (1432) |
+| the message names a **specialist** intent | `route_multi_agent()` → one agent, or all matched agents concurrently via `run_agents_parallel` (1440) |
 | otherwise | plain RAG + the general agent |
 
 **6. Answer, then post-checks.** Grounding (`modules/grounding.py`) and citations
@@ -98,7 +104,7 @@ catch a bug they share.
 ## The WebSocket
 
 ```python
-@app.websocket("/ws/{user_id}")   # 1165
+@app.websocket("/ws/{user_id}")   # 1173
 ```
 
 The path contains a `user_id`, and **it is ignored**. Identity comes from, in
@@ -109,14 +115,14 @@ with code `1008`.
 Why a ticket exists at all: a browser cannot set an `Authorization` header on a
 WebSocket handshake, and putting a real JWT in a URL writes it into access logs
 and browser history. So the client trades a real credential for a disposable one
-at `POST /ws/ticket` (1155) and puts *that* in the URL.
+at `POST /ws/ticket` (1163) and puts *that* in the URL.
 
 ---
 
 ## Where a beginner should read, in order
 
 1. `modules/rag.py` (353 lines) — the whole RAG idea, small.
-2. `api.py` `chat()` at 1664 — read only until step 5 above.
+2. `api.py` `chat()` at 1673 — read only until step 5 above.
 3. `modules/doc_answers.py` — how a document question is actually answered.
 4. `multi_agent.py` `MultiAgentOrchestrator.route_task` (1389) — how a specialist
    is chosen, and why the task is delimited as untrusted data inside the prompt.
@@ -131,8 +137,10 @@ at `POST /ws/ticket` (1155) and puts *that* in the URL.
 | surprise | why |
 |---|---|
 | `/chat` works logged out | `optional_auth`, not `require_auth` |
-| `user_id` in the WebSocket URL does nothing | identity comes from the credential |
+| `user_id` in the WebSocket URL does nothing | identity comes from the credential (ticket → token → cookie); the path value is kept only for URL compatibility |
 | a URL can be a credential | that is what `?ticket=` is — hence single-use, 60s |
 | tests use SQLite, production uses Postgres | so "tests pass" does not prove the production DB path |
 | `strip_html_vectors` does not sanitise the message | it is a signal; the original text is used |
 | `optimistic`-looking `except: pass` everywhere | `modules/silent.py` exists to make each one state what it swallows |
+| the WebSocket has **no `Origin` check** | the ticket path is protected because `POST /ws/ticket` is CORS-gated; the cookie fallback is not, so it is open to cross-site WebSocket hijacking (`api.py:1212-1218`) |
+| the app-level rate limit is **bypassable with a header** | `get_client_ip` (`modules/security_hardening.py:637`) trusts `X-Forwarded-For` unconditionally and reads entry `[0]`, while nginx *appends* with `$proxy_add_x_forwarded_for` — so `[0]` is client-chosen. Read `[-1]`, or only trust the header from a known proxy |

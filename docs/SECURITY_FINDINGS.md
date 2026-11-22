@@ -729,3 +729,119 @@ full suite (CI flags)                 -> 1179 passed, 6 skipped, 1 xfailed
 TOTAL (--cov=., CI gate 74)           -> 88%
 sabotage                              -> 5/6 caught, 1 redundant (P4)
 ```
+
+---
+
+## S9. Four open findings, measured during the documentation audit
+
+Four defects found while checking `ARCHITECTURE.md` and `docs/REQUEST_FLOW.md`
+against the code. **Recorded here, not fixed** — no behaviour was changed. Each
+entry names the exact line, what is wrong, and what "fixed" would mean.
+
+### S9.1 `get_client_ip` trusts a header the client controls
+
+`modules/security_hardening.py:637-650`:
+
+```python
+forwarded = request.headers.get("X-Forwarded-For")
+if forwarded:
+    return forwarded.split(",")[0].strip()      # first entry
+```
+
+Two independent problems:
+
+1. **No trusted-proxy check.** The header is believed unconditionally, so a
+   client that reaches the app without nginx (port `8000` is published —
+   `docker-compose.yml:157`) chooses its own rate-limit key.
+2. **Reads the wrong end of the list.** nginx sets
+   `X-Forwarded-For $proxy_add_x_forwarded_for` (`config/nginx/nginx.conf:159`,
+   `:180`, `:189`), which **appends**. A client sending
+   `X-Forwarded-For: 9.9.9.9` produces `9.9.9.9, <real-ip>`; `[0]` is the forged
+   value, `[-1]` is what nginx observed.
+
+**Reachable through the front door.** `api.py:746` rate-limits on
+`get_client_ip`, and `modules/security_hardening.py:275-300` keys brute-force
+lockout on the same function. A caller varying the header gets a fresh bucket per
+request, so **both the application rate limit and the login lockout are
+bypassable without touching port 8000**. nginx's own `limit_req` is *not*
+affected — it keys on `$binary_remote_addr`.
+
+**Fixed would mean:** read `[-1]` when the peer is a trusted proxy, `request.client.host`
+otherwise; add a test that forges the header and asserts one bucket.
+
+### S9.2 The WebSocket has no `Origin` check
+
+`api.py:1173-1219`. The ticket path is safe by construction — a ticket can only be
+obtained from `POST /ws/ticket` (`api.py:1163`), which is a normal CORS-gated
+request. The **cookie fallback** (`api.py:1212-1218`) is not: a browser attaches
+`access_token` to the handshake automatically, and WebSocket handshakes are not
+subject to CORS. A hostile page can therefore open an authenticated socket.
+
+Severity is bounded: an unknown cookie yields a `guest-` id, so the attack
+requires a logged-in victim to visit the attacker's page.
+
+**Fixed would mean:** reject the handshake unless `websocket.headers["origin"]`
+is in the allowed list.
+
+### S9.3 `/health` is a hardcoded string used as both liveness and readiness
+
+`modules/monitoring.py:226-238` returns `{"status": "healthy", ...}` as a
+**literal**, with the docstring stating it is "about the process being up, not
+about traffic". `api.py:910-930` adds fields that are mostly constants; the only
+measured one is `llm_key`.
+
+`k8s/api.yaml:255` and `:263` use the same endpoint for **both** probes, so a
+replica whose dependencies are unreachable is reported **Ready** and receives
+traffic. Observed consequence: a replica that fell back to a pod-local Chroma
+store (S9.4) passes readiness and serves from a split index.
+
+**Fixed would mean:** split `/health/live` (process only) from `/health/ready`
+(checks Chroma, Postgres, Redis).
+
+### S9.4 The Chroma fallback silently recreates the multi-replica bug
+
+`modules/vector_store.py:433-450`. When `CHROMA_SERVER_URL` is set and
+`heartbeat()` fails, the code prints `[WARN]` and **returns a pod-local
+`PersistentClient`**. `get_vector_store()` is called **once**, at startup
+(`api.py:543`), so the pod stays on the private store for its whole lifetime even
+after chromadb returns.
+
+In a single-replica deployment this is a graceful degradation. In a
+multi-replica deployment it is a **silent data split**: one replica serves
+documents another cannot find, with no error and no failed health check.
+
+**Fixed would mean:** make the fallback fatal when more than one replica is
+configured (e.g. `CHROMA_REQUIRED=1`), and expose which client is in use on
+`/health/ready`.
+
+### S9.5 `require_api_key` returns 503 with no `Retry-After`
+
+`api.py:897-907`. The status code is right — the fault is the server's, and it
+is retryable. The response carries no `Retry-After`, so clients have to guess.
+
+### S9.6 `"what's new"` routes an ordinary document question to a research agent
+
+`modules/routing.py:257-273`. `RECENCY_KEYWORDS` (added to the automaton as
+`research`) contains `"what is new"` and `"what's new"`. Measured:
+
+```
+route_multi_agent("what's new with my documents?")   -> (True, 'research')
+route_multi_agent("what files do I have?")           -> (False, 'research')
+```
+
+The first is a document question sent to a research agent, because "new" read as
+news. `api.py:1752-1756` documents the same class of collision for `"what is
+my name?"` and resolves it by ordering the name check first; there is no
+equivalent guard for document phrasing.
+
+**Fixed would mean:** remove those two phrases from `RECENCY_KEYWORDS`, or run
+`is_document_question()` first for any message naming an uploaded file (it partly
+does — `_DOC_QUESTION_REF_WORDS` does not include "new").
+
+---
+
+## What this part did not do
+
+It did not change behaviour. No file under `modules/`, `api.py`, or
+`config/nginx/` was modified — only docs and comments, so that the next reader
+is told the truth about the system as it currently runs.

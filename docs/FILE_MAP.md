@@ -6,7 +6,7 @@ not from memory. Where a file is large, the line count is given so you can judge
 whether to read it.
 
 The README has a shorter tree (`## 📁 Project Structure`). This file exists
-because that section lists **10 of the 39 modules in `modules/`**; the other 29 —
+because that section lists **10 of the 39 modules in `modules/`** (still true); the other 29 —
 including `rag.py`, `pg_store.py`, `redis_store.py`, `pii.py`, `grounding.py`,
 `routing.py` and `websocket.py` — are missing from it. Verified by checking each
 filename against the README tree.
@@ -96,6 +96,7 @@ filename against the README tree.
 | `api_utils.py` | 261 | Small helpers that had accumulated in `api.py`; moved out because none depends on the app. |
 | `websocket.py` | 398 | Real-time chat over WebSocket. |
 | `cicd_improvements.py` | 460 | Feature flags. |
+| `provider_client.py` | 136 | Chooses the SDK/HTTP client for a given model name (`build_client`, `provider_for_model`) — the one module the earlier index missed. |
 | `__init__.py` | — | Package marker with a short index of what the package contains. |
 
 ---

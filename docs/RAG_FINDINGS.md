@@ -30,7 +30,7 @@ measuring an output that nobody had thought to check was non-empty.
 
 ## The retrieval table
 
-`python -m evals.rag_eval retrieval`, no LLM, 6-document corpus, 48 questions of which
+`python -m evals.rag_eval retrieval`, no LLM, 6-document corpus, 44 questions of which
 38 are answerable. "Right passage #N" means the chunk containing the answer was ranked
 Nth among the 6 excerpts the answer model is given.
 
@@ -357,7 +357,7 @@ cases the system was confident and wrong rather than broken and loud.
 
 Stated so it is not discovered by a reader first.
 
-- **The corpus is small: 6 documents, 48 questions, 38 answerable.** Good for catching
+- **The corpus is small: 6 documents, 44 questions, 38 answerable.** Good for catching
   regressions in *this* pipeline. Not a benchmark against other systems, and the
   absolute numbers carry no meaning outside this repo.
 - **The RAG eval cannot run in a bare sandbox.** It downloads the ONNX embedding model

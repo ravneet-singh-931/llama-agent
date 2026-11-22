@@ -433,7 +433,7 @@ volumes:
   loki_data:      # Loki logs
   promtail_positions:  # Promtail positions
   phoenix_data:   # Phoenix traces
-  chroma_model_cache:  # Chroma embedding model cache (shared between api and web)
+  chroma_model_cache:  # Chroma embedding model cache (mounted by api only; survives container recreation)
 
 # 💡 LEARNER TIP: Docker Compose Commands
 #   docker compose config (validate and view merged config)

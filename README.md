@@ -65,7 +65,7 @@ on 2026-10-25. See [Results](#-results-measured) for dates and caveats per row.
 | **RAG retrieval** | right passage in the top 6: **35/38**; ranked first: **31/38** with the ONNX reranker (28/38 without) | `evals/rag_eval.py retrieval`; CI gate hit@6 ≥ 0.89 |
 | **RAG answers** | **41/44** passed; said "not found" on **6/6** unanswerable questions; **0** wrong cache answers | `evals/rag_eval.py answers` |
 | **Cross-user leaks** | **0** | a second user's document is indexed in every retrieval run |
-| **Tests** | **1251 passed, 6 skipped, 1 xfailed** (LLM stubbed); **89% coverage** on CI's `--cov=.` scope (the whole repo), gated at **85%**. The narrower `--cov=modules --cov=api` scope reads **81%** — a different measurement of a different set of files, never comparable | `pytest tests/ -q -m "not mcp" --cov=.` |
+| **Tests** | **1267 passed, 6 skipped, 0 xfailed** (LLM stubbed); **89% coverage** on CI's `--cov=.` scope (the whole repo), gated at **85%**. The narrower `--cov=modules --cov=api` scope reads **81%** — a different measurement of a different set of files, never comparable | `pytest tests/ -q -m "not mcp" --cov=.` |
 | **Cost** | $0.24 measured for one 60-case run at Groq list prices ($0 on the free tier) | token counts × list prices, read from one Prometheus counter (row 22) |
 | **Bugs found and fixed** | 44 fixed, each with a test or a before/after number | [incident log](#-bugs-found-and-fixed) |
 
@@ -93,7 +93,7 @@ proof type, the row does not belong here.
 | 7 | **The cluster** | [`KUBERNETES_CHECKS.md`](docs/KUBERNETES_CHECKS.md) | 9 checks | live-cluster commands; re-audited against all 30 YAML files / 87 objects, which caught one wrong claim; check 8 boots the app with no key |
 
 **What that adds up to:** 44 fixed bugs, 23 dead public names, 7 findings documents, and
-**1251 tests** (was 839 when this table was written; the additions came with the audit in
+**1267 tests** (was 839 when this table was written; the additions came with the audit in
 [`docs/AUDIT_OVERVIEW.md`](docs/AUDIT_OVERVIEW.md)). The number that matters is not any one
 of those — it is that each of them
 was **checked twice**, once when it was found and once when the document was re-read
@@ -1130,7 +1130,7 @@ bash k8s/apply-app.sh $TAG llama-agent && bash k8s/wait-rollout.sh llama-agent
 
 ```bash
 # Unit/integration tests (LLM stubbed)
-pytest tests/ -q -m "not mcp"            # 1251 passed, 6 skipped, 1 xfailed
+pytest tests/ -q -m "not mcp"            # 1267 passed, 6 skipped, 0 xfailed
 
 # RAG retrieval + leak check (no LLM; same gate as CI)
 python -m evals.rag_eval retrieval --min-hit6 0.89
