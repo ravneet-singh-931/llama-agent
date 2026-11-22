@@ -53,7 +53,7 @@
 │                           AI PIPELINE LAYER                                  │
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                    Query Router (RouterQueryEngine)                  │    │
+│  │                    Query Router (modules/routing)                    │    │
 │  │                                                                       │    │
 │  │  User Query ──→ Classify ──→ Route to:                               │    │
 │  │                              ├─→ Document Search (if files uploaded)  │    │
@@ -79,9 +79,9 @@
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                      Re-ranking (CrossEncoder)                       │    │
 │  │                                                                       │    │
-│  │  • Take top 10 results from search                                   │    │
+│  │  • Top 18 candidates from search                                   │      │
 │  │  • Re-score by relevance to original query                           │    │
-│  │  • Return top 3 most relevant chunks                                 │    │
+│  │  • Return top 6 most relevant chunks                                 │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                 │                                           │
 │                                 ▼                                           │
@@ -212,13 +212,34 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
 │   FastAPI    │──────→ PostgreSQL (5432)
 └──────────────┘       Redis (6379)
        │               Groq API (external)
-       │               ChromaDB (local)
+       │               ChromaDB (shared service)
        │ SSE
        ▼
 ┌──────────────┐
 │ MCP Server   │──────→ Multi-Agent System ──→ Groq API
 └──────────────┘
 ```
+
+Three things about this graph that the arrows do not show, all verified in the
+config rather than the picture:
+
+* **`Next.js` has no database client.** It reaches the API through a rewrite
+  (`frontend/next.config.ts:70`, `/api/:path*` → `api:8000`) and does nothing else,
+  so the arrows from `Next.js` to Postgres/Redis/Phoenix are wrong: it is a proxy,
+  not a data client. The API remains the only path to data.
+* **There are three doors, not one.** `nginx` publishes `80`/`443`; `frontend`
+  publishes `3001`; and `api` publishes **`8000`** (`docker-compose.yml:157`,
+  "for direct access"). The observability services are all bound to
+  `127.0.0.1` instead. So a request to `host:8000` never passes nginx — it skips
+  TLS, and it skips nginx's `limit_req`. It does **not** skip the application's own
+  rate limiting, security headers, or CORS: `api.py:745` and `api.py:766` implement
+  all three in middleware, which is why bypassing the proxy loses encryption and
+  nothing else.
+* **The rate limit is not 100 req/min.** `nginx.conf:48` declares
+  `rate=10r/s` with `burst=20 nodelay`, applied only inside `location /api/`
+  (`nginx.conf:149`). `/ws/` and `/` have no `limit_req` at all, and the upstream is
+  `least_conn` with a single uncommented server (`nginx.conf:66-76`) — the replica
+  lines are commented out, so no balancing is happening today.
 
 ## Security Layers
 
@@ -234,7 +255,7 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ Layer 2: Authentication                                      │
-│ • JWT tokens (24h expiry)                                    │
+│ • JWT 30min, refresh 7d                                      │
 │ • Password hashing (bcrypt)                                  │
 │ • API key authentication                                     │
 └─────────────────────────────────────────────────────────────┘
@@ -246,7 +267,7 @@ AI Pipeline ──→ PhoenixTracer ──→ OpenTelemetry Spans ──→ Phoe
 │ • File type checking                                         │
 │ • Size limits (10MB)                                         │
 │ • SQL injection prevention                                   │
-│ • Input sanitization + audit logging                         │
+│ • Input screening (audit only)                               │
 │ • Brute-force protection (IP + username lockout)             │
 └─────────────────────────────────────────────────────────────┘
                             │
@@ -349,6 +370,25 @@ notice so the job cannot go red for reasons unrelated to the product.
                         Load Balancer
 ```
 
+Two things this diagram does not say, both verified against the code:
+
+* **The App server can run more than one `api` replica.** The multi-replica bug this
+  diagram used to describe — one replica indexing a document another could not
+  search — is fixed: `get_vector_store()` (`modules/vector_store.py:415`) connects to a
+  **shared ChromaDB service** over `CHROMA_SERVER_URL` (`docker-compose.yml:175`), so
+  every replica reads and writes the same vector index, and the semantic cache lives in
+  that same shared collection. Token generations, brute-force state, the token budget
+  and WebSocket tickets are all Redis-backed for the same reason. **The one thing that
+  is not replica-safe is the fallback**: if `chromadb` is unreachable at startup,
+  `get_vector_store()` logs `[WARN]` and returns a pod-local `PersistentClient`, which
+  recreates the original bug for that pod's whole lifetime. In a multi-replica
+  deployment that fallback should be fatal, not graceful.
+* **Server 2 is one `pg` and one `redis`, with no replication and no failover.** So
+  "multi-server" here means *separating concerns*, not *high availability*: if Server 2
+  dies, every replica loses its data tier at once. The App tier is horizontally
+  scalable; the database tier is still a single point of failure, and this diagram
+  shows it that way deliberately.
+
 ---
 
 ## Deliberate limits (decisions, not oversights)
@@ -362,5 +402,5 @@ oversight, "we chose not to have X because Y" is engineering.
 | **Mid-run replanning** (`_plan_dag` is fixed once planned) | A replan round is an extra strong-tier call. On the free tier `@team` already runs 84-247 s against a 7,000 input-tokens/min cap, so a replan per failed step could exceed the budget entirely. Instead a failed step degrades to a placeholder and the DAG completes. | We move to a paid tier, or a step failing becomes common enough to measure. |
 | **Graph checkpointing** (a crashed `@team` run restarts) | Conversation history is persisted (Postgres + Redis), but in-flight DAG state is not. Adopting LangGraph to get `PostgresSaver` would rewrite ~250 working lines and break the OpenInference/Phoenix spans that `InstrumentedGroqClient` exists to preserve. | The 40-line Redis variant (persist `{level, results}` per level) is worth doing before adopting a framework. |
 | **SSE, not streamable-http, for the MCP server** | Agent tools (notably `collaborate`) can run for minutes. A streamable-http POST through nginx and the k8s ingress would hit proxy read timeouts and needs resumption support. SSE is the defensible choice for long-running tools. | The MCP SDK drops SSE, or agent tools get fast enough for a request/response model. |
-| **No async task queue / webhooks** (`STREAM_MAX_DURATION=300`, `AGENT_LATENCY_BUDGET=180`) | Work is capped at 180 s by design, which fits inside the 300 s stream ceiling. A Redis task store + poll + webhook is ~400 lines and a worker process solving a problem the budget already prevents. | A single task legitimately needs more than ~4 minutes of agent work. |
-| **No per-tenant budget enforcement** | `CostTracker` reports spend per user/component but never blocks. On a free tier there is no invoice to protect. | The deployment bills someone, or a shared key is exposed. |
+| **No async task queue / webhooks** (`STREAM_MAX_DURATION=300`, `AGENT_LATENCY_BUDGET=180`, `AGENT_STEP_TIMEOUT=150`) | Work is *intended* to be capped at 180 s, inside the 300 s stream ceiling. **It is not: `AGENT_LATENCY_BUDGET` is checked before each DAG level, not as a deadline**, so a level that starts at 179 s can finish past it — `multi_agent.py:1717` records a measured **309 s** `@team` run that exceeded both the budget and the eval's 300 s case timeout. `AGENT_STEP_TIMEOUT` (per level) is the only real bound. A Redis task store + poll + webhook is ~400 lines and a worker process, so the queue is deferred until the budget is enforced as a deadline rather than a pre-flight check. | The budget becomes a real deadline, or a single task legitimately needs more than ~4 minutes of agent work. |
+| **No per-tenant enforcement past the token budget** | `llm_guard` counts tokens per subject (Redis-backed, `AGENT_USER_TOKEN_BUDGET`) and refuses over-budget streams, but nothing is billed and nothing is metered per component. On a free tier there is no invoice to protect. | The deployment bills someone, or a shared key is exposed. |
