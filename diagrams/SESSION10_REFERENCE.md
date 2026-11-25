@@ -223,6 +223,56 @@ answer itself dominates."* That is a much better answer than "the router is slow
 
 ---
 
+## §6b `_plan_dag` (1464) — the hour-3 section
+
+**My opening hypothesis was that the allowlist guarantee breaks here. It does not.** Tested first, stated first.
+
+### The validation loop (1501–1520) — and it is good
+
+```python
+valid = {"research", "coder", "writer", "analyzer", "planner"}
+...
+if not sid or agent not in valid or not instr:
+    return None          # ALL-OR-NOTHING rejection, not per-item skipping
+...
+for s in steps:
+    for d in s["depends_on"]:
+        if d not in ids:
+            return None  # dangling dependency rejected
+```
+
+Measured: `{"agent": "admin"}` → `None`. Unknown agent, missing id, empty instruction, or a
+dependency on a nonexistent step each rejects the **whole plan**, which then falls back to
+`_default_dag` (1569) — a fixed, known-safe five-step graph. **This is the more robust pattern:**
+a partially-trusted plan is worse than no plan.
+
+Unlike routing, this prompt *does* carry `PROMPT_INJECTION_GUARD` (1486). So the guard is missing on
+exactly one prompt — the router — not at both model-driven decision points.
+
+### Three real gaps, all measured
+
+| ID | Where | Finding |
+|---|---|---|
+| **F39** | `1464–1516` | **No step-count cap.** The prompt says *"Keep to 2-5 steps"* — prose, not code. Measured: a 500-element array passes every check and is returned in full. `MAX_STEPS` does not exist (grep-verified). |
+| **F40** | `1503` + `1790` | **Duplicate ids are accepted, and one step is silently lost.** `ids` is a `set` (1503), so `{"s1","s1"}` passes the dangling-dependency check. Then `by_id = {s["id"]: s for s in steps}` (1790) collapses them — **last wins**. Measured: two steps both `id="s1"` (agents `research` then `coder`) → `by_id = {"s1": coder}`, `levels = [["s1"]]`, **1 of 2 steps executes**, the first discarded with no error, no log, no metric. |
+| **F41** | `1696–1702` | **The budget guard is checked before the level's cost is added, so a single large level defeats it.** Order is `if _budget_exceeded(start_time, est_tokens)` → `est_tokens += Σ(len(instruction)//4 + 256)`. Measured arithmetic for 500 steps in one level: **253 000 estimated tokens vs a 20 000 default budget** — but the check ran when `est_tokens` was still 0, so all 500 spawn. A fan-out DAG puts every independent step in level 0, which is exactly the shape the guard cannot see. |
+
+### What still holds it together
+
+`ThreadPoolExecutor(max_workers=AGENT_PARALLEL default 4)` (1694) and
+`AGENT_STEP_TIMEOUT` default **150 s** (71) cap the *blast radius*: 500 steps queue through 4 workers
+and each is individually time-boxed, so this is a **cost and latency** bug, not an availability one.
+
+### Interview phrasing
+
+> *"The plan validator is an allowlist that rejects all-or-nothing, which is the right shape — a
+> half-trusted DAG is worse than falling back to a fixed one. Two things slip through it: there is no
+> cap on step count, and duplicate ids collapse silently so a step disappears. And the token guard is
+> evaluated one level too early, so a wide fan-out is never charged. The pool size and per-step
+> timeout bound the damage."*
+
+---
+
 ## §7 The thing to say in an interview
 
 > *"Injection here cannot escalate privileges, and that's not because of the delimiter — a delimiter is
