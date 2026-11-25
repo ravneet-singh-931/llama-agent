@@ -138,7 +138,7 @@ def _current_store():                                     # 69
 ```
 
 ```python
-def scoped(store, owner):                                  # doc_scope.py:211
+def scoped(store, owner):                                  # modules/doc_scope.py:211
     """Wrap store for owner. Returns store unchanged when either is None."""
     if store is None or not owner:
         return store                                       # ← UNBOUND ⇒ RAW STORE
@@ -179,7 +179,7 @@ read_uploaded_document('alice_private.pdf') ->
 `chat()` *does* reach the tool loop — `MultiAgentOrchestrator()` at ~1795, which calls
 `agent.execute()` → `_execute_with_tools` → `run_tool_loop` → `dispatch_tool` → `read_uploaded_document`.
 
-`submit_with_context` (`request_context.py:38`) faithfully copies the context into each worker thread —
+`submit_with_context` (`modules/request_context.py:38`) faithfully copies the context into each worker thread —
 **but there is nothing in it to copy.** Perfect propagation of `None`.
 
 ### Why no test catches it
@@ -247,7 +247,7 @@ tools read the same globally-bound, unscoped store.
 | ID | Location | Finding |
 |---|---|---|
 | **F43** | `api.py:1673` `chat()` | **The non-streaming `/chat` route never calls `bind_owner`** (0 occurrences in 1673–1877) while reaching the agent tool loop. Measured: `get_owner() == None` ⇒ `scoped()` returns the raw store ⇒ `list_uploaded_documents()` returns **every tenant's** files and `read_uploaded_document("alice_private.pdf")` returns Alice's content to an unbound request. `/chat/stream` (1921) and `/ws` (1220) bind correctly, so the fix is one line in the wrong place rather than a design flaw. |
-| **F44** | `tests/test_agent_tools.py:25` | The suite is **structurally unable** to catch F43: every fixture document is added with `source=` and **no `owner=`**, and no test binds an owner. `grep owner` → 0 hits. A two-tenant fixture is the missing test. |
+| **F44** | `tests/test_agent_tools.py:28` | The suite is **structurally unable** to catch F43: every fixture document is added with `source=` and **no `owner=`**, and no test binds an owner. `grep owner` → 0 hits. A two-tenant fixture is the missing test. |
 | **F45** | `modules/agent_tools.py:69` `_current_store` | Fail-open by construction: an unbound owner is treated as "no scoping" rather than "no access". Correct for a CLI/standalone path, catastrophic for an HTTP path that forgot to bind. Same class as S6's `{"owner": ""}` finding. |
 | **F46** | `mcp_agents_server.py:136` | MCP tools take `(task: str)` only — identity is authenticated at `/mcp/tools` (2856) then dropped. Every MCP agent therefore reads the globally-bound store. |
 | **F47** | `modules/agent_tools.py:45` | `_MAX_IDENTICAL_CALLS = 2` permits **one** retry, not two (`seen[key] > 2` refuses the 3rd). Correct and intentional per the comment, but the variable name reads as "two calls allowed". |
