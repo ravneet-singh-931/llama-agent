@@ -255,7 +255,12 @@ exactly one prompt — the router — not at both model-driven decision points.
 |---|---|---|
 | **F39** | `1464–1516` | **No step-count cap.** The prompt says *"Keep to 2-5 steps"* — prose, not code. Measured: a 500-element array passes every check and is returned in full. `MAX_STEPS` does not exist (grep-verified). |
 | **F40** | `1503` + `1790` | **Duplicate ids are accepted, and one step is silently lost.** `ids` is a `set` (1503), so `{"s1","s1"}` passes the dangling-dependency check. Then `by_id = {s["id"]: s for s in steps}` (1790) collapses them — **last wins**. Measured: two steps both `id="s1"` (agents `research` then `coder`) → `by_id = {"s1": coder}`, `levels = [["s1"]]`, **1 of 2 steps executes**, the first discarded with no error, no log, no metric. |
+<<<<<<< HEAD
 | **F41** | `1696–1702` | **The budget guard is checked before the level's cost is added, so a single large level defeats it.** Order is `if _budget_exceeded(start_time, est_tokens)` → `est_tokens += Σ(len(instruction)//4 + 256)`. Measured arithmetic for 500 steps in one level: **253 000 estimated tokens vs a 20 000 default budget** — but the check ran when `est_tokens` was still 0, so all 500 spawn. A fan-out DAG puts every independent step in level 0, which is exactly the shape the guard cannot see. |
+=======
+| **F41** | `1696–1702` | **The budget guard is checked before the level's cost is added, so a single large level defeats it.** Order is `if _budget_exceeded(start_time, est_tokens)` → `est_tokens += Σ(len(instruction)//4 + 256)`. Measured (simulating both orderings, 500 steps, budget 20 000): **fan-out, current order → 500 ran, 0 skipped; fan-out, charge-then-check → 0 ran, 500 skipped.** A sequential 500-level chain instead stops at **40 levels** under the current order. So the guard is correct for depth and blind to width. |
+| **F42** | `1460–1476` | **`_plan_dag` has no wall-clock cap on the planner call itself.** Every other model call is time-boxed (`AGENT_STEP_TIMEOUT` 150 s applies to *steps*, `DOWNSTREAM_TIMEOUT` elsewhere), but the planning call is a bare `self.agents["planner"]._chat([...], max_tokens=900)`. `_budget_exceeded` is only consulted **after** the DAG exists (1698), so a stalled planner blocks before any guard can run. |
+>>>>>>> 1f5e33f (docs: S10 - F41 refined with simulated both-orderings result; F42 _plan_dag has no wall-clock cap on the planner call)
 
 ### What still holds it together
 
