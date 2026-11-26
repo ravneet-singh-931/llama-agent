@@ -354,6 +354,89 @@ the F43 cross-tenant read *and* makes several of its tools decorative.
 
 ---
 
+## §6c `collaborate` — two implementations, divergent guarantees (hour 3)
+
+`MultiAgentOrchestrator` has **two** multi-agent runners. They are not a wrapper and its core; they are
+parallel implementations with different feature sets.
+
+| Feature | `collaborate()` **(1640)** | `collaborate_stream()` **(1757)** |
+|---|---|---|
+| Grounding on hand-offs (`_checked_inputs`) | **no** | **yes** (1804, 1823) |
+| `grounding` module used at all | **no** | yes |
+| Records `run_tool_outputs` (evidence) | **no** | yes |
+| Budget guard (`_budget_exceeded`) | **yes** | **no** |
+| `critique=` / `reflect=` forwarded | **yes** | **no** |
+| Injection scan of hand-offs | no | no (`_scan_handoff` exists at 1611 in `_build_step_prompt`, which **both** use) |
+
+### Who calls which
+
+| Caller | Route | Runner |
+|---|---|---|
+| `api.py:2119` | `/chat/stream` @team | `collaborate_stream()` |
+| `mcp_agents_server.py:159` | MCP `collaborate` tool | **`collaborate()`** |
+| `multi_agent.py:1943` (`run_multi_agent`) | CLI | **`collaborate()`** |
+| `multi_agent.py:1979` | CLI `/multi` | **`collaborate()`** |
+
+**So: the web route gets figure-verification on hand-offs; the MCP route and the CLI do not.**
+
+### The consequence, stated precisely
+
+On `collaborate()`, an unsourced figure produced by step *s1* is handed **verbatim** to step *s3* with no
+`(unverified)` marker and no `Fact check` event. The mechanism that produces the marker
+(`_checked_inputs`, 1803) exists only in the other class of runner. Everything the Session 9 analysis
+established about grounding — F26 (set membership), F28b (skipped checks vanish) — still applies on
+`/chat/stream`, and **not at all** on the MCP path.
+
+### And the hand-off truncation is silent (both runners)
+
+`_build_step_prompt` (1600) does:
+
+```python
+limit = int(os.getenv("AGENT_HANDOFF_CHARS", "12000") or 12000)
+...
+scanned = self.agents[step["agent"]]._scan_handoff(dep_out[:limit])
+```
+
+Measured: a **16 051**-character dependency output is cut to **12 000**, and the tail is gone with **no
+marker** — no ellipsis, no `(truncated)`, no note. The downstream agent has no way to know text was
+removed. Compare `agent_tools._cap`, which at least reports what it did.
+
+**Interview sentence:** *"the hand-off pipe truncates at 12 000 characters and doesn't say so, so a
+finding that sits in the last quarter of a research step never reaches the writer, and the writer
+confidently summarises without it."*
+
+### The tests do not cover the divergence
+
+```
+tests/tests/test_grounding.py:127      exercises collaborate_stream()   ← the grounded path
+tests/test_chat_fixes.py:280-326 exercises collaborate_stream()
+tests/test_mcp.py:171            "collaborate requires Groq API calls, so we just verify
+                                  the method exists"  → asserts hasattr + callable
+```
+
+**The ungrounded runner is asserted to exist and nothing more.** Its docstring (1640–1655) advertises
+every feature — *"Injection scan (item 6)… Critic/validator (item 5) + reflection (item 8)"* — but never
+mentions that the grounded hand-off is absent. That is the same class of docstring/behaviour drift
+recorded in Session 6.
+
+### A note on `results` and the closure
+
+`_run_step` (1674) closes over `results` and `_build_step_prompt` reads `results.get(dep)`, but
+`results` is only assigned **after** the whole level completes (1733). It works because edges only
+point backwards across levels — `_topo_levels` guarantees it — so a step's dependencies are always
+already in the dict. **Correct, but by invariant rather than by construction:** any future "let steps
+in a level read each other" change breaks it silently.
+
+### Findings
+
+| ID | Location | Finding |
+|---|---|---|
+| **F56** | `multi_agent.py:1640` vs `1757` | **Two divergent multi-agent runners.** `collaborate()` (used by MCP `collaborate` at `mcp_agents_server.py:159` and the CLI at 1943/1979) has **no** hand-off grounding, no evidence collection — while `collaborate_stream()` (used by `/chat/stream`, 2119) has both. The figure check protects the web route only. |
+| **F57** | `multi_agent.py:1605-1611` | **Silent hand-off truncation** at `AGENT_HANDOFF_CHARS` (12 000): measured 16 051 → 12 000 with no truncation marker, so the receiving agent cannot know its input was cut. |
+| **F58** | `tests/test_mcp.py:171` | The ungrounded runner is covered by `assert hasattr(...)` / `assert callable(...)` and nothing else. `tests/test_grounding.py:127` exercises only the grounded one. The divergence is untested **by construction**. |
+
+---
+
 ## §7 Interview phrasing
 
 > *"The loop has five bounds and they answer different questions: rounds answer 'how many', identical
