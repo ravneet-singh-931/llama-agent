@@ -32,13 +32,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import FancyBboxPatch  # noqa: E402
 
 BG = "#0d1117"
-INK = "#e6edf3"
-MUTED = "#adbac7"
-FAINT = "#8b949e"
+INK = "#f0f6fc"
+MUTED = "#d0d7de"
+FAINT = "#b6c2cf"
 GREEN = "#3fb950"
 RED = "#f85149"
-GREY = "#5a6472"
-RULE = "#21262d"
+GREY = "#6e7b8b"
+RULE = "#30363d"
 
 COLS, ROWS = 10, 6
 # One cell per question, in order. q1..q28 ran; q29's quota expires; q30..q60 never ran.
