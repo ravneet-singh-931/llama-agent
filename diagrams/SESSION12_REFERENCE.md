@@ -618,17 +618,30 @@ retry target                   ->  resolve_model("fast") == openai/gpt-oss-20b
 the call that actually failed. Two users of `resolve_model` disagree about which model is in play and
 neither tells the other.
 
-### 16.4 What the retry re-sends — measured
+### 16.4 What the retry re-sends — **the two sites disagree (corrected)**
+
+> **Correction (found while preparing Session 14).** The first version of this section described one
+> behaviour and applied it to both retry sites. They are not the same. Measured separately below.
 
 `run_tool_rounds` mutates the caller's list **in place** (measured: 1 message in, 4 messages out, same
-object). That has two consequences, one good and one expensive:
+object). Whether that saves the retry depends entirely on **which list the caller passes the second time**:
 
-**Good — tools are not re-run.** `multi_agent.py:590` passes `messages`, which by then already contains the
-failed attempt's tool results. Measured with a real `run_tool_loop`: the strong attempt dispatched
-`web_search("q1")` once and 429'd; the retry on fast dispatched **nothing** and answered from the carried
-context.
+| retry site | second call passes | measured dispatches | outcome |
+|---|---|---|---|
+| `_run_tools` (`multi_agent.py:588–590`) | **the same `messages` object** | `['q1','q2']` once each | **resumes** — prior tool work carried forward |
+| `_stream_with_tools` (`multi_agent.py:984–987`) | **`_initial_messages()`** — a fresh list built at 893 | `['q1','q2','q3']` | **restarts** — the strong attempt's results are discarded |
 
-**Expensive — the whole conversation is paid for again.** Measured on a two-search research run:
+So the good behaviour I described is real **only on the non-streaming path**. On the streaming path the
+retry throws away everything the first attempt learned and starts the tool loop again from the system
+prompt. Measured: 3 model calls on strong (`q1`, `q2`, then 429) then 2 on fast (`q3`, answer) — the fast
+tier re-planned from scratch and picked a *different* query.
+
+That is worse than an extra re-send: **the work is repeated and the second attempt is a different
+investigation**, so the answer the user gets may be grounded in neither of the two searches the first
+attempt paid for.
+
+**Expensive on both paths — the whole conversation is paid for again.** Measured on a two-search research
+run through `_run_tools` (the resuming path, so this is the *cheaper* case):
 
 ```
 strong attempt: 3 model calls, conversation now 1 553 tokens
@@ -636,7 +649,8 @@ retry on fast : 1 call, re-sending 1 560 input tokens
 total input paid for one answer: ~3 113 tokens across two tiers
 ```
 
-There is no resume, no memo, no partial credit: `run_tool_loop(client, model, messages, tools, max_rounds,
+and on the restarting path you additionally pay for the discarded tool calls (`q1`, `q2`) that produced
+nothing the final answer used. There is no resume, no memo, no partial credit: `run_tool_loop(client, model, messages, tools, max_rounds,
 max_tokens)` has no notion of "continue from where the other tier stopped". Note also that this
 in-place mutation **contradicts `fit_messages`' explicit "Never mutates the caller's list"** contract in the
 same subsystem — one function documents purity, the other silently depends on mutation for correctness.
@@ -733,7 +747,7 @@ from the second vendor, not a fallback.
 |---|---|---|
 | **F76** | `model_tiers.py:75` | **The fallback trigger is a substring match on `str(error)`.** Measured `True` for `Invalid 'timeout': must be > 0`, `connection_string is required`, `quota field missing in billing payload`, and for *document content* mentioning "rate limit". Signals as short as `429`/`413`/`not found` are ordinary English. |
 | **F77** | `multi_agent.py:567/587/980`, `doc_answers.py:359` | **Every call site hardcodes `should_fallback(e, "strong")`**, so after `llm_guard` has already downgraded a call to fast, a 429 triggers a "fast-tier" retry **on the fast tier again** — measured: same model, same request, immediately. |
-| **F78** | `multi_agent.py:590` + `agent_tools.py:445` | **The retry re-sends the entire conversation.** `run_tool_rounds` mutates the caller's list in place (measured 1 → 4 messages), so tool results survive (good) but the full input is paid twice: **1 553 + 1 560 = 3 113 input tokens** for one answer. Purity is documented for `fit_messages` and silently violated here. |
+| **F78** | `multi_agent.py:590` vs `984–987` + `agent_tools.py:445` | **The two retry sites disagree, and the streaming one restarts.** `_run_tools` re-passes the same mutated list, so prior tool results survive (measured `['q1','q2']`, no repeats). `_stream_with_tools` passes a fresh `_initial_messages()`, so the strong attempt's tool work is **discarded** and the fast tier re-plans from the system prompt (measured `['q1','q2','q3']`). Either way the full input is paid twice: **1 553 + 1 560 = 3 113 tokens**. Purity is documented for `fit_messages` and silently violated here. |
 | **F79** | `llm_guard.py:202` vs `model_tiers.py:75` | **Two functions read the same 429 and reach opposite conclusions.** `friendly_llm_error` distinguishes per-minute from per-day and says waiting will not help; `should_fallback` returns `True` for both and spends a full re-send on a cap that cannot clear. |
 | **F80** | `provider_client.py:73` + `model_tiers.py:116/152` | **The provider chain has no implementer.** `build_client` has no loop, `resolve_provider_chain` and `should_fallback_to_next_provider` have 0 non-test callers, and `LLM_PROVIDER_CHAIN` changes nothing — the provider is chosen once in `GroqLLM.__init__` and never revisited on error. The chain can also admit `anthropic`, which `build_client` refuses. |
 | **F81** | `model_tiers.py:34` vs `provider_client.py:134` | **Two tier-resolution systems disagree.** `LLM_MODEL_STRONG=gpt-4o` makes the app send `gpt-4o` while `resolve_target()` reports `qwen/qwen3.8-27b`; `GROQ_MODEL_STRONG=gpt-4o` makes them disagree the other way. Different env vars, one deployed. |
@@ -773,9 +787,9 @@ the offline-testability the comment asks for.
 **Q9.** `llm_guard` downgrades a call to the fast model, the call 429s, and `_chat` retries. Say which model
 the retry uses, quote the line that decides it, and explain why the two modules cannot detect the mistake.
 
-**Q10.** A research run makes two tool calls on the strong tier, then 429s, then retries on fast. Say what
-the retry sends, why the tools do not run twice, and what it costs in input tokens. Name the two
-contradictory documented behaviours that make the good half accidental.
+**Q10.** A research run makes two tool calls on the strong tier, then 429s, then retries on fast. Answer it
+twice: once for `_run_tools` and once for `_stream_with_tools`. Say what the retry sends, whether the tools
+run twice, and what each costs in input tokens. Name the single line that makes the difference.
 
 **Q11.** One 429 arrives. Name the eight layers that may act on it, and say which two would have to be
 deleted for a *single* retry policy to be reproducible.
