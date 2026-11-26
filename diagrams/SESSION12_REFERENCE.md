@@ -546,3 +546,240 @@ runners and say, for each, whether the case budget is visible inside a step and 
 **Q7.** A team runs `gpt-4o` through `GroqLLM(provider="openai")` with `GROQ_API_KEY` and
 `OPENAI_API_KEY` both set. Which key reaches the OpenAI SDK, which function was written to prevent that,
 who calls it, and what does `tests/test_provider_client.py` actually assert?
+
+---
+
+## §16 Hour 2 — the fallback chain: eight layers, none aware of the others
+
+`modules/model_tiers.py` (157) · `modules/provider_client.py` (136) · the call sites in
+`multi_agent.py` (556, 575, 980) · `modules/doc_answers.py:348`
+
+### 16.1 What one failed request can trigger — measured
+
+| # | Layer | File:line | What it does on failure |
+|---|---|---|---|
+| 1 | `llm_guard.prepare_call` | `llm_guard.py:632` | downgrades strong → fast **silently**, before the call |
+| 2 | `llm_guard._wait_for_room` | `llm_guard.py:645` | sleeps up to 20 s, then sends anyway |
+| 3 | `InstrumentedGroqClient` | `multi_agent.py:414` | on 413: shrink to 60 % of budget, retry |
+| 4 | `BaseAgent._chat` / `_run_tools` | `multi_agent.py:567` / `587` | on 429: retry once on the fast tier |
+| 5 | `_stream_with_tools` | `multi_agent.py:980` | re-runs the **whole tool round** on fast |
+| 6 | `_stream_with_tools` | `multi_agent.py:994` | then streams a plain answer: `for candidate in (self.model, fast)` |
+| 7 | `ReActAgent(max_retries=3)` | `llama_agent1.py:621–627` | llama-index retries internally |
+| 8 | provider SDK | `llama_agent1.py:69–70` | `timeout=60`, `max_retries=2` |
+
+**Eight independent retry policies stacked on one request**, none of which is aware of the others. Layers
+1–6 are this repo's; 7–8 are llama-index's and the vendor SDK's. A single 429 can be answered with several
+full re-sends of the same conversation and every layer believes it is the only one retrying.
+
+### 16.2 `should_fallback` decides with a substring match — measured
+
+```python
+_FALLBACK_SIGNALS = ("429", "rate limit", "rate_limit", "quota", "does not exist", "not found",
+                     "connection", "connecterror", "timeout", "request too large", "413")
+return any(signal in text for signal in _FALLBACK_SIGNALS)      # model_tiers.py:75
+```
+
+Measured, all `True` — i.e. all of these spend a fast-tier re-send:
+
+| error text | why it matched |
+|---|---|
+| `Invalid 'timeout': must be > 0` | **a validation error**, not a transport failure |
+| `Validation failed: connection_string is required` | config error containing `connection` |
+| `quota field missing in billing payload` | schema error containing `quota` |
+| `The uploaded doc explains how to rate limit an API` | **content** containing `rate limit` |
+| `tool not found: web_search_v2` | a *tool* error containing `not found` |
+
+The shortest signals are `429` (3 chars), `413` (3) and `not found` (9). `not found`, `connection`,
+`timeout` and `quota` are ordinary English — and `model_tiers.py:16` explains *why* they are strings at all:
+*"String based so it works with any Groq client error without importing groq error classes"*. The trade is
+explicit, and this is its cost.
+
+### 16.3 The retry cannot change tier — measured
+
+Every call site hardcodes the literal:
+
+```
+modules/doc_answers.py:359    if should_fallback(e, "strong"):
+multi_agent.py:567            if should_fallback(e, "strong"):
+multi_agent.py:587            if should_fallback(e, "strong"):
+multi_agent.py:980            if should_fallback(e, "strong"):
+```
+
+So the handler always believes the failed call was on strong. But `llm_guard` (layer 1) may already have
+**downgraded it to fast** without telling anyone:
+
+```
+window: strong 6 950 / 7 000  ->  prepare_call returns openai/gpt-oss-20b
+that call now 429s             ->  should_fallback(e, "strong") == True
+retry target                   ->  resolve_model("fast") == openai/gpt-oss-20b
+```
+
+**Same model, same request, immediately again.** The "retry on the fast tier" is a literal, not the tier of
+the call that actually failed. Two users of `resolve_model` disagree about which model is in play and
+neither tells the other.
+
+### 16.4 What the retry re-sends — measured
+
+`run_tool_rounds` mutates the caller's list **in place** (measured: 1 message in, 4 messages out, same
+object). That has two consequences, one good and one expensive:
+
+**Good — tools are not re-run.** `multi_agent.py:590` passes `messages`, which by then already contains the
+failed attempt's tool results. Measured with a real `run_tool_loop`: the strong attempt dispatched
+`web_search("q1")` once and 429'd; the retry on fast dispatched **nothing** and answered from the carried
+context.
+
+**Expensive — the whole conversation is paid for again.** Measured on a two-search research run:
+
+```
+strong attempt: 3 model calls, conversation now 1 553 tokens
+retry on fast : 1 call, re-sending 1 560 input tokens
+total input paid for one answer: ~3 113 tokens across two tiers
+```
+
+There is no resume, no memo, no partial credit: `run_tool_loop(client, model, messages, tools, max_rounds,
+max_tokens)` has no notion of "continue from where the other tier stopped". Note also that this
+in-place mutation **contradicts `fit_messages`' explicit "Never mutates the caller's list"** contract in the
+same subsystem — one function documents purity, the other silently depends on mutation for correctness.
+
+### 16.5 A daily cap and a per-minute cap get the same treatment — measured
+
+```
+friendly_llm_error per-minute: "⚠️ I've hit the free-tier per-minute AI limit ... try again shortly."
+friendly_llm_error per-day    : "⚠️ I've hit today's free-tier AI usage limit ... try again shortly."
+
+should_fallback(per-minute) -> True
+should_fallback(per-day)    -> True
+```
+
+`friendly_llm_error` (`llm_guard.py:202`) parses the provider's own text and **distinguishes** the two
+(`"(tpd)"`/`"(rpd)"`, `"per day"`). `should_fallback` does not. So the code knows a daily cap cannot be
+fixed by trying another model and tells the user exactly that — then spends a full re-send trying it.
+
+### 16.6 The chain is a decision procedure with nothing to decide — measured
+
+```
+resolve_provider_chain("groq,openai,anthropic") -> ['groq', 'openai', 'anthropic']
+build_client('anthropic')                       -> ProviderConfigError
+should_fallback_to_next_provider('429', 1, chain) -> True      # i.e. "walk into anthropic"
+```
+
+The chain resolver admits a provider the adapter refuses, and the walk decision is the same substring match.
+`build_client` (`provider_client.py:73`) has **no loop** over providers — it builds exactly the one it is
+given. Live wiring:
+
+| function | non-test callers |
+|---|---|
+| `build_client` (73) | `llama_agent1.py:255` |
+| `provider_for_model` (103) | `llama_agent1.py:248` |
+| `resolve_target` (119) | **0** |
+| `resolve_provider_chain` (`model_tiers.py:116`) | **0** |
+| `should_fallback_to_next_provider` (`model_tiers.py:152`) | **0** |
+
+`grep -rn "provider ="` outside `provider_client.py` returns exactly one live site:
+`llama_agent1.py:248`, inside `GroqLLM.__init__` — executed **once per model object**, then cached in
+`_llms`. **There is no re-selection on error anywhere.** So `LLM_PROVIDER_CHAIN` is a configuration knob that
+changes nothing: the provider is fixed at construction and a failure never revisits it.
+
+### 16.7 Two tier systems, and they disagree — measured
+
+| operator sets | model actually sent | `resolve_target()` says | agree |
+|---|---|---|---|
+| *(defaults)* | `qwen/qwen3.8-27b` | `qwen/qwen3.8-27b` (groq) | ✅ |
+| `LLM_MODEL_STRONG=gpt-4o` | **`gpt-4o`** | **`qwen/qwen3.8-27b`** (groq) | ❌ |
+| `LLM_MODEL=gpt-4o` (legacy) | **`gpt-4o`** | **`qwen/qwen3.8-27b`** (groq) | ❌ |
+| `GROQ_MODEL_STRONG=gpt-4o` | `qwen/qwen3.8-27b` | **`gpt-4o`** (groq) | ❌ |
+| both set | `gpt-4o` | `gpt-4o` (**groq**) | ✅ |
+
+The app resolves through `LLM_MODEL_STRONG`/`LLM_MODEL` (`model_tiers.py:34`); `provider_client` resolves
+through `GROQ_MODEL_STRONG`/`GROQ_MODEL_FAST` (`resolve_model_for_provider`, 134). Different env vars,
+different results, and the *deployed* one is whichever object was constructed — so `resolve_target()`'s
+answer describes a request the app is not making.
+
+### 16.8 The credential: every production path reads one key — measured
+
+```
+grep -rn "OPENAI_API_KEY\|ANTHROPIC_API_KEY" --include=*.py .   (non-test)
+  modules/model_tiers.py:111-112        <- the registry's names, used only by resolve_target
+```
+
+Every live constructor passes `GROQ_API_KEY`:
+
+| call site | key |
+|---|---|
+| `multi_agent.py:553` (`BaseAgent`) | `os.environ["GROQ_API_KEY"]` (+ Docker secret) |
+| `multi_agent.py:1414` (router) | `os.getenv("GROQ_API_KEY")` |
+| `llama_agent1.py:382/388` | `GROQ_API_KEY` |
+| `modules/doc_answers.py:686` | `GROQ_API_KEY` |
+| `modules/rag_optimizations.py` | caller-supplied, always the Groq key |
+| `evals/judge.py:122` | `GROQ_API_KEY` |
+
+Measured with both keys set:
+
+```
+GROQ_API_KEY=gsk_GROQ_ONLY   OPENAI_API_KEY=sk-OPENAI_ONLY
+GroqLLM(model="gpt-4o", api_key="gsk_GROQ_ONLY", provider="openai")
+  provider handed to build_client : openai
+  api_key  handed to the OpenAI SDK: gsk_GROQ_ONLY
+```
+
+`_PROVIDER_API_KEY_ENV` (`model_tiers.py:109`) exists, is exported through
+`provider_api_key_env` (147), is asserted by `tests/test_provider_client.py:93–99`, and **no production path
+calls it**. The multi-provider feature moves the vendor and not the credential: turning it on produces a 401
+from the second vendor, not a fallback.
+
+### 16.9 Findings
+
+| ID | Location | Finding |
+|---|---|---|
+| **F76** | `model_tiers.py:75` | **The fallback trigger is a substring match on `str(error)`.** Measured `True` for `Invalid 'timeout': must be > 0`, `connection_string is required`, `quota field missing in billing payload`, and for *document content* mentioning "rate limit". Signals as short as `429`/`413`/`not found` are ordinary English. |
+| **F77** | `multi_agent.py:567/587/980`, `doc_answers.py:359` | **Every call site hardcodes `should_fallback(e, "strong")`**, so after `llm_guard` has already downgraded a call to fast, a 429 triggers a "fast-tier" retry **on the fast tier again** — measured: same model, same request, immediately. |
+| **F78** | `multi_agent.py:590` + `agent_tools.py:445` | **The retry re-sends the entire conversation.** `run_tool_rounds` mutates the caller's list in place (measured 1 → 4 messages), so tool results survive (good) but the full input is paid twice: **1 553 + 1 560 = 3 113 input tokens** for one answer. Purity is documented for `fit_messages` and silently violated here. |
+| **F79** | `llm_guard.py:202` vs `model_tiers.py:75` | **Two functions read the same 429 and reach opposite conclusions.** `friendly_llm_error` distinguishes per-minute from per-day and says waiting will not help; `should_fallback` returns `True` for both and spends a full re-send on a cap that cannot clear. |
+| **F80** | `provider_client.py:73` + `model_tiers.py:116/152` | **The provider chain has no implementer.** `build_client` has no loop, `resolve_provider_chain` and `should_fallback_to_next_provider` have 0 non-test callers, and `LLM_PROVIDER_CHAIN` changes nothing — the provider is chosen once in `GroqLLM.__init__` and never revisited on error. The chain can also admit `anthropic`, which `build_client` refuses. |
+| **F81** | `model_tiers.py:34` vs `provider_client.py:134` | **Two tier-resolution systems disagree.** `LLM_MODEL_STRONG=gpt-4o` makes the app send `gpt-4o` while `resolve_target()` reports `qwen/qwen3.8-27b`; `GROQ_MODEL_STRONG=gpt-4o` makes them disagree the other way. Different env vars, one deployed. |
+| **F82** | `llama_agent1.py:247–256` + `multi_agent.py:553` | **The multi-provider keys are dead.** Every production constructor passes `GROQ_API_KEY`; measured, an OpenAI model receives the Groq key. `provider_api_key_env`/`resolve_target` are the only readers of `OPENAI_API_KEY`, and no production path calls them. |
+| **F83** | `llama_agent1.py:69–70, 253–256` + `621–627` | **Retry multiplication.** Eight independent retry layers (six in this repo, llama-index's `max_retries=3`, the SDK's `max_retries=2`) act on one request with no shared budget and no knowledge of each other. |
+
+### 16.10 Interview phrasing
+
+> *"The fallback chain is eight layers deep and none of them knows the others exist — six in our code,
+> llama-index's own retry, and the vendor SDK's. Each one is individually reasonable and together they
+> multiply. The trigger is a substring match on the error text, so `Invalid 'timeout': must be > 0` and a
+> document that talks about rate limiting both get a retry. Every call site hardcodes the literal `"strong"`,
+> so when the token guard has already silently downgraded a call to the fast model, a 429 retries on the fast
+> model — the same request, immediately, measured. And the retry re-sends the whole conversation: one 429
+> cost us 3 113 input tokens for an answer that needed about 1 560. The multi-provider story is worse than
+> unbuilt: the registry, the chain resolver and the per-provider key lookup all exist and are tested, the
+> provider actually moves, and the credential does not — so switching vendors gets you a 401, not a
+> fallback."*
+
+### 16.11 Redraw checklist
+
+1. Name the **eight** retry layers and say that none coordinates.
+2. Say how `should_fallback` decides, and give one false positive you measured.
+3. Say what tier the "retry on fast" actually runs on after a `llm_guard` downgrade — and why.
+4. Give the measured token cost of one 429 (1 553 + 1 560).
+5. Say why the tools are **not** re-run, and that correctness here rests on undocumented in-place mutation.
+6. Say what `friendly_llm_error` knows that `should_fallback` does not.
+7. Say what `LLM_PROVIDER_CHAIN` changes (nothing) and why.
+8. Say which credential an OpenAI model receives.
+
+### 16.12 Explain-back questions
+
+**Q8.** `should_fallback` returns `True` for `Invalid 'timeout': must be > 0`. Name the mechanism (not
+"the check is loose"), say where that trade is justified in the file, and give the cheapest fix that keeps
+the offline-testability the comment asks for.
+
+**Q9.** `llm_guard` downgrades a call to the fast model, the call 429s, and `_chat` retries. Say which model
+the retry uses, quote the line that decides it, and explain why the two modules cannot detect the mistake.
+
+**Q10.** A research run makes two tool calls on the strong tier, then 429s, then retries on fast. Say what
+the retry sends, why the tools do not run twice, and what it costs in input tokens. Name the two
+contradictory documented behaviours that make the good half accidental.
+
+**Q11.** One 429 arrives. Name the eight layers that may act on it, and say which two would have to be
+deleted for a *single* retry policy to be reproducible.
+
+**Q12.** `LLM_PROVIDER_CHAIN=groq,openai` is set in production and the key is exposed. Explain what happens
+to the next request after a Groq 429, with the measured call graph — and name the one line that would have
+prevented it.
