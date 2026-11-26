@@ -29,6 +29,10 @@ on:
         description: "Fail the job when a case regresses vs the baseline"
         type: boolean
         default: true
+      fail_on_floors:
+        description: "Fail the job when a run breaches an absolute floor (pass_rate < 55, fabrication > 12, coverage < 70), even with no regression"
+        type: boolean
+        default: true
       scope:
         description: "full = all 60 (~50 min) | smoke = 12 cases, all 9 categories (~5 min) | record = full + save a replayable recording"
         type: choice
@@ -217,8 +221,20 @@ jobs:
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.fail_on_regression }}" = "true" ]; then
             FAIL_FLAG="--fail-on-regression"
           fi
+          # The floor is the second question. --fail-on-regression asks "is this
+          # worse than yesterday?"; --fail-on-floors asks "is this acceptable at
+          # all?". Between 2026-11-14 and 11-26 the nightly was green thirteen
+          # nights running while the fabrication rate doubled, because no single
+          # step was a regression. See docs/DRIFT_FINDING.md.
+          #
+          # Armed on the schedule, and opt-out on a manual run so a floor never
+          # blocks someone deliberately reproducing a known-bad baseline.
+          FLOOR_FLAG=""
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.fail_on_floors }}" = "true" ]; then
+            FLOOR_FLAG="--fail-on-floors"
+          fi
           set +e
-          python -m evals.run --compare eval-yesterday.json eval-today.json $FAIL_FLAG
+          python -m evals.run --compare eval-yesterday.json eval-today.json $FAIL_FLAG $FLOOR_FLAG
           STATUS=$?
           # Exit 1 means a real regression and is already reported by the table
           # above; anything else (argparse usage error = 2) is a bug in this
