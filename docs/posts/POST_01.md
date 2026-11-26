@@ -1,8 +1,13 @@
 # Post 1 — the text, ready to publish
 
-**Area:** eval. **Series position:** 1 of 7. **Asset:** `docs/posts/img/number_trail_chart.png`
-(already exists — but see *Before you post* below; the caption was fixed and the image
-was already correct).
+**Area:** eval. **Series position:** 1 of 7.
+**Asset:** `docs/posts/img/post01-two-denominators-dark.png` — dark, minimal, and it shows
+the one idea this post is about (two denominators for the same run). Regenerate with
+`python scripts/make_post_chart.py`.
+
+`docs/posts/img/number_trail_chart.png` also exists and is correct, but it is a seven-run
+trend chart — it answers "how did the suite move over time", which is not this post's story.
+Use it for a later post, not this one.
 
 Every number below was re-derived from `docs/EVAL_FINDINGS.md` and the test that
 pins it, in the same session as writing this. The arithmetic is written out so it
