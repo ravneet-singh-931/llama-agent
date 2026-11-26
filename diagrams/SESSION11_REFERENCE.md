@@ -299,10 +299,21 @@ The server's own docstring says it plainly:
 `asyncio.wait_for` cancels the **client** coroutine. The server-side agent has already been handed to
 `_tool_executor` (`max_workers=4`, line 98) and runs to completion. So:
 
-**3 timeouts × 4 workers = up to 12 orphaned LLM-backed agents** still burning tokens after the circuit
-breaker has already opened and started returning `503` to new callers.
+**Correction to my own hour-2 statement.** I wrote "3 timeouts × 4 workers = 12 orphaned agents".
+That arithmetic is wrong: `_run_with_timeout` is called **once per tool call** (`mcp_agents_server.py:149`,
+159), so each cancelled request submits exactly **one** task. `max_workers=4` means at most **4** run
+concurrently — a 5th submits to a queue and does not create a thread.
 
-That is the exact scenario the breaker was written to prevent, and it cannot see the work.
+**The true statement is worse than 12, not smaller.** `ThreadPoolExecutor`'s work queue is
+**unbounded** (`SimpleQueue`), so every request cancelled at 25 s leaves its task **queued**, and each
+queued task still runs to completion when a worker frees up:
+
+> In-flight work is bounded at **4 concurrent**, with an **unbounded queue** behind it. The orphan
+> population is therefore `4 + k`, where `k` is however many requests arrived before the breaker
+> opened — not a fixed 12.
+
+That is the exact scenario the breaker was written to prevent, and it cannot see the work: it counts
+failures *observed*, never tasks *admitted*.
 
 ### The breaker itself is correct
 
@@ -337,7 +348,7 @@ the F43 cross-tenant read *and* makes several of its tools decorative.
 | ID | Location | Finding |
 |---|---|---|
 | **F50** | `api.py:173` vs `mcp_agents_server.py:97` vs `modules/mcp_client.py:35` | Timeout stack inverted: **25 < 120 < 300**. The API deadline is the shortest, so both inner timeouts are unobservable and the server's user-facing timeout message is dead code. |
-| **F51** | `mcp_agents_server.py:121` + `api.py:2880` | `asyncio.wait_for` cancels the client, not the agent. After 3 cancellations the breaker opens, but up to `3 × max_workers(4) = 12` orphaned agents keep running and spending. The breaker does not bound work-in-flight. |
+| **F51** | `mcp_agents_server.py:121` + `api.py:2880` | `asyncio.wait_for` cancels the client, not the agent. **4 concurrent** orphaned agents plus an **unbounded queue** of not-yet-started tasks keep running and spending after the breaker opens. The breaker counts failures observed, never tasks admitted. |
 | **F52** | `mcp_agents_server.py:299` | `team_status` builds a fresh orchestrator per call, so `task_history` is always `[]`; the tool's advertised purpose (task counts) is unimplementable in this design. |
 | **F53** | `mcp_agents_server.py:86` | Worth recording as a **positive**: per-call orchestrator construction is what prevents the F43 cross-tenant document read from reaching the MCP server. Statelessness is the control. |
 
