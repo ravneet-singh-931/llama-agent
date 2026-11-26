@@ -202,8 +202,11 @@ def headline(rows: List[Dict[str, Any]]) -> str:
         "- Whether the code changed. A prompt or check edit moves these numbers "
         "with no app change at all -- that is what `evidence_fingerprint` "
         "guards, and it is not in the summary.",
-        "- Anything at all if the run was not graded. A `pass_rate` below 90% "
-        "coverage is not a quality score; check the cov% column first.",
+        "- Whether a run was graded enough to quote. `completeness_pct` under "
+        "90 makes the report `inconclusive` UNLESS the only categories lost are "
+        "the ones `order_by_cost()` runs last -- a tail loss is a real sample, "
+        "an outage is not. Below 70% it is always inconclusive "
+        "(`evals/run.py:707-731`). Read the cov% column before any pass rate.",
     ]
     return "\n".join(lines)
 
