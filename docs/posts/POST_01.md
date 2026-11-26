@@ -1,9 +1,12 @@
 # Post 1 — the text, ready to publish
 
 **Area:** eval. **Series position:** 1 of 7.
-**Asset:** `docs/posts/img/post01-two-denominators-dark.png` — dark, minimal, and it shows
-the one idea this post is about (two denominators for the same run). Regenerate with
-`python scripts/make_post_chart.py`.
+**Asset (use this one):** `docs/posts/img/post01-grid-dark.png` — the 60-square grid, dark.
+Green = passed (21), red = failed (8), grey = never ran (31). The reader can COUNT the
+denominator instead of being told it, which is the whole argument. Regenerate with
+`python scripts/make_post_grid.py`.
+
+Also available: `post01-two-denominators-dark.png` (two-card version, `scripts/make_post_chart.py`).
 
 `docs/posts/img/number_trail_chart.png` also exists and is correct, but it is a seven-run
 trend chart — it answers "how did the suite move over time", which is not this post's story.
@@ -47,12 +50,21 @@ can be checked in ten seconds.
 >
 > What I changed:
 >
-> Below 90% coverage the report now **refuses to print a pass rate**. It prints
-> `INCONCLUSIVE — only 29/60 cases ran`, gives the rate among cases that ran, and
-> exits with code 3 — so it is neither a green tick nor a red build.
+> **The report now looks at *which* cases are missing, not just how many.**
+>
+> • **Tail loss** — if the only thing missing is the category I deliberately run
+>   last (it is the expensive one), the report still gives a rate, but it *names
+>   the gap*: `no result for @team`. You get a number back, and you are not allowed
+>   to quote it as if it covered the thing that did not run.
+>
+> • **Spread loss** — if misses are spread across categories, or more than 30% of
+>   the suite never ran, the report is `INCONCLUSIVE`. No headline pass rate at
+>   all. It prints `only 29/60 ran`, gives the rate among cases that did, and
+>   exits with code 3 — so it is neither a green tick nor a red build.
 >
 > There is a test that replays this exact run — 21 passed, 31 ungraded, 8 failed —
-> and asserts it reports 72.4% and never 35%.
+> it checks the report is marked INCONCLUSIVE, that the headline number is 72.4%,
+> and that **35% is still there, demoted rather than deleted.**
 >
 > **The rule I took from it: any rate is a rate over whatever survived. If you
 > cannot see the denominator, you do not have a number. You have a headline.**
