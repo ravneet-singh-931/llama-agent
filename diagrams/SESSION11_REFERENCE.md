@@ -121,6 +121,18 @@ tool-call turns out of the history entirely.
 **So the total worst case is 4 tool rounds + 1 wrap-up + 1 retry = 6 LLM calls**, and the user gets an
 answer either way. The bound is a *degradation ladder*, not a wall.
 
+<<<<<<< HEAD
+=======
+**Correction (Session 11, hour 2).** The wrap-up above belongs to `run_tool_loop` (620). The
+**streaming** path does not call it — `BaseAgent._stream_with_tools` calls `run_tool_rounds` **directly**
+(`multi_agent.py:972`), which returns `final_content=None` and no wrap-up. The streaming path then runs
+its **own** wrap-up at `multi_agent.py:1064` with its own `WRAP_UP_INSTRUCTION`, and independently
+degrades to a plain non-tool stream when both tool-loop attempts raise (1005). So there are **two**
+wrap-up implementations and the "6 LLM calls" figure applies to the **non-streaming** route only. That
+is a duplicated policy, and duplicated policy rots independently — exactly the failure mode the
+`run_sources` docstring warns about (*"Two gates for one rule is how they drift apart"*).
+
+>>>>>>> 2da4157 (docs: S11 correction - two wrap-up implementations (run_tool_loop:620 vs _stream_with_tools:1064); 6-call figure is non-streaming only)
 ---
 
 ## §3 The tenant hole — measured
