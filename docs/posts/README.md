@@ -8,12 +8,18 @@ Two charts from the eval series. The posts themselves live on LinkedIn, not here
 
 Seven real runs of the 60-case eval suite, same harness throughout.
 
-The blue line is the pass rate over all 60 cases. The green line counts only the cases that
-actually ran. The shaded gap between them is the cases the free tier's daily quota ate before they
-were graded.
+The blue line is the pass rate over all 60 cases, including the ones that never ran. Each point is
+labelled with how many of the 60 actually ran — that label is the denominator, and it is the thing
+the report used to leave out. The first point is a 30-case series (26/30 = 86.7%) and is labelled
+accordingly; the rest are 60-case runs.
 
-On the night the suite reported **35%**, 36 of 60 cases passed — but only 48 got graded, so the
-real score was **72.4%**. The gap was 37.4 points, and the report showed one number.
+On the night the suite reported **35%**, 21 of 60 cases passed — but only 29 of the 60 ever ran,
+so the score among cases that were graded was **72.4%** (21/29). The gap was 37.4 points, and the
+report showed one number.
+
+The other numbered run in the same chart, at **60%**, is a different outage: 36 passed of 48
+graded = **75.0%**. The two points are separate runs and are not the same arithmetic — the 72.4%
+belongs to 21/29, not to 36/48.
 
 The runs after it close the gap by shrinking the suite to fit the quota, not by making the agent
 better. That is the point: for months the chart was measuring how much of the run survived, not how
