@@ -1208,3 +1208,121 @@ The genuinely behavioural three: `safety-english-code` **3.0** and `adversarial-
 The arithmetic, because it is easy to get wrong and I did: 76.7% is the **raw** rate, 46 passed
 out of all **60** cases, with the three refused cases counted as not passed. Among the 57 that
 were graded it is **80.7%**. Both are in the report; the raw one is the conservative one.
+
+---
+
+## FINDING 20 — Thirteen green nights in a row, and the thing got worse
+
+**This one is different from the other nineteen.** Every finding above was found by
+reading code or re-running a case. This one was found by **looking at the history**
+— and the history was about to be deleted.
+
+### What I did
+
+The nightly uploads `eval-today.json` as a build artifact. Artifacts are kept for
+**30 days**. So the record of every night is thrown away a month later, and the
+only comparison that ever happens is *today against the night before*.
+
+I downloaded all 21 reports that still existed and put them in one table. That had
+never been done. Two scripts do it: `scripts/collect_nightly_reports.sh` fetches
+them, `scripts/nightly_trend.py` tabulates them.
+
+### What the table showed
+
+Thirteen scheduled runs from 2026-11-14 to 2026-11-26, all 60 cases:
+
+| | first 4 runs | last 4 runs |
+|---|---|---|
+| pass rate | 65.0 | 64.2 |
+| **fabrication flagged** | **6.88%** | **12.93%** |
+| grounding rate | 0.52 | 0.31 |
+
+Counting runs instead of averaging, because an average over 13 nights can be moved
+by two unlucky ones:
+
+| | first 6 runs | last 6 runs |
+|---|---|---|
+| runs with fabrication ≥ 10% | **1 of 6** | **3 of 6** |
+| runs with pass rate ≥ 70 | 3 of 6 | 2 of 6 |
+
+**Every single one of those thirteen runs was green.**
+
+### Why the gate could not see it
+
+`compare()` answers one question: *is this run worse than the last one?* It has no
+idea what "acceptable" means. `evals/run.py:927` is the whole test:
+
+```python
+_pass_rate_down = _pr.get("delta") is not None and _pr["delta"] < 0
+```
+
+A delta. Always a delta. Now look at the actual night-to-night steps:
+
+```
+6.2 → 11.1 → 4.2 → 6.0 → 8.0 → 4.8 → 4.0 → 9.6 → 8.7 → 14.9 → 13.7 → 8.2 → 14.9
+```
+
+The biggest single jump is **+6.6 points**. Nothing in that list is a regression.
+Three of them, added together, are a doubling.
+
+**This is finding 19 with the sign flipped.** Finding 19 was a *false alarm*: the
+best run the suite ever had was called a regression. This is a *missed alarm*: a
+real decline that the same rule cannot express. One rule, two ways to be wrong.
+
+### The fix — a floor, not a slope
+
+I added `FLOORS` and `check_floors()` to `evals/run.py`, plus a `--fail-on-floors`
+flag. It asks the other question: *is this run acceptable on its own numbers?*
+
+| floor | value | why that number |
+|---|---|---|
+| `pass_rate ≥ 55` | fires below | 55 sits under the observed 45–78 range; it fires on 11-15 and nothing else |
+| `fabrication_rate ≤ 12` | fires above | fires on 11-23, 11-24, 11-26 — the three nights the drift was already visible |
+| `completeness ≥ 70` | fires below | not invented here: `summarize()` already uses 70 for "massive" loss |
+
+On the real series, the floor fires on **4 of 13 runs**. That ratio is the point.
+A floor tight enough to fail most nights gets switched off within a week, and a
+switch-off floor reads as coverage when it is nothing of the kind.
+
+It is armed on the schedule and opt-out on a manual run, so nobody reproducing a
+known-bad baseline gets blocked by it.
+
+### The five caveats, all of which are load-bearing
+
+1. **The judge is not validated against people.** `fabrication_rate` is *the
+   judge's* flag rate. A judge that slowly changed its mind would produce this
+   exact table with no change in the app. I cannot rule that out from this data.
+2. **A figure appearing in a source is not the same as the source supporting it.**
+   The judge checks membership, not meaning (see `RAG_FINDINGS.md`). A rising flag
+   rate could be more figures, not more false ones.
+3. **n = 13.** 3-of-6 against 1-of-6 is a reason to look, not a proof.
+4. **Not one run reached 90% coverage.** The range was 60–86.7%. They are quotable
+   only because what was lost is the tail — and the tail is `@team`, the expensive
+   category. **The category that is always missing is the one nobody has a trend
+   for.**
+5. **11-23 contradicts the simple story and is included for that reason.** It has
+   the best grounding of all thirteen (0.74) and the worst fabrication (14.9%). If
+   those were two views of one thing, that row could not exist.
+
+### What it is not
+
+- Not a claim the app broke on 11-23. Between 11-15 and 11-22 the only merge to
+  `main` was **PR #53, docs only** ("no code changed").
+- Not a claim the judge is wrong. It is a claim that **nobody knows**, and that the
+  data is consistent with the instrument drifting.
+- Not a new finding about the code. It is a finding about **the measuring
+  instrument** — the same class as the nine in `OBSERVABILITY_FINDINGS.md`, where a
+  control reported health while the system was not healthy.
+
+### The lesson, in one sentence
+
+> **A gate that only compares itself to yesterday can tell you that you slipped
+> today. It cannot tell you that you have been slipping for two weeks.**
+
+And the second lesson, which is about process rather than code:
+
+> **A metric whose history expires in 30 days is not a metric. It is a
+> notification.**
+
+Full write-up: `docs/DRIFT_FINDING.md`. Reproduce:
+`bash scripts/collect_nightly_reports.sh 40 reports && python scripts/nightly_trend.py reports/`

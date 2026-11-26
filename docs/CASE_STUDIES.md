@@ -15,7 +15,7 @@ different kinds of wrong.
 
 | Part | Document | Findings | The headline number |
 |---|---|---|---|
-| **1. Measurement** | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | 20 | the suite published **35%** when the real figure was **72.4%** |
+| **1. Measurement** | [`EVAL_FINDINGS.md`](EVAL_FINDINGS.md) | 21 | the suite published **35%** when the real figure was **72.4%** |
 | **2. The agents** | [`AGENT_FINDINGS.md`](AGENT_FINDINGS.md) | 5 fixed, 4 open | a team step hung for **309 s** against a 300 s limit |
 | **3. Observability** | [`OBSERVABILITY_FINDINGS.md`](OBSERVABILITY_FINDINGS.md) | 4 | a 2.0 s stream measured as **0.002 s** |
 | **4. RAG** | [`RAG_FINDINGS.md`](RAG_FINDINGS.md) | 6 | the "cross-encoder reranker" was keyword overlap |
@@ -124,7 +124,7 @@ configured, and the configuration was wrong.**
 
 | Part | What was actually wrong |
 |---|---|
-| Measurement | guards attached one level too low |
+| Measurement | guards attached one level too low — and a gate that only compares to yesterday |
 | Agents | agents answering without the input they needed |
 | Observability | the instrument reporting a true number about the wrong thing |
 | RAG | quality features that reported success while doing nothing |

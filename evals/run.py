@@ -869,6 +869,71 @@ def _category_row(cat: str, v: Dict) -> str:
     return f"| {cat} | {v['cases']} | {v['pass_rate_graded']} (of {graded} that ran) |"
 
 
+# Absolute floors, not deltas.
+#
+# compare() answers "did this run get worse than the last one?". That is not the
+# same question as "is this run acceptable?", and the nightly only ever asked the
+# first. On 2026-11-14..11-26 the fabrication rate went 6.9% -> 12.9% over
+# thirteen consecutive green runs: the largest single-step move was +6.6 points,
+# so no individual night counted as a regression and the gate never fired. A gate
+# that only measures movement cannot see a slope.
+#
+# The floors below are deliberately loose. A floor that is tight enough to fail a
+# noisy suite is a floor that gets switched off, and a floor that gets switched
+# off is worse than no floor -- it reads as coverage. These numbers are set where
+# a single run is worth stopping for, not where a single run is worth reading.
+FLOORS = {
+    # A run where fewer than this share of cases passed is not a good answer,
+    # whatever yesterday was. 55 sits below the observed 45-78 range: it fires on
+    # 2026-11-15 (45.0) and on nothing else in the window.
+    "pass_rate": {"min": 55.0},
+    # Above this share of judged cases flagged as fabricated. 12 fires on 11-23,
+    # 11-24 and 11-26 -- the three nights the drift was visible, ten days before
+    # a delta gate could have said so.
+    "fabrication_rate": {"max": 12.0},
+    # Below this coverage the pass rate is not a quality score at all. This is the
+    # same 70 that summarize() already uses for "massive" loss (line 730); using
+    # one number in two places is the point.
+    "completeness_pct": {"min": 70.0},
+}
+
+
+def check_floors(summary: Dict) -> Dict:
+    """Compare one run against absolute floors. No other run involved.
+
+    Returns {"checked": [...], "breached": [...], "ok": bool, "skipped": [...]}.
+
+    A floor whose metric is absent is REPORTED as skipped, never as passed. That
+    is the same rule as the rest of this file: absent means unknown, not equal.
+    """
+    breached: List[Dict] = []
+    skipped: List[str] = []
+    checked: List[str] = []
+
+    for key, bound in FLOORS.items():
+        value = summary.get(key)
+        if value is None:
+            skipped.append(f"{key} (not reported)")
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            skipped.append(f"{key} (not a number: {value!r})")
+            continue
+        checked.append(key)
+        if "min" in bound and value < bound["min"]:
+            breached.append({
+                "metric": key, "value": value, "min": bound["min"],
+                "why": f"{value} is below the floor of {bound['min']}",
+            })
+        if "max" in bound and value > bound["max"]:
+            breached.append({
+                "metric": key, "value": value, "max": bound["max"],
+                "why": f"{value} is above the ceiling of {bound['max']}",
+            })
+
+    return {"checked": checked, "breached": breached,
+            "ok": not breached, "skipped": skipped}
+
+
 def compare(old: Dict, new: Dict) -> Dict:
     """Metric deltas + cases that flipped between two report files."""
     so, sn = old["summary"], new["summary"]
@@ -1036,6 +1101,12 @@ def compare(old: Dict, new: Dict) -> Dict:
             "incomparable": incompatible,
             "cases": {"old": old_n, "new": new_n},
             "regressed_flips_raw": _flips,
+            # The floors are computed from the NEW report only. They are here so
+            # that the one document a reader sees contains both questions:
+            # "did it move?" (metrics/regression) and "is it acceptable?"
+            # (floors). A report that answers only the first is the report that
+            # missed the eleven-week drift.
+            "floors": check_floors(sn),
             "category_signal": significant,
             "categories_up": _up,
             "categories_down": _down,
@@ -1087,6 +1158,20 @@ def render_compare(diff: Dict) -> str:
                 for c in ignored)
             lines.append(f"Negative categories NOT counted as regressions "
                          f"(too few cases, or inside the noise band): {detail}")
+    floors = diff.get("floors") or {}
+    if floors:
+        if floors.get("breached"):
+            lines += ["", "**Absolute floors breached** -- this run is not "
+                          "acceptable on its own numbers, whatever the delta says:"]
+            for b in floors["breached"]:
+                lines.append(f"- {b['why']}")
+        elif floors.get("ok") and floors.get("checked"):
+            lines.append("")
+            lines.append(f"Floors: ok ({', '.join(floors['checked'])}). "
+                         "No absolute threshold crossed.")
+    if floors.get("skipped"):
+        # A floor that could not be evaluated is not a floor that passed.
+        lines.append("Floors NOT evaluated: " + ", ".join(floors["skipped"]))
     if diff.get("newly_not_graded"):
         lines.append(f"Newly NOT GRADED: {diff['newly_not_graded']}")
     if diff.get("check_failure_delta"):
@@ -1234,7 +1319,11 @@ def preflight(cases: List[Dict], already_used: int = 0) -> Dict:
     }
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI parser, extracted from main() so tests can read the defaults.
+
+    A default that no test can see is a default that changes by accident.
+    """
     ap = argparse.ArgumentParser(description="Run the Llama Agent evaluation suite.")
     ap.add_argument("--dataset", default=DATASET)
     ap.add_argument("--ids", nargs="*")
@@ -1253,6 +1342,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--compare", nargs=2, metavar=("OLD", "NEW"),
                     help="compare two report files instead of running")
     ap.add_argument("--fail-on-regression", action="store_true")
+    ap.add_argument("--fail-on-floors", action="store_true",
+                    help="fail (exit 1) when a run breaches an absolute floor, "
+                         "even if it did not regress against the previous run")
     ap.add_argument("--selftest", action="store_true",
                     help="exercise every check against synthetic answers, no API calls")
     ap.add_argument("--force", action="store_true",
@@ -1261,6 +1353,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="record every model and tool call to DIR (spends quota once)")
     ap.add_argument("--replay", metavar="DIR",
                     help="replay a recorded run from DIR: no provider calls, no quota")
+
+    return ap
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = build_parser()
     args = ap.parse_args(argv)
 
     if args.compare:
@@ -1282,7 +1380,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         # keeps the flag so this stays checkable rather than implied.
         if (diff.get("coverage") or {}).get("inconclusive"):
             return 0
-        return 1 if (args.fail_on_regression and diff["regression"]) else 0
+        floors_failed = bool(args.fail_on_floors
+                             and (diff.get("floors") or {}).get("breached"))
+        # Both reasons are reported, separately. "It regressed" and "it is below
+        # the floor" are different facts and a reader is entitled to know which
+        # one turned the build red -- a single boolean here would repeat the
+        # finding-19 mistake of collapsing two questions into one exit code.
+        if diff.get("floors", {}).get("breached"):
+            print(f"::warning title=Absolute floor breached::"
+                  f"{'; '.join(b['why'] for b in diff['floors']['breached'])}")
+        return 1 if ((args.fail_on_regression and diff["regression"])
+                     or floors_failed) else 0
 
     if args.selftest:
         return _selftest(load_cases(args.dataset, args.ids, args.categories,
