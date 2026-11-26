@@ -259,11 +259,87 @@ tools read the same globally-bound, unscoped store.
 | ID | Location | Finding |
 |---|---|---|
 | **F43** | `api.py:1673` `chat()` | **The non-streaming `/chat` route never calls `bind_owner`** (0 occurrences in 1673–1877) while reaching the agent tool loop. Measured: `get_owner() == None` ⇒ `scoped()` returns the raw store ⇒ `list_uploaded_documents()` returns **every tenant's** files and `read_uploaded_document("alice_private.pdf")` returns Alice's content to an unbound request. `/chat/stream` (1921) and `/ws` (1220) bind correctly, so the fix is one line in the wrong place rather than a design flaw. |
-| **F44** | `tests/test_agent_tools.py:28` | The suite is **structurally unable** to catch F43: every fixture document is added with `source=` and **no `owner=`**, and no test binds an owner. `grep owner` → 0 hits. A two-tenant fixture is the missing test. |
+| **F44** | `tests/test_agent_tools.py:25` | The suite is **structurally unable** to catch F43: every fixture document is added with `source=` and **no `owner=`**, and no test binds an owner. `grep owner` → 0 hits. A two-tenant fixture is the missing test. |
 | **F45** | `modules/agent_tools.py:69` `_current_store` | Fail-open by construction: an unbound owner is treated as "no scoping" rather than "no access". Correct for a CLI/standalone path, catastrophic for an HTTP path that forgot to bind. Same class as S6's `{"owner": ""}` finding. |
 | **F46** | `mcp_agents_server.py:136` | MCP tools take `(task: str)` only — identity is authenticated at `/mcp/tools` (2856) then dropped. Every MCP agent therefore reads the globally-bound store. |
 | **F47** | `modules/agent_tools.py:45` | `_MAX_IDENTICAL_CALLS = 2` permits **one** retry, not two (`seen[key] > 2` refuses the 3rd). Correct and intentional per the comment, but the variable name reads as "two calls allowed". |
 | **F48** | `modules/web_tools.py:67` | SSRF guard resolves the hostname, then `_http_get` resolves it **again** — a TOCTOU rebinding window. And unresolvable hosts return `False` (allow), so the guard is fail-open by design. |
+
+---
+
+## §6b The MCP surface (hour 2)
+
+### The transport, correctly implemented
+
+`modules/mcp_client.py` is a textbook MCP SSE client: `GET /sse` opens the event stream,
+`POST /messages/?session_id=…` carries JSON-RPC (`initialize`, `notifications/initialized`,
+`tools/list`, `tools/call`), responses return on the stream. `call_mcp_tool` (82) joins every text block
+and reports `isError`. No shortcuts, no hand-rolled framing.
+
+### **The timeout stack is inverted — the outermost deadline is the shortest**
+
+| Layer | Variable | Value | Where |
+|---|---|---|---|
+| REST → MCP client | `MCP_TIMEOUT` | **25 s** | `api.py:173`, `asyncio.wait_for` |
+| MCP client → server | `SSE_READ_TIMEOUT` | **300 s** | `modules/mcp_client.py:35` |
+| server, inside the tool | `MCP_TOOL_TIMEOUT` | **120 s** | `mcp_agents_server.py:97`, `fut.result(timeout=…)` |
+
+Measured ordering: **25 < 120 < 300**. Every single call that exceeds 25 s is cancelled by the API
+first, so the two inner numbers can never be observed. The 120 s backstop produces a user-facing
+*"The request timed out, please try a shorter task"* — **a message that can never reach anyone**, because
+the caller gave up 95 seconds earlier and returns `504 MCP tool call timed out` instead.
+
+### And cancellation does not stop the work
+
+The server's own docstring says it plainly:
+
+> *"The submitted task keeps running until the underlying call finishes (the Groq SDK has its own
+> timeout), so this is a backstop, not a hard cancel."* — `mcp_agents_server.py:121`
+
+`asyncio.wait_for` cancels the **client** coroutine. The server-side agent has already been handed to
+`_tool_executor` (`max_workers=4`, line 98) and runs to completion. So:
+
+**3 timeouts × 4 workers = up to 12 orphaned LLM-backed agents** still burning tokens after the circuit
+breaker has already opened and started returning `503` to new callers.
+
+That is the exact scenario the breaker was written to prevent, and it cannot see the work.
+
+### The breaker itself is correct
+
+```python
+MCP_FAILURE_THRESHOLD = 3
+MCP_CIRCUIT_COOLDOWN  = 30.0
+_mcp_record_failure(): _MCP_FAILURES += 1; if >= 3: open for 30 s; reset counter
+_mcp_record_success(): _MCP_FAILURES = 0
+```
+
+Standard three-state behaviour, per-process module globals (`api.py:185`), no state sharing between
+replicas — acceptable for a per-pod breaker, worth stating as a known limitation.
+
+### **The F46 thread, pulled**
+
+Identity is authenticated at `/mcp/tools` (`get_current_user`, 2857) and then **dropped**: every MCP
+tool is `(task: str) -> str`, and `_orchestrator()` (88) builds a fresh `MultiAgentOrchestrator()` per
+call. Consequences, in order of severity:
+
+| What | Effect | Where |
+|---|---|---|
+| **Statelessness is actually the defence** | A fresh orchestrator per call means no task history crosses callers — this is *why* F43 does not reach the MCP server | `mcp_agents_server.py:86` |
+| **Documents are empty, not leaked** | `mcp-server` is a separate container; `api.py` never runs there, so `multi_agent.py:89` binds `SimpleRAG()` — an **empty in-process store**. Document tools return "No documents have been uploaded yet." | `multi_agent.py:89` |
+| **`team_status` can only ever report 0** | `_orchestrator().get_team_status()` (299) builds a brand-new orchestrator whose `task_history` is `[]` (`multi_agent.py:1379`) and discards it. A tool whose entire purpose is *"how many tasks has each agent handled"*, structurally incapable of counting. | `mcp_agents_server.py:299` |
+| **No facts, no rate limiting** | `grep facts` → 0, `grep rate_limit` → 0 in the MCP server | — |
+
+So the F46 answer is a genuine **shape change**: the MCP server is stateless, which makes it immune to
+the F43 cross-tenant read *and* makes several of its tools decorative.
+
+### Findings
+
+| ID | Location | Finding |
+|---|---|---|
+| **F50** | `api.py:173` vs `mcp_agents_server.py:97` vs `modules/mcp_client.py:35` | Timeout stack inverted: **25 < 120 < 300**. The API deadline is the shortest, so both inner timeouts are unobservable and the server's user-facing timeout message is dead code. |
+| **F51** | `mcp_agents_server.py:121` + `api.py:2880` | `asyncio.wait_for` cancels the client, not the agent. After 3 cancellations the breaker opens, but up to `3 × max_workers(4) = 12` orphaned agents keep running and spending. The breaker does not bound work-in-flight. |
+| **F52** | `mcp_agents_server.py:299` | `team_status` builds a fresh orchestrator per call, so `task_history` is always `[]`; the tool's advertised purpose (task counts) is unimplementable in this design. |
+| **F53** | `mcp_agents_server.py:86` | Worth recording as a **positive**: per-call orchestrator construction is what prevents the F43 cross-tenant document read from reaching the MCP server. Statelessness is the control. |
 
 ---
 
