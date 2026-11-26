@@ -33,11 +33,11 @@ from matplotlib.patches import FancyBboxPatch  # noqa: E402
 
 BG = "#0d1117"
 INK = "#e6edf3"
-MUTED = "#8b949e"
-FAINT = "#484f58"
+MUTED = "#adbac7"
+FAINT = "#8b949e"
 GREEN = "#3fb950"
 RED = "#f85149"
-GREY = "#30363d"
+GREY = "#5a6472"
 RULE = "#21262d"
 
 COLS, ROWS = 10, 6
@@ -70,7 +70,7 @@ def build(outdir: str) -> str:
         x = x0 + col * (cell + gap)
         y = y0 + (ROWS - 1 - row) * (cell + gap)
         face = {"pass": GREEN, "fail": RED, "none": GREY}[kind]
-        edge = "none" if kind != "none" else "#3d444d"
+        edge = "none" if kind != "none" else "#6e7b8b"
         ax.add_patch(FancyBboxPatch((x, y), cell, cell,
                                     boxstyle="round,pad=0,rounding_size=0.045",
                                     facecolor=face, edgecolor=edge,
