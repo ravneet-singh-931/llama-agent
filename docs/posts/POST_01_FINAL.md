@@ -25,11 +25,11 @@ The clue was right there in the same report: median response time had dropped fr
 
 Here is how I fixed it:
 
-• **Below 90% coverage:** The report refuses to print a headline pass rate. It says "INCONCLUSIVE, only 29/60 ran" and shows the rate among the questions that did. (The only exception is if the missing items belong to a category I deliberately run last—then it names the gap and reports anyway.)
+• **Below 90% coverage:** The report refuses to print a headline pass rate. It says "INCONCLUSIVE, only 29/60 ran"—that's the run in the chart—and shows the rate among the questions that did: 72.4%. (The one exception: if every missing question sits in the category I deliberately run last, it names the gap and still reports.)
 
-• **Below 70% coverage:** It refuses outright.
+• **Below 70% coverage:** It is INCONCLUSIVE no matter what—no exemption can save it—and the run trips a hard completeness floor, so it can never be read as a quality score by accident.
 
-• **Regression test:** I added a test that replays that exact night. It checks that the report is marked INCONCLUSIVE, the headline number is 72.4%, and the 35% is still there—demoted, not deleted.
+• **Regression test:** I added a test that replays that exact night. It checks that the report is marked INCONCLUSIVE, that the graded rate is 72.4%, and that the raw 35% is still computed—demoted, not deleted.
 
 Every percentage is a rate over whatever survived the run. If you can't see the denominator, you don't have a number.
 
